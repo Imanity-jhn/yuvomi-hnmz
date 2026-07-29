@@ -133,7 +133,7 @@ docker ps --filter name=yuvomi-hnmz-dev
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3008/health
 ```
 
-Après changement de `package.json` / lockfile : `docker compose -f docker-compose.dev.yml up -d --build` (rafraîchit le volume `node_modules`).
+Après changement de `package.json` / lockfile : `docker build -f Dockerfile.dev -t yuvomi-hnmz-dev:local .` puis `docker compose -f docker-compose.dev.yml up -d` (rafraîchit aussi le volume `node_modules` au prochain recreate si besoin : `docker compose -f docker-compose.dev.yml down -v` **uniquement** pour le volume named du fork, jamais la prod).
 
 ## Compose prod-like (sans hot reload)
 
