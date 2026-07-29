@@ -1,8 +1,6 @@
-# Déploiement Unraid — yuvomi-hnmz
+# Unraid — yuvomi-hnmz (code & git uniquement)
 
 ## Accès SSH
-
-Depuis le PC Windows Imanity (`~/.ssh/config`) :
 
 ```
 Host unraid
@@ -11,25 +9,26 @@ Host unraid
     IdentityFile C:/Users/Imanity/.ssh/id_ed25519
 ```
 
-Connexion :
-
-```powershell
+```bash
 ssh unraid
+# ou : ssh root@192.168.50.2
 ```
 
 ## Chemins
 
-| Rôle | Chemin |
-|------|--------|
-| Clone du fork (code) | `/mnt/user/yuvomi-hnmz` |
-| Données instance Docker existante (image officielle) | `/mnt/user/appdata/yuvomi` |
-| Template Unraid actuel | `/boot/config/plugins/dockerMan/templates-user/my-Yuvomi.xml` (port hôte **3007**) |
+| Rôle | Chemin | Action |
+|------|--------|--------|
+| Clone du fork (code / git) | `/mnt/user/yuvomi-hnmz` | OK — travail ici |
+| Données prod Yuvomi | `/mnt/user/appdata/yuvomi` | **INTERDIT** |
+| Template Docker prod | `/boot/config/plugins/dockerMan/templates-user/my-Yuvomi.xml` (port hôte **3007**) | **INTERDIT** |
 
-> L'instance Docker **Yuvomi** déjà en prod utilise `ghcr.io/ulsklyc/yuvomi:latest` et le port hôte **3007**. Ne pas la casser. Pour tester le fork, utiliser un autre port (ex. **3008**) et un autre répertoire de données.
+## Garde-fous (strict)
 
-## Clone / remotes sur le serveur
+- **Ne jamais toucher la prod** : container `Yuvomi`, port hôte **3007**, `/mnt/user/appdata/yuvomi`, image `ghcr.io/ulsklyc/yuvomi` (ou équivalent officiel).
+- **Pas de runtime fork pour l’instant** : ne pas lancer `docker compose` depuis ce dépôt, ne pas ouvrir un autre port (3008, etc.), ne pas créer de conteneur / appdata parallèle qui entrerait en conflit.
+- **Dev actuel** = code + git + releases seulement. La migration runtime sera une étape séparée, explicitement demandée.
 
-Déjà en place :
+## Clone / remotes (déjà en place)
 
 ```bash
 cd /mnt/user/yuvomi-hnmz
@@ -37,54 +36,53 @@ git remote -v
 # origin    git@github.com:Imanity-jhn/yuvomi-hnmz.git
 # upstream  https://github.com/ulsklyc/yuvomi.git
 
-git checkout hnmz
+git checkout hnmz   # branche de travail par défaut
 ```
 
-Mettre à jour le code :
+Mettre à jour le custom (sans sync upstream) :
+
+```bash
+cd /mnt/user/yuvomi-hnmz
+git fetch origin && git checkout hnmz && git pull origin hnmz
+```
+
+Sync upstream **à la demande seulement** (politique merge) :
 
 ```bash
 cd /mnt/user/yuvomi-hnmz
 bash scripts/sync-upstream.sh
-# ou simplement :
-git fetch origin && git checkout hnmz && git pull origin hnmz
 ```
 
-## Docker Compose (fork)
+Détails : [FORK.md](./FORK.md).
 
-Le dépôt fournit `docker-compose.yml` (port conteneur **3000**, hôte via `OIKOS_HTTP_PORT`).
+## Auth GitHub (`gh`)
 
-1. Copier l'exemple d'env (ne pas committer `.env`) :
+Compte : **Imanity-jhn**. Releases / tags autorisés.
+
+Binaire : `/mnt/user/bin/gh`
 
 ```bash
-cd /mnt/user/yuvomi-hnmz
-cp -n .env.example .env
-# Éditer .env : SESSION_SECRET, DB_ENCRYPTION_KEY, OIKOS_HTTP_PORT=3008, etc.
+export PATH="/mnt/user/bin:$PATH"
+gh auth status
+# Si non connecté (login interactif) :
+gh auth login -h github.com -p https -w
 ```
 
-2. Données isolées du conteneur prod (exemple) :
+Sans `gh` auth, `git push` via SSH (`origin` en `git@github.com:…`) reste utilisable si la clé SSH Unraid est connue de GitHub.
 
-```bash
-export DATA_DIR=/mnt/user/appdata/yuvomi-hnmz/data
-export BACKUP_DIR=/mnt/user/appdata/yuvomi-hnmz/backups
-export MODULES_DIR=/mnt/user/yuvomi-hnmz/modules
-export DOCUMENT_STORAGE_LOCAL_DIR=/mnt/user/appdata/yuvomi-hnmz/documents
-mkdir -p "$DATA_DIR" "$BACKUP_DIR" "$DOCUMENT_STORAGE_LOCAL_DIR"
-```
+## Runtime fork — plus tard uniquement
 
-3. Démarrer **uniquement** quand `.env` est prêt (non fait automatiquement pour éviter d'interférer avec le conteneur `Yuvomi` existant) :
+Le dépôt contient `docker-compose.yml` et `.env.example` pour une migration future. **Ne pas les utiliser tant que la migration runtime n’est pas demandée.**
 
-```bash
-cd /mnt/user/yuvomi-hnmz
-# Option A — image GHCR upstream (rapide)
-# OIKOS_HTTP_PORT=3008 docker compose up -d
+Quand ce sera le moment (hors scope actuel) :
 
-# Option B — build local depuis ce fork
-# OIKOS_HTTP_PORT=3008 docker compose up -d --build
-```
-
-Variables sensibles listées dans `.env.example` (ne pas inventer de secrets ici) : `SESSION_SECRET`, `DB_ENCRYPTION_KEY`, clés OAuth/météo, etc.
+- Isoler données / backups / modules hors de `/mnt/user/appdata/yuvomi`
+- Choisir un port hôte **différent de 3007**
+- Ne jamais écraser le conteneur prod
 
 ## État actuel
 
-- Clone Git sur Unraid : **oui** (`/mnt/user/yuvomi-hnmz`, branche `hnmz`)
-- `docker compose up` du fork : **non** (volontairement) — l'instance officielle tourne déjà sur le port 3007
+- Clone Git Unraid : **oui** (`/mnt/user/yuvomi-hnmz`, branche `hnmz`)
+- Runtime / `docker compose` du fork : **non** (volontairement, jusqu’à migration)
+- Prod officielle (port **3007**) : **ne pas toucher**
+- `gh` : binaire présent, **auth login encore à faire** (voir ci-dessus)
