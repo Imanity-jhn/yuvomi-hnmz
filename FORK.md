@@ -18,8 +18,8 @@ Fork personnalisé de [ulsklyc/yuvomi](https://github.com/ulsklyc/yuvomi) pour l
 - **Sync upstream** : **à la demande seulement** (pas de sync automatique).
 - **Politique** : **merge** (pas de rebase) — voir ci-dessous.
 - **Conflits** : résoudre si clair ; sinon s’arrêter et signaler (ne pas forcer).
-- **Prod** : **ne jamais toucher** — container/port **3007**, `/mnt/user/appdata/yuvomi`, image officielle.
-- **Runtime fork** : **interdit pour l’instant** — pas de `docker compose` du fork, pas d’autre port (3008, etc.). Dev = code + git + releases seulement ; migration runtime plus tard.
+- **Prod** : **ne jamais toucher** — container/port **3007**, `/mnt/user/appdata/yuvomi`, image `ghcr.io/ulsklyc/yuvomi*`.
+- **Runtime fork** : **uniquement** `docker-compose.dev.yml` → conteneur `yuvomi-hnmz-dev`, port **3008**, data `/mnt/user/appdata/yuvomi-hnmz-dev` (hot reload). Pas d’autre port/appdata qui croiserait la prod.
 - **Windows** : hors scope — tout le travail git se fait sur Unraid.
 
 ## Remotes
@@ -67,7 +67,7 @@ git push origin hnmz
 3. Sync upstream **seulement si demandé** : `bash scripts/sync-upstream.sh`
 4. Releases / tags : OK via `gh release` / `git tag` + push (compte `Imanity-jhn`)
 5. **Prod interdite** : ne pas modifier le container Yuvomi (3007), `/mnt/user/appdata/yuvomi`, ni l’image officielle
-6. **Pas de runtime fork** tant que la migration n’est pas demandée
+6. **Dev hot-reload** : `docker compose -f docker-compose.dev.yml up -d --build` → http://192.168.50.2:3008
 
 ## Auth `gh` (Unraid)
 
@@ -87,8 +87,22 @@ Sans `gh` auth, `git push` via SSH (`origin` = `git@github.com:Imanity-jhn/yuvom
 
 - Dossier `hnmz/` : notes, patches et configs HNMZ
 - Modules : `modules/` (monté en `/app/modules` en Docker — **après** migration runtime)
-- Config runtime : `.env` (jamais committer) — à partir de `.env.example` **uniquement** quand le runtime fork sera autorisé
+- Config runtime : `.env` (jamais committer) — à partir de `.env.example` pour `yuvomi-hnmz-dev`
 
 ## Déploiement / garde-fous Unraid
 
 Voir [DEPLOY-UNRAID.md](./DEPLOY-UNRAID.md).
+
+### Dev hot-reload (autorisé)
+
+| | Valeur |
+|--|--------|
+| Conteneur | `yuvomi-hnmz-dev` |
+| Compose | `docker-compose.dev.yml` |
+| URL | http://192.168.50.2:3008 |
+| Data | `/mnt/user/appdata/yuvomi-hnmz-dev` |
+| Hot reload | volume code `.:/app` + `npm run dev` (`node --watch`) |
+
+### Prod (interdite)
+
+Conteneur `Yuvomi`, image `ghcr.io/ulsklyc/yuvomi*`, port hôte **3007**, appdata `/mnt/user/appdata/yuvomi` — ne pas stop/restart/modifier.

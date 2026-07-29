@@ -1,4 +1,4 @@
-# Unraid — yuvomi-hnmz (code & git uniquement)
+# Unraid — yuvomi-hnmz
 
 ## Accès SSH
 
@@ -19,14 +19,22 @@ ssh unraid
 | Rôle | Chemin | Action |
 |------|--------|--------|
 | Clone du fork (code / git) | `/mnt/user/yuvomi-hnmz` | OK — travail ici |
+| **Dev hot-reload** — données isolées | `/mnt/user/appdata/yuvomi-hnmz-dev` | OK — instance fork |
 | Données prod Yuvomi | `/mnt/user/appdata/yuvomi` | **INTERDIT** |
 | Template Docker prod | `/boot/config/plugins/dockerMan/templates-user/my-Yuvomi.xml` (port hôte **3007**) | **INTERDIT** |
 
 ## Garde-fous (strict)
 
-- **Ne jamais toucher la prod** : container `Yuvomi`, port hôte **3007**, `/mnt/user/appdata/yuvomi`, image `ghcr.io/ulsklyc/yuvomi` (ou équivalent officiel).
-- **Pas de runtime fork pour l’instant** : ne pas lancer `docker compose` depuis ce dépôt, ne pas ouvrir un autre port (3008, etc.), ne pas créer de conteneur / appdata parallèle qui entrerait en conflit.
-- **Dev actuel** = code + git + releases seulement. La migration runtime sera une étape séparée, explicitement demandée.
+| | Prod (interdite) | Dev hot-reload (autorisée) |
+|--|------------------|----------------------------|
+| Conteneur | `Yuvomi` | `yuvomi-hnmz-dev` |
+| Image | `ghcr.io/ulsklyc/yuvomi*` | `yuvomi-hnmz-dev:local` |
+| Port hôte | **3007** | **3008** |
+| Appdata | `/mnt/user/appdata/yuvomi` | `/mnt/user/appdata/yuvomi-hnmz-dev` |
+| Compose | template Unraid / image officielle | `docker-compose.dev.yml` |
+
+- **Ne jamais toucher la prod** : ne pas stop / restart / modifier le conteneur `Yuvomi`, ses volumes, ni son template.
+- **Runtime fork autorisé uniquement** via `docker-compose.dev.yml` (port **3008**, data `yuvomi-hnmz-dev`). Ne pas réutiliser `docker-compose.yml` « prod-like » tant qu’on n’en a pas besoin explicitement.
 
 ## Clone / remotes (déjà en place)
 
@@ -70,19 +78,65 @@ gh auth login -h github.com -p https -w
 
 Sans `gh` auth, `git push` via SSH (`origin` en `git@github.com:…`) reste utilisable si la clé SSH Unraid est connue de GitHub.
 
-## Runtime fork — plus tard uniquement
+## Instance dev hot-reload
 
-Le dépôt contient `docker-compose.yml` et `.env.example` pour une migration future. **Ne pas les utiliser tant que la migration runtime n’est pas demandée.**
+Compose : `docker-compose.dev.yml` + `Dockerfile.dev`.
 
-Quand ce sera le moment (hors scope actuel) :
+- Monte le code (`/mnt/user/yuvomi-hnmz` → `/app`)
+- `npm run dev` = `node --watch` (redémarrage auto du serveur Node)
+- Fichiers statiques `public/` servis directement (pas de rebuild frontend)
+- **URL** : http://192.168.50.2:3008
+- Data : `/mnt/user/appdata/yuvomi-hnmz-dev/{data,backups,documents}`
 
-- Isoler données / backups / modules hors de `/mnt/user/appdata/yuvomi`
-- Choisir un port hôte **différent de 3007**
-- Ne jamais écraser le conteneur prod
+### Première mise en route
+
+```bash
+cd /mnt/user/yuvomi-hnmz
+git checkout hnmz && git pull origin hnmz
+
+# .env dédié (ne jamais committer) — secrets générés, DB non chiffrée pour le dev
+cp -n .env.example .env
+# Éditer au minimum :
+#   OIKOS_HTTP_PORT=3008
+#   SESSION_SECRET=<aléatoire long>
+#   DB_ENCRYPTION_KEY=          # vide OK en dev (DB fraîche)
+#   SESSION_SECURE=false
+#   TRUST_PROXY=loopback
+#   TZ=Europe/Paris
+
+mkdir -p /mnt/user/appdata/yuvomi-hnmz-dev/{data,backups,documents}
+
+docker compose -f docker-compose.dev.yml up -d --build
+```
+
+### Commandes quotidiennes
+
+```bash
+cd /mnt/user/yuvomi-hnmz
+
+# Démarrer / rebuild
+docker compose -f docker-compose.dev.yml up -d --build
+
+# Logs
+docker compose -f docker-compose.dev.yml logs -f
+
+# Stop (prod Yuvomi inchangée)
+docker compose -f docker-compose.dev.yml down
+
+# Santé
+docker ps --filter name=yuvomi-hnmz-dev
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3008/health
+```
+
+Après changement de `package.json` / lockfile : `docker compose -f docker-compose.dev.yml up -d --build` (rafraîchit le volume `node_modules`).
+
+## Compose prod-like (sans hot reload)
+
+`docker-compose.yml` reste disponible pour un build/image classique. Sur Unraid, préférer `docker-compose.dev.yml`. Si un jour vous lancez la variante prod-like : port ≠ **3007** et appdata ≠ `/mnt/user/appdata/yuvomi`.
 
 ## État actuel
 
 - Clone Git Unraid : **oui** (`/mnt/user/yuvomi-hnmz`, branche `hnmz`)
-- Runtime / `docker compose` du fork : **non** (volontairement, jusqu’à migration)
-- Prod officielle (port **3007**) : **ne pas toucher**
-- `gh` : binaire présent, **auth login encore à faire** (voir ci-dessus)
+- Prod `Yuvomi` : port **3007** — **ne pas toucher**
+- Dev hot-reload `yuvomi-hnmz-dev` : port **3008**, data `yuvomi-hnmz-dev`
+- `gh` : binaire `/mnt/user/bin/gh` (auth selon `gh auth status`)

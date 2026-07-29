@@ -1,0 +1,59 @@
+# Yuvomi HNMZ — instance de développement (hot reload)
+# Ne pas utiliser pour la prod Unraid (conteneur Yuvomi / port 3007 / appdata/yuvomi).
+#
+# Usage (sur Unraid) :
+#   cd /mnt/user/yuvomi-hnmz
+#   docker compose -f docker-compose.dev.yml up -d --build
+#   docker compose -f docker-compose.dev.yml logs -f
+#   docker compose -f docker-compose.dev.yml down
+#
+# Accès : http://192.168.50.2:3008
+
+services:
+  yuvomi-hnmz-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: yuvomi-hnmz-dev:local
+    container_name: yuvomi-hnmz-dev
+    restart: unless-stopped
+    ports:
+      # Port hôte ≠ 3007 (prod Yuvomi officielle)
+      - "0.0.0.0:${OIKOS_HTTP_PORT:-3008}:3000"
+    volumes:
+      # Code source monté → hot reload (node --watch via npm run dev)
+      - .:/app
+      # node_modules du conteneur (évite d'écraser avec le mount hôte)
+      - yuvomi_hnmz_dev_node_modules:/app/node_modules
+      # Données isolées de la prod (/mnt/user/appdata/yuvomi)
+      - ${DATA_DIR:-/mnt/user/appdata/yuvomi-hnmz-dev/data}:/data
+      - ${BACKUP_DIR:-/mnt/user/appdata/yuvomi-hnmz-dev/backups}:/backups
+      - ${MODULES_DIR:-./modules}:/app/modules
+      - ${DOCUMENT_STORAGE_LOCAL_DIR:-/mnt/user/appdata/yuvomi-hnmz-dev/documents}:/documents
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=development
+      - PORT=3000
+      - DB_PATH=${DB_PATH:-/data/yuvomi.db}
+      - BACKUP_DIR=/backups
+      - DOCUMENT_STORAGE_LOCAL_ENABLED=${DOCUMENT_STORAGE_LOCAL_ENABLED:-false}
+      - DOCUMENT_STORAGE_LOCAL_PATH=${DOCUMENT_STORAGE_LOCAL_PATH:-/documents}
+      - SESSION_SECURE=${SESSION_SECURE:-false}
+      - TRUST_PROXY=${TRUST_PROXY:-loopback}
+      - TZ=${TZ:-Europe/Paris}
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://localhost:3000/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+volumes:
+  yuvomi_hnmz_dev_node_modules:
