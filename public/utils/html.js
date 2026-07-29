@@ -103,6 +103,51 @@ export function toggleChecklistItem(content, index, checked) {
   return null;
 }
 
+/**
+ * Editor Enter behaviour for GFM checklist lines (GitHub/Notion-style).
+ * On a checklist item with body text → insert a new empty `- [ ] ` line
+ * (splitting at the caret). On an empty item → exit the checklist (blank line).
+ * Returns null when the current line is not a checklist item.
+ *
+ * @param {string|null|undefined} value
+ * @param {number} pos collapsed caret index
+ * @returns {{ value: string, selectionStart: number } | null}
+ */
+export function continueChecklistEnter(value, pos) {
+  const text = String(value ?? '');
+  if (!Number.isInteger(pos) || pos < 0 || pos > text.length) return null;
+
+  const lineStart = text.lastIndexOf('\n', pos - 1) + 1;
+  const lineEndIdx = text.indexOf('\n', pos);
+  const lineEnd = lineEndIdx === -1 ? text.length : lineEndIdx;
+  const line = text.slice(lineStart, lineEnd);
+
+  // Marker only — do not match plain `- list` or `- [not a box]`.
+  const m = line.match(/^(\s{0,3})([-*+]) \[([ xX])\] ?/);
+  if (!m) return null;
+
+  const marker = m[0];
+  const indent = m[1];
+  const body = line.slice(marker.length);
+  const caretInLine = pos - lineStart;
+  const bodyCaret = Math.max(0, caretInLine - marker.length);
+  const bodyBefore = body.slice(0, bodyCaret);
+  const bodyAfter = body.slice(bodyCaret);
+
+  // Empty item (no text after the marker) → leave the checklist.
+  if (body.trim() === '') {
+    const next = text.slice(0, lineStart) + text.slice(lineEnd);
+    return { value: next, selectionStart: lineStart };
+  }
+
+  const kept = marker + bodyBefore;
+  const rest = bodyAfter.replace(/^\s+/, '');
+  const inserted = `\n${indent}- [ ] ${rest}`;
+  const next = text.slice(0, lineStart) + kept + inserted + text.slice(lineEnd);
+  const selectionStart = lineStart + kept.length + 1 + indent.length + '- [ ] '.length;
+  return { value: next, selectionStart };
+}
+
 export function renderMarkdownLight(text, options = {}) {
   if (!text) return '';
 

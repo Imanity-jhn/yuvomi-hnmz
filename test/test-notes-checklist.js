@@ -11,7 +11,34 @@ process.env.DB_PATH = ':memory:';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
-import { toggleChecklistItem, renderMarkdownLight } from '../public/utils/html.js';
+import { toggleChecklistItem, renderMarkdownLight, continueChecklistEnter } from '../public/utils/html.js';
+
+test('continueChecklistEnter continues and exits checklist lines', () => {
+  const cont = continueChecklistEnter('- [ ] milk', '- [ ] milk'.length);
+  assert.equal(cont.value, '- [ ] milk\n- [ ] ');
+  assert.equal(cont.selectionStart, cont.value.length);
+
+  const mid = continueChecklistEnter('- [x] hello world', '- [x] hello'.length);
+  assert.equal(mid.value, '- [x] hello\n- [ ] world');
+  assert.equal(mid.selectionStart, '- [x] hello\n- [ ] '.length);
+
+  const exit = continueChecklistEnter('- [ ] milk\n- [ ] ', '- [ ] milk\n- [ ] '.length);
+  assert.equal(exit.value, '- [ ] milk\n');
+  assert.equal(exit.selectionStart, '- [ ] milk\n'.length);
+
+  assert.equal(continueChecklistEnter('- plain list', 5), null);
+  assert.equal(continueChecklistEnter('1. ordered', 5), null);
+  assert.equal(continueChecklistEnter('no list', 3), null);
+});
+
+test('notes.js wires checklist Enter continuation', async () => {
+  const src = await (await import('node:fs/promises')).readFile(
+    new URL('../public/pages/notes.js', import.meta.url),
+    'utf8',
+  );
+  assert.match(src, /continueChecklistEnter/);
+  assert.match(src, /e\.key === 'Enter'/);
+});
 
 test('toggleChecklistItem flips and forces state', () => {
   const src = '- [ ] milk\n- [x] bread\nplain';

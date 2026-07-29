@@ -8,7 +8,7 @@ import { api } from '/api.js';
 import { openModal as openSharedModal, closeModal, btnError, advancedSection, reportFieldError } from '/components/modal.js';
 import { stagger, vibrate, scheduleUndoableDelete } from '/utils/ux.js';
 import { t } from '/i18n.js';
-import { esc, renderMarkdownLight, toggleChecklistItem } from '/utils/html.js';
+import { esc, renderMarkdownLight, toggleChecklistItem, continueChecklistEnter } from '/utils/html.js';
 import { getReadableTextColor } from '/utils/color.js';
 import { renderSkeletonList } from '/utils/skeleton.js';
 import { renderPageSearch, wirePageSearch } from '/utils/page-search.js';
@@ -777,6 +777,19 @@ function openNoteModal({ mode, note = null }) {
           if (e.key === 'b') { e.preventDefault(); applyFormat(textarea, 'bold'); }
           if (e.key === 'i') { e.preventDefault(); applyFormat(textarea, 'italic'); }
           if (e.key === 'u') { e.preventDefault(); applyFormat(textarea, 'underline'); }
+          return;
+        }
+        // Checklist: Enter continues with a new `- [ ] ` item; empty item exits
+        // (same convention as GitHub/Notion). Shift+Enter keeps a plain newline.
+        if (e.key === 'Enter' && !e.shiftKey && !e.altKey
+            && textarea.selectionStart === textarea.selectionEnd) {
+          const next = continueChecklistEnter(textarea.value, textarea.selectionStart);
+          if (next) {
+            e.preventDefault();
+            textarea.value = next.value;
+            textarea.selectionStart = textarea.selectionEnd = next.selectionStart;
+            textarea.dispatchEvent(new Event('input', { bubbles: true }));
+          }
         }
       });
 
