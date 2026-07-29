@@ -106,7 +106,9 @@ cp -n .env.example .env
 
 mkdir -p /mnt/user/appdata/yuvomi-hnmz-dev/{data,backups,documents}
 
-docker compose -f docker-compose.dev.yml up -d --build
+# Build via `docker build` (Unraid buildx trop vieux pour `compose --build`)
+docker build -f Dockerfile.dev -t yuvomi-hnmz-dev:local .
+docker compose -f docker-compose.dev.yml up -d
 ```
 
 ### Commandes quotidiennes
@@ -115,7 +117,10 @@ docker compose -f docker-compose.dev.yml up -d --build
 cd /mnt/user/yuvomi-hnmz
 
 # Démarrer / rebuild
-docker compose -f docker-compose.dev.yml up -d --build
+bash scripts/unraid-dev-up.sh
+# ou :
+docker build -f Dockerfile.dev -t yuvomi-hnmz-dev:local .
+docker compose -f docker-compose.dev.yml up -d
 
 # Logs
 docker compose -f docker-compose.dev.yml logs -f

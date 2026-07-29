@@ -12,6 +12,8 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 COPY package*.json ./
+# Skip Chromium download (puppeteer is a test-only dep; not needed for hot reload).
+ENV PUPPETEER_SKIP_DOWNLOAD=true
 RUN npm ci
 
 COPY entrypoint.sh /entrypoint.sh

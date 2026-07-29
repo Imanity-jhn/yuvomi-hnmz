@@ -41,7 +41,9 @@ echo "=== prod before (must stay Up on :3007) ==="
 docker ps --filter name=^Yuvomi$ --format '{{.Names}} {{.Status}} {{.Ports}}'
 
 echo "=== building / starting yuvomi-hnmz-dev ==="
-docker compose -f docker-compose.dev.yml up -d --build
+# Unraid compose/buildx combo rejects `compose ... --build`; build image first.
+docker build -f Dockerfile.dev -t yuvomi-hnmz-dev:local .
+docker compose -f docker-compose.dev.yml up -d
 
 echo "=== status ==="
 docker ps --filter name=yuvomi-hnmz-dev --format '{{.Names}} {{.Status}} {{.Ports}}'
