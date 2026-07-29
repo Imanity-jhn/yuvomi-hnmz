@@ -9,48 +9,29 @@ if [ ! -f .env ]; then
 fi
 
 SESSION_SECRET="$(openssl rand -hex 32)"
-export SESSION_SECRET
 
-python3 <<'PY'
-from pathlib import Path
-import os
-
-path = Path(".env")
-text = path.read_text()
-secret = os.environ["SESSION_SECRET"]
-
-replacements = {
-    "OIKOS_HTTP_PORT": "3008",
-    "SESSION_SECRET": secret,
-    "DB_ENCRYPTION_KEY": "",
-    "NODE_ENV": "development",
-    "SESSION_SECURE": "false",
-    "TRUST_PROXY": "loopback",
-    "TZ": "Europe/Paris",
+set_env() {
+  local key="$1"
+  local val="$2"
+  if grep -qE "^${key}=" .env; then
+    # Escape & \ for sed replacement
+    local esc
+    esc=$(printf '%s' "$val" | sed 's/[&\\]/\\&/g')
+    sed -i "s|^${key}=.*|${key}=${esc}|" .env
+  else
+    printf '%s=%s\n' "$key" "$val" >> .env
+  fi
 }
 
-lines = text.splitlines(keepends=True)
-out = []
-seen = set()
-for line in lines:
-    stripped = line.lstrip()
-    if stripped.startswith("#") or "=" not in line:
-        out.append(line)
-        continue
-    key = stripped.split("=", 1)[0].strip()
-    if key in replacements:
-        out.append(f"{key}={replacements[key]}\n")
-        seen.add(key)
-    else:
-        out.append(line)
+set_env OIKOS_HTTP_PORT 3008
+set_env SESSION_SECRET "$SESSION_SECRET"
+set_env DB_ENCRYPTION_KEY ""
+set_env NODE_ENV development
+set_env SESSION_SECURE false
+set_env TRUST_PROXY loopback
+set_env TZ Europe/Paris
 
-for key, val in replacements.items():
-    if key not in seen:
-        out.append(f"{key}={val}\n")
-
-path.write_text("".join(out))
-print("Updated .env keys:", ", ".join(sorted(replacements)))
-PY
+echo "Updated .env for hot-reload (port 3008, empty DB_ENCRYPTION_KEY)"
 
 mkdir -p /mnt/user/appdata/yuvomi-hnmz-dev/data \
          /mnt/user/appdata/yuvomi-hnmz-dev/backups \
