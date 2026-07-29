@@ -8,7 +8,7 @@ import { api } from '/api.js';
 import { openModal as openSharedModal, closeModal, btnError, advancedSection, reportFieldError } from '/components/modal.js';
 import { stagger, vibrate, scheduleUndoableDelete } from '/utils/ux.js';
 import { t } from '/i18n.js';
-import { esc, renderMarkdownLight } from '/utils/html.js';
+import { esc, renderMarkdownLight, toggleChecklistItem } from '/utils/html.js';
 import { getReadableTextColor } from '/utils/color.js';
 import { renderSkeletonList } from '/utils/skeleton.js';
 import { renderPageSearch, wirePageSearch } from '/utils/page-search.js';
@@ -91,6 +91,9 @@ export async function render(container, { user }) {
 
     const delBtn = e.target.closest('[data-action="delete"]');
     if (delBtn) { e.stopPropagation(); await deleteNote(parseInt(delBtn.dataset.id, 10)); return; }
+
+    const checkCard = e.target.closest('.note-card[data-id]');
+    if (checkCard && handleChecklistClick(e, parseInt(checkCard.dataset.id, 10))) return;
 
     // [data-action="open"] fällt bewusst durch auf den Karten-Zweig darunter —
     // der Button liegt in der Karte, ein Treffer reicht.
@@ -253,7 +256,7 @@ function renderNoteCard(note) {
         <i data-lucide="${note.pinned ? 'pin-off' : 'pin'}" class="icon-sm" aria-hidden="true"></i>
       </button>
       ${note.title ? `<div class="note-card__title">${esc(note.title)}</div>` : ''}
-      <div class="note-card__content">${renderMarkdownLight(note.content)}</div>
+      <div class="note-card__content">${renderMarkdownLight(note.content, { interactive: true })}</div>
       <div class="note-card__footer">
         <div class="note-card__creator">
           <span class="note-card__avatar"
@@ -449,6 +452,89 @@ function applyFormat(textarea, format) {
 }
 
 // --------------------------------------------------------
+// Interactive checklist (Karte + Leseansicht)
+// --------------------------------------------------------
+
+/** @type {Map<number, Promise<void>>} */
+const _checklistChains = new Map();
+
+function applyChecklistDom(li, checked) {
+  if (!li) return;
+  li.classList.toggle('is-checked', checked);
+  const btn = li.querySelector('[data-action="toggle-check"]');
+  if (btn) btn.setAttribute('aria-checked', String(checked));
+}
+
+/**
+ * Checklist-Toggle mit Optimistic UI. API-Calls werden pro Notiz serialisiert.
+ */
+async function toggleNoteChecklistItem(noteId, index, liEl) {
+  const note = state.notes.find((n) => n.id === noteId);
+  if (!note) return;
+
+  const textarea = document.querySelector('#note-content');
+  const modalOpenForNote = Boolean(
+    textarea && document.querySelector('.note-modal') && state._openNoteId === noteId,
+  );
+  const baseContent = modalOpenForNote ? textarea.value : note.content;
+  const result = toggleChecklistItem(baseContent, index);
+  if (!result) return;
+
+  const prevContent = baseContent;
+  const prevChecked = !result.checked;
+  const desired = result.checked;
+
+  note.content = result.content;
+  if (modalOpenForNote) textarea.value = result.content;
+  applyChecklistDom(liEl, desired);
+  if (liEl) liEl.classList.add('note-md-check--pending');
+
+  const prev = _checklistChains.get(noteId) || Promise.resolve();
+  const job = prev.catch(() => {}).then(async () => {
+    try {
+      const res = await api.patch(`/notes/${noteId}/checklist`, {
+        index,
+        checked: desired,
+      });
+      const idx = state.notes.findIndex((n) => n.id === noteId);
+      if (idx !== -1) {
+        const localContent = state.notes[idx].content;
+        state.notes[idx] = { ...state.notes[idx], ...res.data, content: localContent };
+      }
+    } catch (err) {
+      const latest = toggleChecklistItem(note.content, index, prevChecked);
+      if (latest) note.content = latest.content;
+      else note.content = prevContent;
+      if (modalOpenForNote && textarea && state._openNoteId === noteId) {
+        textarea.value = note.content;
+      }
+      applyChecklistDom(liEl, prevChecked);
+      window.yuvomi?.showToast(err.data?.error ?? t('common.unknownError'), 'danger');
+    } finally {
+      if (liEl) liEl.classList.remove('note-md-check--pending');
+    }
+  });
+  _checklistChains.set(noteId, job);
+  await job;
+}
+
+function handleChecklistClick(e, noteId) {
+  const btn = e.target.closest('[data-action="toggle-check"]');
+  const li = e.target.closest('.note-md-check--interactive[data-check-index]');
+  if (!btn && !li) return false;
+  e.preventDefault();
+  e.stopPropagation();
+  const index = parseInt(
+    (btn || li).dataset.checkIndex ?? li?.dataset.checkIndex,
+    10,
+  );
+  if (!Number.isInteger(index)) return true;
+  const row = (btn || li).closest('.note-md-check') || li;
+  toggleNoteChecklistItem(noteId, index, row);
+  return true;
+}
+
+// --------------------------------------------------------
 // Modal
 // --------------------------------------------------------
 
@@ -457,12 +543,13 @@ function applyFormat(textarea, format) {
 // (Recognition), daher hier nur der Inhalt.
 function renderNoteReadHtml(content) {
   const body = (content || '').trim()
-    ? renderMarkdownLight(content)
+    ? renderMarkdownLight(content, { interactive: true })
     : `<p class="note-read__empty">${t('notes.readEmpty')}</p>`;
   return `<div class="note-read__body">${body}</div>`;
 }
 
 function openNoteModal({ mode, note = null }) {
+  state._openNoteId = (mode === 'edit' && note) ? note.id : null;
   const isEdit      = mode === 'edit';
   const selColor    = (isEdit ? note.color : null) || NOTE_COLORS[0];
   // Bestehende Notizen können Farben außerhalb der Palette tragen (Alt-Daten,
@@ -612,6 +699,10 @@ function openNoteModal({ mode, note = null }) {
 
       panel.querySelector('#note-modal-delete')?.addEventListener('click', () => {
         deleteNote(note.id);
+      });
+
+      panel.querySelector('[data-pane="read"]')?.addEventListener('click', (e) => {
+        if (note?.id != null) handleChecklistClick(e, note.id);
       });
 
       // Umschalt-Buttons + WAI-ARIA-Tablist-Tastatur (Pfeile/Home/End), konsistent

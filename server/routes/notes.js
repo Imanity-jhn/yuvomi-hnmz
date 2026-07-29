@@ -8,6 +8,7 @@ import { createLogger } from '../logger.js';
 import express from 'express';
 import * as db from '../db.js';
 import { str, color, collectErrors, MAX_TEXT, MAX_TITLE } from '../middleware/validate.js';
+import { toggleChecklistItem } from '../utils/checklist.js';
 
 const log = createLogger('Notes');
 
@@ -100,6 +101,47 @@ router.put('/:id', (req, res) => {
       pinned !== undefined ? (pinned ? 1 : 0) : null,
       id
     );
+
+    const updated = db.get().prepare(`
+      SELECT n.*, u.display_name AS creator_name, u.avatar_color AS creator_color, u.avatar_data AS creator_avatar
+      FROM notes n LEFT JOIN users u ON u.id = n.created_by WHERE n.id = ?
+    `).get(id);
+
+    res.json({ data: updated });
+  } catch (err) {
+    log.error('', err);
+    res.status(500).json({ error: 'Interner Fehler', code: 500 });
+  }
+});
+
+/**
+ * PATCH /api/v1/notes/:id/checklist
+ * Checklisten-Eintrag (Markdown - [ ] / - [x]) toggeln ohne volle Notiz-Bearbeitung.
+ * Body: { index: number, checked?: boolean }
+ * Response: { data: Note }
+ */
+router.patch('/:id/checklist', (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const note = db.get().prepare('SELECT * FROM notes WHERE id = ?').get(id);
+    if (!note) return res.status(404).json({ error: 'Notiz nicht gefunden', code: 404 });
+
+    const index = Number(req.body?.index);
+    if (!Number.isInteger(index) || index < 0) {
+      return res.status(400).json({ error: 'Ung??ltiger Checklisten-Index', code: 400 });
+    }
+
+    const checked = req.body?.checked;
+    const result = toggleChecklistItem(
+      note.content,
+      index,
+      checked === undefined ? undefined : Boolean(checked),
+    );
+    if (!result) {
+      return res.status(400).json({ error: 'Checklisten-Eintrag nicht gefunden', code: 400 });
+    }
+
+    db.get().prepare('UPDATE notes SET content = ? WHERE id = ?').run(result.content, id);
 
     const updated = db.get().prepare(`
       SELECT n.*, u.display_name AS creator_name, u.avatar_color AS creator_color, u.avatar_data AS creator_avatar

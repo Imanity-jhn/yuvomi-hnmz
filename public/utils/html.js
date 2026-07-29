@@ -74,13 +74,44 @@ function inlineMarkdown(segment) {
  * @param {string|null|undefined} text
  * @returns {string} HTML string
  */
-export function renderMarkdownLight(text) {
+
+/**
+ * Toggles the Nth GFM checklist item (0-based) in markdown source.
+ * Matches the same line pattern as renderMarkdownLight.
+ *
+ * @param {string|null|undefined} content
+ * @param {number} index
+ * @param {boolean} [checked] - force state; omit to flip
+ * @returns {{ content: string, checked: boolean } | null}
+ */
+export function toggleChecklistItem(content, index, checked) {
+  if (!Number.isInteger(index) || index < 0) return null;
+  const lines = String(content ?? '').replace(/\r\n?/g, '\n').split('\n');
+  let seen = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^ {0,3}[-*+]\s+\[([ xX])\]\s+(.*)$/);
+    if (!m) continue;
+    if (seen === index) {
+      const currently = m[1].toLowerCase() === 'x';
+      const next = checked === undefined ? !currently : Boolean(checked);
+      const mark = next ? 'x' : ' ';
+      lines[i] = lines[i].replace(/^(\s*[-*+]\s+\[)[ xX](\])/, `$1${mark}$2`);
+      return { content: lines.join('\n'), checked: next };
+    }
+    seen += 1;
+  }
+  return null;
+}
+
+export function renderMarkdownLight(text, options = {}) {
   if (!text) return '';
 
+  const interactive = Boolean(options && options.interactive);
   const lines = String(text).replace(/\r\n?/g, '\n').split('\n');
   const html = [];
   let list = null;      // { tag: 'ul' | 'ol', checklist: boolean }
   let para = [];
+  let checkIndex = 0;
 
   const flushPara = () => {
     if (para.length) { html.push(`<p class="note-md-p">${para.join('<br>')}</p>`); para = []; }
@@ -116,7 +147,17 @@ export function renderMarkdownLight(text) {
         closeList(); html.push('<ul class="note-md-ul note-md-checklist">'); list = { tag: 'ul', checklist: true };
       }
       const checked = m[1].toLowerCase() === 'x';
-      html.push(`<li class="note-md-check${checked ? ' is-checked' : ''}"><span class="note-md-box" aria-hidden="true"></span><span>${inlineMarkdown(m[2])}</span></li>`);
+      const idx = checkIndex++;
+      if (interactive) {
+        html.push(
+          `<li class="note-md-check note-md-check--interactive${checked ? ' is-checked' : ''}" data-check-index="${idx}">`
+          + `<button type="button" class="note-md-box" role="checkbox" aria-checked="${checked}"`
+          + ` data-action="toggle-check" data-check-index="${idx}" aria-label="${esc(m[2])}"></button>`
+          + `<span>${inlineMarkdown(m[2])}</span></li>`
+        );
+      } else {
+        html.push(`<li class="note-md-check${checked ? ' is-checked' : ''}"><span class="note-md-box" aria-hidden="true"></span><span>${inlineMarkdown(m[2])}</span></li>`);
+      }
       continue;
     }
     // Ungeordnete Liste

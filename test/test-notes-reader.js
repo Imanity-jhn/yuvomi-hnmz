@@ -79,3 +79,9 @@ test('all locales define the new notes reader keys (non-empty)', async () => {
     }
   }
 });
+
+test('notes.js enables interactive checklist rendering', async () => {
+  const src = await notesSrc();
+  assert.match(src, /interactive:\s*true/, 'interactive checklist markdown must be enabled');
+  assert.match(src, /toggleNoteChecklistItem/, 'checklist toggle handler must exist');
+});

@@ -60,6 +60,10 @@ git merge main
 git push origin hnmz
 ```
 
+## Features HNMZ
+
+- Notes : checklists Markdown interactives (cocher en lecture, API `PATCH .../checklist`) — voir `hnmz/README.md`.
+
 ## Checklist autonomie (Unraid)
 
 1. Travailler sur `hnmz` : `cd /mnt/user/yuvomi-hnmz && git checkout hnmz`

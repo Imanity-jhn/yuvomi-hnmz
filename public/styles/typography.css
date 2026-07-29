@@ -303,6 +303,28 @@
   transform: rotate(45deg);
 }
 
+button.note-md-box {
+  appearance: none;
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  border-style: solid;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+button.note-md-box:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+.note-md-check--interactive {
+  cursor: pointer;
+}
+.note-md-check--pending {
+  opacity: 0.7;
+  pointer-events: none;
+}
+
 .note-md-quote {
   margin: var(--space-1) 0 var(--space-2);
   padding: var(--space-1) var(--space-2);
