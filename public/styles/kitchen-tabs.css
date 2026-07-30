@@ -8,37 +8,71 @@
   --sub-tabs-height: var(--kitchen-tabs-height);
   /* Einziger Modul-Akzent-Träger der Küche: die geteilte Tabs-Leiste trägt den
    * 3px-Streifen (in --active-module-accent, wechselt je aktivem Tab). Die
-   * einzelnen Tab-Seiten (week-nav / list-tabs-bar / recipes) tragen ihn NICHT
-   * mehr — so haben alle drei Tabs exakt eine Kopf-Grammatik (box-sizing:
-   * border-box aus sub-tabs.css hält die 56px-Höhe stabil). */
+   * vier Tab-Seiten tragen ihn NICHT mehr: sie nutzen seit dem Umbau vom
+   * 2026-07-29 alle den kanonischen Kopf in der Variante
+   * `.page-toolbar--in-group` (layout.css), die genau deshalb existiert - ein
+   * regulärer .page-toolbar hätte hier einen zweiten Streifen in derselben
+   * Farbe gesetzt (Issue #577). box-sizing: border-box aus sub-tabs.css hält
+   * die 56px-Höhe stabil. */
   border-top: 3px solid var(--active-module-accent, var(--color-accent));
 }
 
 @media (max-width: 640px) {
   .kitchen-tabs-bar {
     gap: var(--space-0h);
-    padding-inline: var(--space-2);
   }
 
+  /* Der Modultitel „Küche" entfällt mobil: die Bottom-Nav zeigt dasselbe Wort
+   * bereits als aktives Element, hier kostete er ~70px, die den Tab-Labels
+   * fehlten. Bei drei Tabs war die Leiste damit „randvoll" (so die frühere
+   * RAIL_PAD_EXCEPTIONS-Begründung); seit Vorrat als vierter Tab dazukam,
+   * ellipsierten bei 393px alle drei inaktiven Labels zu „Rez…" / „Eink…"
+   * (Critique 2026-07-29). Ohne den Titel reicht der Platz wieder, und die
+   * Leiste kann das reguläre --page-inline-pad tragen - womit auch der
+   * 8px-Versatz zum Body-Inhalt verschwindet. */
+  .kitchen-tabs-bar .sub-tabs-bar__title {
+    display: none;
+  }
+
+  /* NATÜRLICHE BREITE, kein Gleichverteilen - die Leiste scrollt lieber, als ein
+   * Label zu kürzen.
+   *
+   * Hier stand `flex: 1 1 0` mit `min-width: 0` plus Ellipse am Label: alle vier
+   * Tabs gleich breit, und wer nicht passt, wird gekürzt. Das ging auf, solange die
+   * Tabs nur Labels trugen (gemessen: 4 × 89px bei 393px, „Mahlzeiten" brauchte
+   * 72px und bekam sie knapp). Mit den Zustandszahlen kostete jeder Badge 20-22px
+   * aus derselben Zelle - bei 393px war „Mahlzeiten" wieder gekürzt (61 von 72),
+   * bei 320px drei von vier Labels.
+   *
+   * Die Rechnung ohne Gleichverteilung: 72 + 55 + 66 + 41 Label + 42 Badge + 16
+   * Polster + 6 Gap = 298px. Das passt in 320px, und Deutsch ist die längste
+   * Locale. Wo es doch nicht passt (längere Übersetzung, größere Systemschrift),
+   * scrollt die Leiste - sie ist `overflow-x: auto`, trägt die geteilten
+   * has-fade-Masken und holt den aktiven Tab per scrollActiveIntoView() ins Bild.
+   *
+   * Das folgt derselben Regel, mit der eine Zeile weiter unten das ICON weicht und
+   * nicht das Wort: ein gekürztes „Mahlz…" kostet mehr Orientierung als ein Tab, für
+   * den man wischen muss. */
   .kitchen-tabs-bar .sub-tab {
-    flex: 1 1 0;
-    min-width: 0;
+    flex: 0 0 auto;
     justify-content: center;
     gap: var(--space-0h);
-    padding-inline: var(--space-1);
+    padding-inline: var(--space-0h);
   }
 
-  .kitchen-tabs-bar .sub-tab__label {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  /* Der aktive Tab trägt die Wo-bin-ich-Information und behält deshalb
-   * seine natürliche Breite; nur inaktive Nachbarn ellipsieren bei Platznot
-   * (Audit A1-09). */
-  .kitchen-tabs-bar .sub-tab--active {
-    flex: 0 0 auto;
+  /* Mobil weicht das Icon, nicht das Label. Vier Tabs teilen sich auf 393px
+   * ~90px pro Stück; „Mahlzeiten" allein braucht 73px Label + 16px Icon + die
+   * Abstände, also ~95px - beides passt nicht nebeneinander. Das Wort ist der
+   * bessere Anker: die Bottom-Nav trägt dieselben Icons bereits, und ein auf
+   * „Mahlz…" gekürztes Label kostet mehr Orientierung als ein fehlendes
+   * Piktogramm. Gilt im ganzen 640er-Breakpoint statt ab einer eigenen
+   * 480er-Schwelle - der Breakpoint-Kontrakt (tokens.css §11c) lässt nur
+   * 640/768/1024/1440 zu, und ein einheitlicher Mobilzustand ist ohnehin
+   * leichter zu lesen als drei Stufen. Das ellipsis oben bleibt als
+   * Sicherheitsnetz für noch schmalere Geräte und lange Übersetzungen. */
+  .kitchen-tabs-bar .sub-tab__icon,
+  .kitchen-tabs-bar .sub-tab > svg {
+    display: none;
   }
 }
 

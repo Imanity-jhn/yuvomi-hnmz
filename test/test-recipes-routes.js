@@ -228,3 +228,107 @@ test('DELETE /:id: Eigentümer löscht → 204, Zutaten kaskadieren mit', async 
   assert.equal(db.prepare('SELECT id FROM recipes WHERE id = ?').get(id), undefined);
   assert.equal(ingredientRows(id).length, 0); // CASCADE
 });
+
+// --------------------------------------------------------------------------
+// POST /:id/to-shopping-list (Zutaten → Einkaufsliste)
+// --------------------------------------------------------------------------
+
+function shoppingItems(listId) {
+  return db.prepare('SELECT name, quantity, category, is_checked FROM shopping_items WHERE list_id = ? ORDER BY id ASC').all(listId);
+}
+
+function newList(name) {
+  return db.prepare('INSERT INTO shopping_lists (name, created_by) VALUES (?, ?)').run(name, OWNER).lastInsertRowid;
+}
+
+test('POST /:id/to-shopping-list: überträgt Zutaten mit Menge und Kategorie', async () => {
+  const listId = newList('Transfer A');
+  const created = await call('POST', '/', {
+    title: 'Transfer-Rezept',
+    ingredients: [
+      { name: 'Mehl', quantity: '500 g', category: 'Backen' },
+      { name: 'Milch', quantity: '1 l' },
+    ],
+  });
+  const r = await call('POST', `/${created.body.data.id}/to-shopping-list`, { listId });
+
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body.data, { transferred: 2, skipped: 0 });
+  const items = shoppingItems(listId);
+  assert.equal(items.length, 2);
+  assert.equal(items[0].name, 'Mehl');
+  assert.equal(items[0].quantity, '500 g');
+  assert.equal(items[0].category, 'Backen');
+  assert.equal(items[1].category, 'Sonstiges'); // Default greift
+});
+
+test('POST /:id/to-shopping-list: überspringt, was unabgehakt schon auf der Liste liegt', async () => {
+  const listId = newList('Transfer B');
+  const created = await call('POST', '/', {
+    title: 'Doppelt',
+    ingredients: [{ name: 'Butter' }, { name: 'Eier' }],
+  });
+  const id = created.body.data.id;
+
+  const first = await call('POST', `/${id}/to-shopping-list`, { listId });
+  assert.deepEqual(first.body.data, { transferred: 2, skipped: 0 });
+
+  // Zweiter Lauf darf die Liste nicht verdoppeln - ein Rezept ist eine Vorlage,
+  // die mehrfach gekocht wird, und trägt kein „schon übertragen"-Flag.
+  const second = await call('POST', `/${id}/to-shopping-list`, { listId });
+  assert.deepEqual(second.body.data, { transferred: 0, skipped: 2 });
+  assert.equal(shoppingItems(listId).length, 2);
+});
+
+test('POST /:id/to-shopping-list: abgehakte Artikel blockieren die Übernahme nicht', async () => {
+  const listId = newList('Transfer C');
+  const created = await call('POST', '/', { title: 'Nachkauf', ingredients: [{ name: 'Salz' }] });
+  const id = created.body.data.id;
+
+  await call('POST', `/${id}/to-shopping-list`, { listId });
+  db.prepare('UPDATE shopping_items SET is_checked = 1 WHERE list_id = ?').run(listId);
+
+  // Bereits gekauft und abgehakt → beim nächsten Kochen wieder aufnehmen.
+  const again = await call('POST', `/${id}/to-shopping-list`, { listId });
+  assert.deepEqual(again.body.data, { transferred: 1, skipped: 0 });
+  assert.equal(shoppingItems(listId).length, 2);
+});
+
+test('POST /:id/to-shopping-list: Rezept ohne Zutaten → 0/0 statt Fehler', async () => {
+  const listId = newList('Transfer D');
+  const created = await call('POST', '/', { title: 'Leer', ingredients: [] });
+  const r = await call('POST', `/${created.body.data.id}/to-shopping-list`, { listId });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body.data, { transferred: 0, skipped: 0 });
+});
+
+test('POST /:id/to-shopping-list: fehlende oder unbekannte Liste → 400/404', async () => {
+  const created = await call('POST', '/', { title: 'Ziel', ingredients: [{ name: 'X' }] });
+  const id = created.body.data.id;
+
+  const noList = await call('POST', `/${id}/to-shopping-list`, {});
+  assert.equal(noList.status, 400);
+
+  const badList = await call('POST', `/${id}/to-shopping-list`, { listId: 999999 });
+  assert.equal(badList.status, 404);
+});
+
+test('POST /:id/to-shopping-list: unbekanntes Rezept → 404', async () => {
+  const listId = newList('Transfer E');
+  const r = await call('POST', '/999999/to-shopping-list', { listId });
+  assert.equal(r.status, 404);
+});
+
+test('POST /:id/to-shopping-list: Nicht-Eigentümer darf übernehmen (kein owner-Gate)', async () => {
+  const listId = newList('Transfer F');
+  const created = await call('POST', '/', { title: 'Geteilt', ingredients: [{ name: 'Reis' }] });
+  const id = created.body.data.id;
+
+  // Rezepte sind Haushaltswissen: wer kocht, darf einkaufen - anders als bei
+  // PUT/DELETE, die owner-only bleiben.
+  actor = { id: ADMIN, role: 'admin' };
+  const r = await call('POST', `/${id}/to-shopping-list`, { listId });
+  actor = { id: OWNER, role: 'member' };
+  assert.equal(r.status, 200);
+  assert.equal(r.body.data.transferred, 1);
+});

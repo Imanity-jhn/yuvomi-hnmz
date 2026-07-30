@@ -65,9 +65,17 @@ test('hidden greift bei geteilten Bedienelementen trotz display-Klasse', () => {
   // das UA-`[hidden]` bei gleicher Spezifität — ohne Guard bleibt der FAB auf
   // dem Berichte-Tab sichtbar. Seit UX-Audit R2 deckt der Guard auch
   // `.form-group` ab (RRULE-Endefelder, Audit A1-10).
-  assert.match(layoutCss, /\.page-fab\[hidden\][\s\S]{0,120}display:\s*none\s*!important/);
-  assert.match(layoutCss, /\.btn\[hidden\][\s\S]{0,120}display:\s*none\s*!important/);
-  assert.match(layoutCss, /\.form-group\[hidden\][\s\S]{0,120}display:\s*none\s*!important/);
+  //
+  // `[^{}]*\{` statt eines Zeichenabstands: geprüft werden soll, dass Selektor
+  // und Deklaration im SELBEN Regelblock stehen - kein `}` und kein zweites `{`
+  // dazwischen. Das frühere `[\s\S]{0,120}` maß stattdessen die Länge der
+  // Selektorliste und schlug damit bei jeder legitimen Ergänzung an; die Liste ist
+  // aber ausdrücklich zum Wachsen gedacht (bei `.kitchen-bulkbar` war sie 141
+  // Zeichen lang und der Guard rot, obwohl die Struktur korrekt war).
+  const sameBlock = (selector) => new RegExp(`${selector}[^{}]*\\{\\s*display:\\s*none\\s*!important`);
+  for (const selector of ['\\.page-fab\\[hidden\\]', '\\.btn\\[hidden\\]', '\\.form-group\\[hidden\\]', '\\.kitchen-bulkbar\\[hidden\\]']) {
+    assert.match(layoutCss, sameBlock(selector), `${selector} steht nicht im Durchsetzungsblock`);
+  }
 });
 
 // --------------------------------------------------------

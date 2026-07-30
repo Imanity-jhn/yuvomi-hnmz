@@ -4,21 +4,28 @@
  */
 
 import { api } from '/api.js';
-import { t } from '/i18n.js';
+import { t, formatDate, formatDateInput, parseDateInput, isDateInputValid } from '/i18n.js';
 import { esc } from '/utils/html.js';
-import { openModal as openSharedModal, closeModal as closeSharedModal, advancedSection, wireBlurValidation, reportFieldError } from '/components/modal.js';
+import { openModal as openSharedModal, closeModal as closeSharedModal, selectModal, advancedSection, wireBlurValidation, reportFieldError } from '/components/modal.js';
 import { DEFAULT_CATEGORY_NAME } from '/utils/shopping-categories.js';
-import { renderKitchenTabsBar } from '/utils/kitchen-tabs.js';
+import { renderKitchenTabsBar, refreshKitchenBadges } from '/utils/kitchen-tabs.js';
+import { popoverMenuHtml, installPopoverMenus } from '/utils/popover-menu.js';
 import { ingredientRowHTML } from '/utils/ingredient-row.js';
 import { scheduleUndoableDelete } from '/utils/ux.js';
 import { normalizeRecipeMealTypes, RECIPE_MEAL_TYPE_KEYS } from '/utils/recipe-meal-types.js';
+import { mealPayloadFromRecipe } from '/utils/recipe-to-meal.js';
+import { toLocalDateKey } from '/utils/date.js';
+import '/components/datepicker.js';
 import { renderSkeletonList } from '/utils/skeleton.js';
+import { mountEmptyState } from '/utils/empty-state.js';
 
 let _container = null;
 
 const state = {
   recipes: [],
   categories: [],
+  // Einkaufslisten für „Auf die Einkaufsliste": nur die Auswahl, keine Artikel.
+  lists: [],
   query: '',
 };
 
@@ -60,6 +67,21 @@ async function loadCategories() {
   }
 }
 
+// Ist das Einkaufsmodul deaktiviert oder gibt es keine Liste, bleibt state.lists
+// leer und die Karte zeigt die Übernahme-Aktion gar nicht erst an.
+async function loadShoppingLists() {
+  if (window.yuvomi?.isModuleDisabled?.('shopping')) {
+    state.lists = [];
+    return;
+  }
+  try {
+    const res = await api.get('/shopping');
+    state.lists = res.data ?? [];
+  } catch {
+    state.lists = [];
+  }
+}
+
 export async function render(container) {
   _container = container;
 
@@ -71,18 +93,20 @@ export async function render(container) {
   // Create-Affordanz (kein redundanter sichtbarer Kopf-Titel mehr).
   const title = document.createElement('h1');
   title.className = 'sr-only';
-  title.textContent = t('recipes.title');
+  title.textContent = t('nav.recipes');
 
   // Suchfeld über der Liste: Rezepte waren als einziges Kitchen-Modul nicht
   // durchsuchbar (Audit A1-21).
+  // Kanonischer Kopf in der Gruppen-Variante: --in-group gibt Akzentstreifen und
+  // oberste Sticky-Position an die .kitchen-tabs-bar darüber ab, die beides schon
+  // trägt. Genau der Doppelstreifen aus Issue #577 war der Grund, warum diese
+  // Zeile vorher als eigene .recipes-toolbar gebaut war - mit dem Ergebnis, dass
+  // alle vier Küchen-Tabs eine andere Kopf-Grammatik hatten (Critique
+  // 2026-07-29). Die Variante löst den Konflikt, ohne den Kopf zu meiden.
   const toolbar = document.createElement('div');
-  // Bewusst KEIN .page-toolbar: den Modul-Akzent der Küche trägt allein die
-  // .kitchen-tabs-bar darüber (siehe kitchen-tabs.css). Als .page-toolbar erbte
-  // diese Zeile einen zweiten 3px-Streifen in derselben Farbe, direkt unter dem
-  // ersten — Rezepte war damit das einzige Kitchen-Modul mit Doppelstreifen
-  // (Issue #577). Sie hat weder Titel noch Sticky-Rolle und ist eine reine
-  // Filterzeile wie .tasks-filters-row.
-  toolbar.className = 'recipes-toolbar';
+  toolbar.className = 'page-toolbar page-toolbar--in-group';
+  const center = document.createElement('div');
+  center.className = 'page-toolbar__center';
   const searchWrap = document.createElement('div');
   searchWrap.className = 'recipes-search';
   const searchInput = document.createElement('input');
@@ -96,15 +120,19 @@ export async function render(container) {
     renderRecipeList();
   });
   searchWrap.appendChild(searchInput);
-  toolbar.appendChild(searchWrap);
+  center.appendChild(searchWrap);
+  toolbar.appendChild(center);
 
   const list = document.createElement('div');
-  list.className = 'recipes-list';
+  list.className = 'kitchen-list recipes-list';
   list.id = 'recipes-list';
   // Lade-Skeleton bis loadRecipes() aufgelöst ist (Router blendet den Wrapper
   // bereits vor dem Daten-await ein).
   list.setAttribute('aria-busy', 'true');
   list.insertAdjacentHTML('beforeend', renderSkeletonList({ rows: 5, lines: 2 }));
+  // Kein wireScrollFade mehr: die Liste kachelt nicht länger mit 320px-Mindest-
+  // breite, sondern ist eine Zeilenliste in der 720er-Lesespalte. Der frühere
+  // 32px-Überlauf bei 320px war eine Eigenschaft des Rasters und ist mit ihm weg.
 
   const fab = document.createElement('button');
   fab.className = 'page-fab';
@@ -119,24 +147,32 @@ export async function render(container) {
   page.append(title, toolbar, list, fab);
   container.replaceChildren(page);
   renderKitchenTabsBar(container, '/recipes');
+  // Positionierung und Schliessen der Zeilen-Ueberlaufmenues. Idempotent, haengt an
+  // der stabilen Seitenwurzel - die Liste darin wird bei jedem Filter neu gebaut.
+  installPopoverMenus(page);
 
   if (window.lucide) window.lucide.createIcons({ el: container });
 
-  await Promise.all([loadRecipes(), loadCategories()]);
+  await Promise.all([loadRecipes(), loadCategories(), loadShoppingLists()]);
   renderRecipeList();
 
   fab.addEventListener('click', () => openRecipeModal('create'));
 
   list.addEventListener('click', async (e) => {
     const actionBtn = e.target.closest('[data-action]');
-    if (!actionBtn) {
-      // Klick auf die Kartenfläche öffnet die Nur-Lese-Ansicht: Kochen darf
-      // kein Bearbeiten-Formular erzwingen (Audit A1-21). Externe Links in
-      // der Karte behalten ihr natives Verhalten.
-      if (e.target.closest('a')) return;
-      const card = e.target.closest('.recipe-card[data-id]');
-      const recipe = card && state.recipes.find((r) => r.id === Number(card.dataset.id));
-      if (recipe) openRecipeReadModal(recipe);
+    if (!actionBtn) return;
+
+    // Aufklappen: der Zustand lebt am Button (aria-expanded) und am Panel
+    // (hidden). `hidden` statt max-height-Transition, weil ein per Transition
+    // versteckter Inhalt in headless-Renderern und auf inaktiven Tabs nie
+    // erscheint - der Reveal muss einen sichtbaren Default verbessern, nicht
+    // Sichtbarkeit an eine Animation binden.
+    if (actionBtn.dataset.action === 'toggle-detail') {
+      const panel = _container?.querySelector(`#recipe-detail-${actionBtn.dataset.id}`);
+      if (!panel) return;
+      const open = actionBtn.getAttribute('aria-expanded') === 'true';
+      actionBtn.setAttribute('aria-expanded', String(!open));
+      panel.hidden = open;
       return;
     }
 
@@ -159,21 +195,20 @@ export async function render(container) {
       return;
     }
 
+    if (actionBtn.dataset.action === 'to-shopping') {
+      await transferRecipe(recipe, actionBtn);
+      return;
+    }
+
     if (actionBtn.dataset.action === 'add-to-meals') {
-      window.yuvomi?.navigate(`/meals?recipe=${recipe.id}`);
+      await planRecipe(recipe, actionBtn);
     }
   });
 
-  // Enter/Space auf der fokussierten Karte öffnet die Lese-Ansicht (die Karte
-  // ist role=button; innere Buttons feuern ihren eigenen click).
-  list.addEventListener('keydown', (e) => {
-    if (e.key !== 'Enter' && e.key !== ' ') return;
-    const card = e.target.closest('.recipe-card[data-id]');
-    if (!card || e.target !== card) return;
-    e.preventDefault();
-    const recipe = state.recipes.find((r) => r.id === Number(card.dataset.id));
-    if (recipe) openRecipeReadModal(recipe);
-  });
+  // Kein eigener keydown-Handler mehr: das Aufklappen sitzt auf einem echten
+  // <button>, der Enter und Space von sich aus verarbeitet. Der frühere Handler
+  // gehörte zur Karte, die role="button" trug und damit ein Bedienelement mit
+  // Bedienelementen darin war.
 }
 
 function renderRecipeList() {
@@ -184,210 +219,272 @@ function renderRecipeList() {
   list.replaceChildren();
 
   if (!state.recipes.length) {
-    const empty = document.createElement('div');
-    empty.className = 'empty-state';
-
-    const emptyTitle = document.createElement('div');
-    emptyTitle.className = 'empty-state__title';
-    emptyTitle.textContent = t('recipes.emptyTitle');
-
-    const emptyDesc = document.createElement('div');
-    emptyDesc.className = 'empty-state__description';
-    emptyDesc.textContent = t('recipes.emptyDescription');
-
-    const emptyHint = document.createElement('p');
-    emptyHint.className = 'empty-state__hint';
-    emptyHint.textContent = t('emptyHint.recipes');
-    const emptyCta = document.createElement('button');
-    emptyCta.className = 'btn btn--primary empty-state__cta';
-    emptyCta.insertAdjacentHTML('afterbegin', '<i data-lucide="plus" aria-hidden="true" class="icon-md"></i>');
-    emptyCta.append(document.createTextNode(t('recipes.emptyAction')));
-    emptyCta.addEventListener('click', () => {
-      document.querySelector('.page-fab')?.click();
+    // Geteilter Renderer (utils/empty-state.js): erzwingt Reihenfolge und
+    // ARIA-Rolle. Vorher fehlte hier als einzigem Küchen-Leerzustand das Icon.
+    mountEmptyState(list, {
+      icon: 'book-text',
+      title: t('recipes.emptyTitle'),
+      description: t('recipes.emptyDescription'),
+      hint: t('emptyHint.recipes'),
+      action: {
+        label: t('recipes.emptyAction'),
+        icon: 'plus',
+        onClick: () => document.querySelector('.page-fab')?.click(),
+      },
     });
-    empty.append(emptyTitle, emptyDesc, emptyHint, emptyCta);
-    list.appendChild(empty);
-    if (window.lucide) window.lucide.createIcons({ el: empty });
     return;
   }
 
   const visible = filteredRecipes();
   if (!visible.length) {
-    const noHits = document.createElement('p');
-    noHits.className = 'recipes-search-empty';
-    noHits.setAttribute('role', 'status');
-    noHits.textContent = t('recipes.searchNoResults');
-    list.appendChild(noHits);
+    // Geteilter Renderer, Variante 'no-results' (role="status", sekundärer CTA).
+    // Vorher war das hier ein nacktes <p class="recipes-search-empty"> - die eine
+    // Stelle im Modul, die den erzwingenden Baustein umging, während die
+    // Schwester im Vorrat im identischen Zustand Icon, Überschrift, den
+    // Suchbegriff und einen Zurücksetzen-Pfad lieferte (Critique 2026-07-30).
+    mountEmptyState(list, {
+      variant: 'no-results',
+      title: t('recipes.noResultsTitle'),
+      description: t('recipes.searchNoResults'),
+      hint: state.query ? `„${state.query}"` : undefined,
+      action: {
+        // Geteilter Key: „Suche leeren" existiert in allen 23 Locales. Der
+        // Vorrat sagt „Suche und Filter zurücksetzen", weil er beides hat -
+        // Rezepte haben nur die Suche, und das Label soll nicht mehr versprechen
+        // als es tut.
+        label: t('common.searchClear'),
+        onClick: () => {
+          state.query = '';
+          const search = _container?.querySelector('#recipes-search');
+          if (search) search.value = '';
+          renderRecipeList();
+          search?.focus();
+        },
+      },
+    });
     return;
   }
 
+  // Eine Zeilenliste, keine Kacheln: das Kartenraster war der letzte Tab mit
+  // eigener Zeilen-Grammatik (20px Radius, 408px Höhe, drei CTA-Grundlinien,
+  // 48px Bodenversatz in derselben Rasterzeile). Als Zeile teilt es Fläche,
+  // Trennlinie, Textspalte und Bedienzone mit Einkauf und Vorrat.
+  const rows = document.createElement('ul');
+  rows.className = 'kitchen-rows';
+
   for (const recipe of visible) {
-    const card = document.createElement('article');
-    card.className = 'recipe-card';
-    card.dataset.id = String(recipe.id);
-    // Die Kartenfläche öffnet die Lese-Ansicht (Audit A1-21) und braucht
-    // deshalb Tastaturzugang; die inneren Aktions-Buttons bleiben eigene Stops.
-    card.setAttribute('role', 'button');
-    card.tabIndex = 0;
-    card.setAttribute('aria-label', `${t('recipes.viewRecipe')}: ${recipe.title}`);
-
-    const h = document.createElement('h2');
-    h.className = 'recipe-card__title';
-    h.textContent = recipe.title;
-
-    card.appendChild(h);
-
-    if (recipe.notes) {
-      const notes = document.createElement('p');
-      notes.className = 'recipe-card__notes';
-      notes.textContent = recipe.notes;
-      card.appendChild(notes);
-    }
-
-    const mealTypes = normalizeRecipeMealTypes(recipe.meal_types);
-    // Chips nur, wenn sie unterscheiden: gilt ein Rezept für alle Mahlzeiten,
-    // ist die volle Chip-Reihe reine Ornamentik auf jeder Karte (Audit A1-21).
-    if (mealTypes.length && mealTypes.length < mealTypeOptions().length) {
-      const badges = document.createElement('div');
-      badges.className = 'recipe-card__meal-types';
-      badges.replaceChildren(...mealTypeOptions()
-        .filter((option) => mealTypes.includes(option.key))
-        .map((option) => {
-          const badge = document.createElement('span');
-          badge.className = `meal-type-badge meal-type-badge--${option.key}`;
-          badge.textContent = option.label;
-          return badge;
-        }));
-      card.appendChild(badges);
-    }
-
-    if (recipe.recipe_url) {
-      const link = document.createElement('a');
-      link.className = 'btn btn--ghost recipe-card__link';
-      link.href = recipe.recipe_url;
-      link.target = '_blank';
-      link.rel = 'noopener noreferrer';
-      // Explizites Icon macht die Zeile als externen Link erkennbar, statt wie
-      // Fließtext zu wirken (Audit F10).
-      link.insertAdjacentHTML('beforeend', '<i data-lucide="external-link" class="icon-sm" aria-hidden="true"></i>');
-      const linkLabel = document.createElement('span');
-      linkLabel.textContent = t('recipes.openLink');
-      link.appendChild(linkLabel);
-      card.appendChild(link);
-    }
-
     const ingredients = recipe.ingredients ?? [];
+    const detailId = `recipe-detail-${recipe.id}`;
+    const hasDetail = Boolean(ingredients.length || recipe.notes || recipe.recipe_url);
+
+    const li = document.createElement('li');
+    li.className = 'recipe-row-item';
+    li.dataset.id = String(recipe.id);
+
+    const row = document.createElement('div');
+    row.className = 'kitchen-row recipe-row';
+
+    // Kanonisches Accordion-Muster: Überschrift umschließt den Button. Die
+    // Überschrift trägt die Dokumentstruktur, der Button den Zustand - vorher
+    // war die ganze Karte ein role="button" MIT Buttons darin, was für
+    // Hilfsmittel ein verschachteltes Bedienelement ist.
+    const heading = document.createElement('h2');
+    heading.className = 'kitchen-row__main recipe-row__heading';
+
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'kitchen-row__main--interactive recipe-row__toggle';
+    toggle.dataset.action = 'toggle-detail';
+    toggle.dataset.id = String(recipe.id);
+
+    const name = document.createElement('span');
+    name.className = 'kitchen-row__name';
+    name.textContent = recipe.title;
+    toggle.appendChild(name);
+
+    // Die Zutatenzahl ersetzt das frühere „+N": dort stand ein <li> mit
+    // cursor: pointer, ohne role, ohne tabindex, ohne aria-expanded, dessen
+    // Klick nachweislich nichts tat (Kartenhöhe 408 → 408px an sechs Karten
+    // gemessen, Critique 2026-07-30). Jetzt ist die Zahl die Beschriftung
+    // dessen, was das Aufklappen zeigt.
     if (ingredients.length) {
-      const ul = document.createElement('ul');
-      ul.className = 'recipe-card__ingredients';
-      // Auf die ersten 4 kürzen: begrenzt die Kartenhöhe → ruhigeres Raster.
-      // Vollständige Liste bleibt über „Bearbeiten" erreichbar.
-      const MAX_INGREDIENTS = 4;
-      for (const ing of ingredients.slice(0, MAX_INGREDIENTS)) {
-        const li = document.createElement('li');
-        li.className = 'recipe-card__ingredient';
-        const qty = ing.quantity ? `${ing.quantity} · ` : '';
-        li.textContent = `${qty}${ing.name}`;
-        ul.appendChild(li);
-      }
-      if (ingredients.length > MAX_INGREDIENTS) {
-        const more = document.createElement('li');
-        more.className = 'recipe-card__ingredient recipe-card__ingredient--more';
-        // Sprachneutraler Rest-Indikator (kein neuer Locale-Key nötig).
-        more.textContent = `+${ingredients.length - MAX_INGREDIENTS}`;
-        ul.appendChild(more);
-      }
-      card.appendChild(ul);
+      const meta = document.createElement('span');
+      meta.className = 'kitchen-row__meta';
+      meta.textContent = t('meals.ingredientCount', { count: ingredients.length });
+      toggle.appendChild(meta);
     }
 
-    const actions = document.createElement('div');
-    actions.className = 'recipe-card__actions';
+    if (hasDetail) {
+      toggle.setAttribute('aria-expanded', 'false');
+      toggle.setAttribute('aria-controls', detailId);
+      toggle.insertAdjacentHTML('beforeend',
+        '<i data-lucide="chevron-down" class="icon-sm recipe-row__chevron" aria-hidden="true"></i>');
+    } else {
+      // Ohne Detail kein Versprechen: kein Chevron, kein aria-expanded. Der
+      // Button öffnet dann direkt das Bearbeiten-Formular.
+      toggle.dataset.action = 'edit';
+    }
 
-    // Primäraktion sichtbar; die selteneren/gefährlicheren Aktionen als
-    // de-emphasierte Icon-Buttons — konsistent mit dem Icon-Action-Muster
-    // des Einkaufs (statt vier gleichrangiger Buttons inkl. lautem roten Delete).
-    const addToMeals = document.createElement('button');
-    addToMeals.className = 'btn recipe-card__primary';
-    addToMeals.type = 'button';
-    addToMeals.dataset.action = 'add-to-meals';
-    addToMeals.dataset.id = String(recipe.id);
-    addToMeals.textContent = t('recipes.addToMeals');
+    heading.appendChild(toggle);
+    row.appendChild(heading);
 
-    const iconActions = document.createElement('div');
-    iconActions.className = 'row-actions recipe-card__icon-actions';
-    const secondaryActions = [
+    const ROW_ACTIONS = [
       { action: 'edit',      icon: 'pencil',  label: t('common.edit') },
       { action: 'duplicate', icon: 'copy',    label: t('recipes.duplicate') },
       { action: 'delete',    icon: 'trash-2', label: t('common.delete'), danger: true },
     ];
-    for (const a of secondaryActions) {
+
+    const actions = document.createElement('div');
+    actions.className = 'kitchen-row__actions';
+
+    // Drei Zeilenaktionen kosten 152px von 262px Zeilenbreite bei 320px - 58% der
+    // Zeile für Sekundäraktionen. Für den Namen blieben 98px, und weil er in einem
+    // Flex-Elternteil steht, fiel er auf min-content: 8px, Zeilenhöhe 448px
+    // (Critique 2026-07-30, P0).
+    //
+    // Unter 30rem Zeilenbreite wandern sie deshalb in dasselbe Überlaufmenü, das der
+    // Einkaufs-Kopf benutzt - mit Labels, und ein 48px-Trigger statt drei Knöpfen.
+    // Die Container-Query dazu steht in recipes.css; hier stehen beide Fassungen im
+    // DOM, CSS entscheidet. Dieselbe Mechanik wie beim Kopf: `display: none` nimmt
+    // die ungenutzte Fassung auch aus der Tabfolge.
+    const inline = document.createElement('div');
+    inline.className = 'recipe-row__inline-actions';
+    for (const a of ROW_ACTIONS) {
       const btn = document.createElement('button');
       btn.className = `row-action${a.danger ? ' row-action--danger' : ''}`;
       btn.type = 'button';
       btn.dataset.action = a.action;
       btn.dataset.id = String(recipe.id);
-      btn.setAttribute('aria-label', a.label);
+      btn.setAttribute('aria-label', `${a.label}: ${recipe.title}`);
       btn.title = a.label;
-      const ic = document.createElement('i');
-      ic.dataset.lucide = a.icon;
-      ic.className = 'icon-md';
-      ic.setAttribute('aria-hidden', 'true');
-      btn.appendChild(ic);
-      iconActions.appendChild(btn);
+      btn.insertAdjacentHTML('beforeend',
+        `<i data-lucide="${a.icon}" class="icon-md" aria-hidden="true"></i>`);
+      inline.appendChild(btn);
+    }
+    actions.appendChild(inline);
+
+    const more = document.createElement('div');
+    more.className = 'recipe-row__more';
+    more.insertAdjacentHTML('beforeend', popoverMenuHtml({
+      id: `recipe-menu-${recipe.id}`,
+      label: t('common.moreActions'),
+      triggerClass: 'row-action',
+      items: ROW_ACTIONS.map((a) => ({ ...a, id: recipe.id })),
+    }));
+    actions.appendChild(more);
+
+    row.appendChild(actions);
+    li.appendChild(row);
+
+    if (hasDetail) {
+      const detail = document.createElement('div');
+      detail.className = 'recipe-detail';
+      detail.id = detailId;
+      detail.hidden = true;
+
+      const mealTypes = normalizeRecipeMealTypes(recipe.meal_types);
+      // Chips nur, wenn sie unterscheiden: gilt ein Rezept für alle Mahlzeiten,
+      // ist die volle Chip-Reihe reine Ornamentik (Audit A1-21).
+      if (mealTypes.length && mealTypes.length < mealTypeOptions().length) {
+        const badges = document.createElement('div');
+        badges.className = 'recipe-card__meal-types';
+        badges.replaceChildren(...mealTypeOptions()
+          .filter((option) => mealTypes.includes(option.key))
+          .map((option) => {
+            const badge = document.createElement('span');
+            badge.className = `meal-type-badge meal-type-badge--${option.key}`;
+            badge.textContent = option.label;
+            return badge;
+          }));
+        detail.appendChild(badges);
+      }
+
+      // VOLLSTÄNDIGE Zutatenliste, nicht die ersten vier: das Kürzen war nur
+      // nötig, um die Kartenhöhe zu bändigen. Ein Detail, das sich öffnet, hat
+      // keinen Grund, etwas zu verschweigen.
+      if (ingredients.length) {
+        const ul = document.createElement('ul');
+        ul.className = 'recipe-detail__ingredients';
+        for (const ing of ingredients) {
+          const item = document.createElement('li');
+          item.className = 'recipe-detail__ingredient';
+          item.textContent = ing.quantity ? `${ing.quantity} · ${ing.name}` : ing.name;
+          ul.appendChild(item);
+        }
+        detail.appendChild(ul);
+      }
+
+      if (recipe.notes) {
+        const notes = document.createElement('p');
+        notes.className = 'recipe-detail__notes';
+        notes.textContent = recipe.notes;
+        detail.appendChild(notes);
+      }
+
+      // Die beiden Kreislauf-Ausgänge stehen im Detail, nicht in der Zeile, und
+      // sind dort BESCHRIFTET. Grund: derselbe Weg hieß im Modul dreimal etwas
+      // anderes - ein 24px-Glyph im Essensplan, ein 48px-Glyph im Vorrat, ein
+      // 167px-Pill in den Rezepten (Critique 2026-07-30). Und man entscheidet
+      // sich fürs Einplanen, nachdem man gesehen hat, was drin ist. Der Preis
+      // ist ein zusätzlicher Tap für den häufigsten Weg; die Zeile bleibt dafür
+      // scanbar und auf 393px ohne fünf konkurrierende Bedienelemente.
+      const detailActions = document.createElement('div');
+      detailActions.className = 'recipe-detail__actions';
+
+      const addToMeals = document.createElement('button');
+      addToMeals.className = 'btn btn--primary';
+      addToMeals.type = 'button';
+      addToMeals.dataset.action = 'add-to-meals';
+      addToMeals.dataset.id = String(recipe.id);
+      addToMeals.textContent = t('recipes.addToMeals');
+      detailActions.appendChild(addToMeals);
+
+      if (state.lists.length && ingredients.length) {
+        const addToShopping = document.createElement('button');
+        addToShopping.className = 'btn btn--secondary';
+        addToShopping.type = 'button';
+        addToShopping.dataset.action = 'to-shopping';
+        addToShopping.dataset.id = String(recipe.id);
+        addToShopping.textContent = t('common.toShoppingList');
+        detailActions.appendChild(addToShopping);
+      }
+
+      if (recipe.recipe_url) {
+        const link = document.createElement('a');
+        link.className = 'btn btn--ghost';
+        link.href = recipe.recipe_url;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.insertAdjacentHTML('beforeend',
+          '<i data-lucide="external-link" class="icon-sm" aria-hidden="true"></i>');
+        const linkLabel = document.createElement('span');
+        linkLabel.textContent = t('recipes.openLink');
+        link.appendChild(linkLabel);
+        detailActions.appendChild(link);
+      }
+
+      detail.appendChild(detailActions);
+      li.appendChild(detail);
     }
 
-    actions.append(addToMeals, iconActions);
-    card.appendChild(actions);
-
-    list.appendChild(card);
+    rows.appendChild(li);
   }
+
+  list.appendChild(rows);
 
   if (window.lucide) window.lucide.createIcons({ el: list });
 }
 
-// Nur-Lese-Ansicht fürs Kochen (Audit A1-21): volle Zutatenliste und Notizen
-// ohne Formular-Chrome; Bearbeiten bleibt eine bewusste Folgeaktion.
-function openRecipeReadModal(recipe) {
-  const mealTypes = normalizeRecipeMealTypes(recipe.meal_types);
-  const showBadges = mealTypes.length && mealTypes.length < mealTypeOptions().length;
-  const ingredients = recipe.ingredients ?? [];
-
-  const content = `
-    <div class="recipe-read">
-      ${showBadges ? `<div class="recipe-card__meal-types">${mealTypeOptions()
-        .filter((o) => mealTypes.includes(o.key))
-        .map((o) => `<span class="meal-type-badge meal-type-badge--${esc(o.key)}">${esc(o.label)}</span>`)
-        .join('')}</div>` : ''}
-      ${ingredients.length ? `
-        <h3 class="recipe-read__heading">${t('recipes.ingredientsLabel')}</h3>
-        <ul class="recipe-read__ingredients">
-          ${ingredients.map((i) => `<li>${i.quantity ? `<strong>${esc(i.quantity)}</strong> ` : ''}${esc(i.name)}</li>`).join('')}
-        </ul>` : ''}
-      ${recipe.notes ? `
-        <h3 class="recipe-read__heading">${t('recipes.notesLabel')}</h3>
-        <p class="recipe-read__notes">${esc(recipe.notes)}</p>` : ''}
-      ${recipe.recipe_url ? `
-        <a class="btn btn--ghost recipe-card__link" href="${esc(recipe.recipe_url)}" target="_blank" rel="noopener noreferrer">
-          <i data-lucide="external-link" class="icon-sm" aria-hidden="true"></i>
-          <span>${t('recipes.openLink')}</span>
-        </a>` : ''}
-    </div>
-    <div class="modal-panel__footer">
-      <button type="button" class="btn btn--ghost" data-action="close-modal">${t('common.close')}</button>
-      <button type="button" class="btn btn--primary" id="recipe-read-edit">${t('common.edit')}</button>
-    </div>`;
-
-  openSharedModal({
-    title: recipe.title,
-    content,
-    size: 'md',
-    onSave(panel) {
-      panel.querySelector('#recipe-read-edit')?.addEventListener('click', () => {
-        openRecipeModal('edit', recipe);
-      });
-    },
-  });
-}
+/* ENTFERNT: openRecipeReadModal (Nur-Lese-Modal fürs Kochen, Audit A1-21).
+ *
+ * Es zeigte volle Zutatenliste, Notizen und Link - genau das, was jetzt das
+ * Aufklapp-Detail der Zeile zeigt, nur ohne Kontextverlust, ohne Overlay und
+ * ohne einen zweiten Weg zur selben Information (Kriterium aus distill:
+ * „wenn es woanders steht, wiederhole es nicht"). Sein Auslöser war zusätzlich
+ * eine Karte mit role="button", die Buttons enthielt.
+ *
+ * Der Zweck bleibt erfüllt: Lesen erzwingt weiter kein Bearbeiten-Formular.
+ */
 
 function openRecipeModal(mode, recipe = null) {
   const isEdit = mode === 'edit';
@@ -397,14 +494,14 @@ function openRecipeModal(mode, recipe = null) {
     size: 'md',
     content: `
       <div class="form-group">
-        <label class="form-label" for="recipe-title">${t('recipes.titleLabel')}</label>
+        <label class="form-label" for="recipe-title">${t('common.nameLabel')}</label>
         <input id="recipe-title" class="form-input" type="text" required placeholder="${t('recipes.titlePlaceholder')}">
       </div>
       <div class="form-group">
         <label class="form-label">${t('meals.mealTypeLabel')}</label>
         <div class="recipe-meal-types" id="recipe-meal-types">
           ${mealTypeOptions().map((option) => `
-            <label class="recipe-meal-types__option">
+            <label class="form-check recipe-meal-types__option">
               <input type="checkbox" value="${option.key}" checked>
               <span class="meal-type-badge meal-type-badge--${option.key}">${option.label}</span>
             </label>
@@ -484,7 +581,7 @@ async function saveRecipe(panel, mode, recipe) {
 
   if (!title) {
     // Fehler am Feld statt als ortloser Toast (geteiltes Muster, Critique P1).
-    reportFieldError(panel.querySelector('#recipe-title'), t('recipes.titleRequired'));
+    reportFieldError(panel.querySelector('#recipe-title'), t('common.nameRequired'));
     return;
   }
 
@@ -517,8 +614,142 @@ async function saveRecipe(panel, mode, recipe) {
   }
 }
 
+// --------------------------------------------------------
+// Zutaten → Einkaufsliste
+// --------------------------------------------------------
+
+/**
+ * Übernimmt die Zutaten eines Rezepts auf eine Einkaufsliste. Bei genau einer
+ * Liste ohne Rückfrage, sonst über die geteilte Auswahl - dasselbe Muster wie
+ * transferMeal() im Essensplan, damit sich der Weg in beiden Modulen gleich
+ * anfühlt. Der Server überspringt Zutaten, die schon unabgehakt auf der Liste
+ * liegen; die Rückmeldung nennt beide Zahlen.
+ */
+/**
+ * Rezept in den Essensplan übernehmen: fragt „Für wann?" hier und legt die
+ * Mahlzeit direkt an.
+ *
+ * Vorher navigierte dieser Weg auf `/meals?recipe=<id>`, wo ein Formular mit 27
+ * Feldern aufging - Titel „Mahlzeit hinzufügen" ohne das Rezept zu nennen, das
+ * Datumsfeld leer, 42 % des Dialogs unter der Sichtkante. Nach Escape blieb
+ * `?recipe=` in der URL und ein Reload öffnete das Formular erneut, beliebig oft
+ * (Critique 2026-07-29). Als einziger der fünf Transfers folgte er nicht dem
+ * Muster der anderen.
+ *
+ * Jetzt zwei Entscheidungen statt neun Feldern, kein Seitenwechsel, und der
+ * Query-Parameter existiert nicht mehr - der Zombie ist damit strukturell weg,
+ * nicht per `replaceState` kaschiert. Details lassen sich danach im Essensplan
+ * bearbeiten, wie bei jeder anderen Mahlzeit.
+ */
+async function planRecipe(recipe, btn) {
+  const types = normalizeRecipeMealTypes(recipe.meal_types);
+  // Vorauswahl: erklärt das Rezept genau einen Typ, ist die Sache klar. Erklärt
+  // es mehrere - was der Default ist, wenn niemand etwas gesetzt hat -, dann
+  // stand bisher „Frühstück" da, weil es in der Liste zuerst kommt: der Dialog
+  // schlug für ein Curry das Frühstück vor (Critique 2026-07-30). Ohne Signal
+  // vom Rezept ist das Abendessen die ehrlichere Annahme, es ist die Mahlzeit,
+  // die Haushalte am häufigsten planen.
+  const vorauswahl = types.length === 1 ? types[0] : (types.includes('dinner') ? 'dinner' : types[0]);
+  const typeOpts = mealTypeOptions()
+    .filter(({ key }) => types.includes(key))
+    .map(({ key, label }) =>
+      `<option value="${key}"${key === vorauswahl ? ' selected' : ''}>${esc(label)}</option>`)
+    .join('');
+
+  const today = toLocalDateKey(new Date());
+
+  openSharedModal({
+    title: t('recipes.planTitle', { name: recipe.title }),
+    size: 'sm',
+    content: `
+      <div class="form-group">
+        <label class="form-label" for="plan-date">${t('meals.dateLabel')}</label>
+        <yuvomi-datepicker type="date" id="plan-date" value="${esc(formatDateInput(today))}"></yuvomi-datepicker>
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="plan-type">${t('meals.mealTypeLabel')}</label>
+        <select class="form-input" id="plan-type">${typeOpts}</select>
+      </div>
+      <div class="modal-panel__footer modal-panel__footer--plain">
+        <button type="button" class="btn btn--secondary" data-action="close-modal">${esc(t('common.cancel'))}</button>
+        <!-- „Übernehmen", nicht die Wiederholung des Auslöser-Labels: die drei
+             anderen Transfer-Dialoge bestätigen genauso, und der Dialogtitel
+             nennt Rezept und Ziel bereits (Critique 2026-07-30). -->
+        <button type="button" class="btn btn--primary" id="plan-confirm">${esc(t('common.apply'))}</button>
+      </div>`,
+    onSave(panel) {
+      panel.querySelector('#plan-confirm').addEventListener('click', async (e) => {
+        const confirmBtn = e.currentTarget;
+        const dateField = panel.querySelector('#plan-date');
+        if (!isDateInputValid(dateField.value)) {
+          reportFieldError(dateField, t('calendar.invalidDate'));
+          return;
+        }
+        const date = parseDateInput(dateField.value);
+        const mealType = panel.querySelector('#plan-type').value;
+
+        confirmBtn.disabled = true;
+        try {
+          await api.post('/meals', mealPayloadFromRecipe(recipe, date, mealType));
+          closeSharedModal({ force: true });
+          window.yuvomi?.showToast(
+            t('recipes.planSuccess', { name: recipe.title, date: formatDate(date) }),
+            'success',
+          );
+        } catch (err) {
+          window.yuvomi?.showToast(err.data?.error ?? t('common.errorGeneric'), 'danger');
+          confirmBtn.disabled = false;
+        }
+      });
+    },
+  });
+
+  if (btn) btn.blur();
+}
+
+async function transferRecipe(recipe, btn) {
+  if (!state.lists.length) {
+    window.yuvomi?.showToast(t('meals.noShoppingLists'), 'danger');
+    return;
+  }
+
+  let listId = state.lists[0].id;
+  if (state.lists.length > 1) {
+    const options = state.lists.map((l) => ({ value: l.id, label: l.name }));
+    const choice = await selectModal(t('common.toShoppingListWhich'), options);
+    if (choice === null) return;
+    listId = Number(choice);
+  }
+
+  if (btn) btn.disabled = true;
+  try {
+    const res = await api.post(`/recipes/${recipe.id}/to-shopping-list`, { listId });
+    const added = res.data?.transferred ?? 0;
+    const skipped = res.data?.skipped ?? 0;
+
+    if (added > 0) {
+      // t() wählt die _one-Form selbst, sobald count numerisch ist (i18n.js).
+      // `list` nennt das Ziel: „5 Zutaten übernommen." sagte nicht, in welche der
+      // Listen (Critique 2026-07-30, P1).
+      window.yuvomi?.showToast(t('recipes.toShoppingSuccess', {
+        count: added,
+        list: state.lists.find((l) => l.id === listId)?.name ?? '',
+      }), 'success');
+      refreshKitchenBadges();
+    } else if (skipped > 0) {
+      window.yuvomi?.showToast(t('recipes.toShoppingAllPresent'), 'info');
+    } else {
+      window.yuvomi?.showToast(t('recipes.toShoppingNoIngredients'), 'info');
+    }
+  } catch (err) {
+    window.yuvomi?.showToast(err.data?.error ?? t('common.errorGeneric'), 'danger');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 async function removeRecipe(recipe) {
-  const itemEl = _container.querySelector(`.recipe-card[data-id="${recipe.id}"]`);
+  const itemEl = _container.querySelector(`.recipe-row-item[data-id="${recipe.id}"]`);
   if (itemEl) itemEl.style.display = 'none';
 
   scheduleUndoableDelete({

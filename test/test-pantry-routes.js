@@ -331,10 +331,18 @@ test('POST /shopping/:listId/import-pantry: übernimmt Name und Kategorie, Menge
     items: [{ pantry_item_id: flour.body.data.id, quantity: '2 kg' }],
   });
   assert.equal(r.status, 200);
-  assert.deepEqual(r.body.data, { added: 1, skipped: 0 });
+  assert.equal(r.body.data.added, 1);
+  assert.equal(r.body.data.skipped, 0);
 
-  const row = db.prepare('SELECT name, quantity, category FROM shopping_items WHERE list_id = ?').get(listId);
-  assert.deepEqual(row, { name: 'Mehl', quantity: '2 kg', category: 'Backwaren' });
+  const row = db.prepare('SELECT id, name, quantity, category FROM shopping_items WHERE list_id = ?').get(listId);
+  assert.deepEqual(
+    { name: row.name, quantity: row.quantity, category: row.category },
+    { name: 'Mehl', quantity: '2 kg', category: 'Backwaren' },
+  );
+  // added_ids traegt das Undo im Client (Critique 2026-07-30): es muss die
+  // tatsaechlich erzeugte Zeile benennen, nicht nur deren Anzahl - sonst loescht
+  // das Zuruecknehmen die falschen Artikel.
+  assert.deepEqual(r.body.data.added_ids, [row.id]);
 });
 
 test('POST /shopping/:listId/import-pantry: gleicher Name unabgehakt → übersprungen statt dupliziert', async () => {
@@ -346,7 +354,7 @@ test('POST /shopping/:listId/import-pantry: gleicher Name unabgehakt → übersp
   const r = await call('POST', `/shopping/${listId}/import-pantry`, {
     items: [{ pantry_item_id: sugar.body.data.id }],
   });
-  assert.deepEqual(r.body.data, { added: 0, skipped: 1 });
+  assert.deepEqual(r.body.data, { added: 0, skipped: 1, added_ids: [] });
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM shopping_items WHERE list_id = ?').get(listId).n, 1);
 });
 
@@ -355,6 +363,30 @@ test('POST /shopping/:listId/import-pantry: unbekannter Vorratsartikel → skipp
   const r = await call('POST', `/shopping/${list.body.data.id}/import-pantry`, {
     items: [{ pantry_item_id: 999999 }],
   });
-  assert.deepEqual(r.body.data, { added: 0, skipped: 1 });
+  assert.deepEqual(r.body.data, { added: 0, skipped: 1, added_ids: [] });
   assert.equal((await call('POST', '/shopping/999999/import-pantry', { items: [] })).status, 404);
+});
+
+// Das Undo des Warenkorbs loescht genau die erzeugten Artikel und nichts sonst.
+test('import-pantry: added_ids erlauben ein exaktes Zuruecknehmen', async () => {
+  db.prepare('DELETE FROM pantry_items').run();
+  const list = await call('POST', '/shopping', { name: 'Undo' });
+  const listId = list.body.data.id;
+  // Ein Fremdartikel, den das Undo nicht anfassen darf.
+  await call('POST', `/shopping/${listId}/items`, { name: 'Bleibt drin' });
+
+  const a = await call('POST', '/pantry', { name: 'Reis', quantity: 0, min_quantity: 1 });
+  const bItem = await call('POST', '/pantry', { name: 'Linsen', quantity: 0, min_quantity: 1 });
+  const r = await call('POST', `/shopping/${listId}/import-pantry`, {
+    items: [{ pantry_item_id: a.body.data.id }, { pantry_item_id: bItem.body.data.id }],
+  });
+  assert.equal(r.body.data.added, 2);
+  assert.equal(r.body.data.added_ids.length, 2);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM shopping_items WHERE list_id = ?').get(listId).n, 3);
+
+  for (const id of r.body.data.added_ids) {
+    assert.equal((await call('DELETE', `/shopping/items/${id}`)).status, 200);
+  }
+  const rest = db.prepare('SELECT name FROM shopping_items WHERE list_id = ?').all(listId);
+  assert.deepEqual(rest.map((x) => x.name), ['Bleibt drin']);
 });

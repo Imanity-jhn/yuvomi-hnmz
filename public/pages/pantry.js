@@ -18,9 +18,12 @@ import {
   wireBlurValidation,
   reportFieldError,
 } from '/components/modal.js';
-import { renderKitchenTabsBar } from '/utils/kitchen-tabs.js';
+import { renderKitchenTabsBar, refreshKitchenBadges } from '/utils/kitchen-tabs.js';
 import { renderSkeletonList } from '/utils/skeleton.js';
-import { scheduleUndoableDelete, vibrate } from '/utils/ux.js';
+// Alias, weil dieses Modul selbst eine `emptyStateEl()`-Funktion hat, die den
+// Renderer mit den Vorrats-Texten füllt.
+import { emptyStateEl as emptyStateComponentEl, mountEmptyState } from '/utils/empty-state.js';
+import { scheduleUndoableDelete, vibrate, wireScrollFade } from '/utils/ux.js';
 import { toLocalDateKey } from '/utils/date.js';
 import { DEFAULT_CATEGORY_NAME, categoryLabel } from '/utils/shopping-categories.js';
 import { locationLabel } from '/utils/pantry-locations.js';
@@ -67,8 +70,19 @@ function formatQuantity(value) {
   return new Intl.NumberFormat(getFormatLocale(), { maximumFractionDigits: 2 }).format(Number(value) || 0);
 }
 
+/**
+ * Einheit übersetzen, mit Rückfall auf den Rohwert. Alle Schreibpfade der App
+ * normalisieren über normalizePantryUnit() auf die zehn kanonischen Einheiten,
+ * ein unbekannter Wert ist also nicht über die Oberfläche erreichbar - wohl
+ * aber über einen direkten Datenbankzugriff, einen Fremdimport oder eine
+ * künftige Einheit, deren Locale-Key noch fehlt. Ohne diesen Rückfall stünde
+ * dann der nackte Schlüssel in der Zeile („1 pantry.units.Stk"), und zwar an
+ * der Stelle, an der die Menge steht. Der Rohwert ist immer noch lesbar.
+ */
 function unitLabel(unit) {
-  return t(`pantry.units.${unit}`);
+  const key = `pantry.units.${unit}`;
+  const label = t(key);
+  return label === key ? String(unit ?? '') : label;
 }
 
 function quantityText(item) {
@@ -190,7 +204,7 @@ export async function render(container) {
   // dieselbe Kopf-Grammatik wie Mahlzeiten/Rezepte/Einkauf.
   const title = document.createElement('h1');
   title.className = 'sr-only';
-  title.textContent = t('pantry.title');
+  title.textContent = t('nav.pantry');
 
   // Eine geteilte Live-Region für die ganze Seite statt einer je Zeile.
   const live = document.createElement('div');
@@ -199,25 +213,41 @@ export async function render(container) {
   live.setAttribute('role', 'status');
   live.setAttribute('aria-live', 'polite');
 
+  // Kanonischer Kopf, Gruppen-Variante (siehe .page-toolbar--in-group in
+  // layout.css): Suche im __center-Slot, Lagerort-Verwaltung im __actions-Slot -
+  // dieselbe Slot-Ordnung wie in den drei Geschwister-Tabs.
   const toolbar = document.createElement('div');
-  toolbar.className = 'pantry-toolbar';
+  toolbar.className = 'page-toolbar page-toolbar--in-group';
   toolbar.insertAdjacentHTML('beforeend', `
-    <div class="pantry-search">
-      <input type="search" class="form-input pantry-search__input" id="pantry-search"
-             placeholder="${esc(t('pantry.searchPlaceholder'))}"
-             aria-label="${esc(t('pantry.searchPlaceholder'))}">
+    <div class="page-toolbar__center">
+      <div class="pantry-search">
+        <input type="search" class="form-input pantry-search__input" id="pantry-search"
+               placeholder="${esc(t('pantry.searchPlaceholder'))}"
+               aria-label="${esc(t('pantry.searchPlaceholder'))}">
+      </div>
     </div>
-    <button class="btn btn--ghost btn--icon pantry-toolbar__locations" data-action="manage-locations"
-            aria-label="${esc(t('pantry.manageLocations'))}" title="${esc(t('pantry.manageLocations'))}">
-      <i data-lucide="archive" class="icon-md" aria-hidden="true"></i>
-    </button>`);
+    <div class="page-toolbar__actions">
+      <button class="btn btn--ghost btn--icon" data-action="manage-locations"
+              aria-label="${esc(t('pantry.manageLocations'))}" title="${esc(t('pantry.manageLocations'))}">
+        <i data-lucide="archive" class="icon-md" aria-hidden="true"></i>
+      </button>
+    </div>`);
 
   const filters = document.createElement('div');
   filters.className = 'pantry-filters';
   filters.id = 'pantry-filters';
 
+  // Slot für die Sammelaktions-Leiste, ÜBER dem Scroller. Sie lag vorher als
+  // erstes Kind in #pantry-list und scrollte damit weg - die Aktion betrifft aber
+  // die ganze gefilterte Liste und muss erreichbar bleiben, während man sie
+  // durchgeht. Der Slot trägt die Content-Spalte (siehe .pantry-bulkbar-slot) und
+  // verschwindet leer, damit er keine Zeile beansprucht.
+  const bulk = document.createElement('div');
+  bulk.className = 'pantry-bulkbar-slot';
+  bulk.id = 'pantry-bulkbar-slot';
+
   const list = document.createElement('div');
-  list.className = 'pantry-list';
+  list.className = 'kitchen-list pantry-list';
   list.id = 'pantry-list';
   list.setAttribute('aria-busy', 'true');
   list.insertAdjacentHTML('beforeend', renderSkeletonList({ rows: 6, lines: 2 }));
@@ -229,7 +259,7 @@ export async function render(container) {
   fab.setAttribute('aria-label', t('pantry.addItem'));
   fab.insertAdjacentHTML('beforeend', '<i data-lucide="plus" aria-hidden="true"></i>');
 
-  page.append(title, live, toolbar, filters, list, fab);
+  page.append(title, live, toolbar, filters, bulk, list, fab);
   container.replaceChildren(page);
   renderKitchenTabsBar(container, '/pantry');
 
@@ -266,22 +296,12 @@ export async function render(container) {
 
 function renderLoadError(list, err) {
   list.removeAttribute('aria-busy');
-  list.replaceChildren();
-  const box = document.createElement('div');
-  box.className = 'empty-state';
-  box.setAttribute('role', 'alert');
-  box.insertAdjacentHTML('beforeend', `
-    <i data-lucide="triangle-alert" class="empty-state__icon" aria-hidden="true"></i>
-    <div class="empty-state__title">${esc(t('pantry.loadErrorTitle'))}</div>
-    <div class="empty-state__description">${esc(err?.data?.error ?? t('pantry.loadErrorDescription'))}</div>`);
-  const retry = document.createElement('button');
-  retry.className = 'btn btn--primary empty-state__cta';
-  retry.type = 'button';
-  retry.textContent = t('common.retry');
-  retry.addEventListener('click', () => render(_container));
-  box.appendChild(retry);
-  list.appendChild(box);
-  if (window.lucide) window.lucide.createIcons({ el: box });
+  mountEmptyState(list, {
+    variant: 'error',
+    title: t('pantry.loadErrorTitle'),
+    description: err?.data?.error ?? t('pantry.loadErrorDescription'),
+    action: { label: t('common.retry'), onClick: () => render(_container) },
+  });
 }
 
 /**
@@ -306,6 +326,19 @@ let _scrolledFilter = null;
 function renderFilters() {
   const bar = _container?.querySelector('#pantry-filters');
   if (!bar) return { wasReset: false };
+
+  // Kanten-Anriss der Chip-Leiste. Sie scrollt horizontal (gemessen 135px
+  // Überhang bei 393px, 208px bei 320px), blendet ihre Scrollbar per CSS aus
+  // und hatte damit NULL Affordanz: der vierte Filter „Fast leer" begann bei
+  // x=394 in einem 393px-Viewport und existierte für Mobilnutzer nicht
+  // (Critique 2026-07-30). wireScrollFade setzt die geteilten has-fade-*-
+  // Klassen aus filter-chip.css - dasselbe Werkzeug, das das Wochenboard und
+  // die Kontakte-Filter schon nutzen. Einmal binden; der MutationObserver
+  // deckt die replaceChildren-Rerenders darunter ab.
+  if (!bar.dataset.fadeWired) {
+    bar.dataset.fadeWired = 'true';
+    wireScrollFade(bar);
+  }
 
   const counts = pantryFilterCounts(state.items, state.todayKey);
   const active = PANTRY_FILTERS.filter((key) => counts[key] > 0);
@@ -366,18 +399,21 @@ function renderFilters() {
  * Sammelaktion des „Fast leer"-Filters. Bewusst eine eigene Zeile über der
  * Liste statt als letztes Element der Chip-Leiste: dort lag sie hinter dem
  * horizontalen Scroll und war faktisch unsichtbar.
+ *
+ * Geteilte Grammatik `.kitchen-bulkbar` (styles/kitchen-row.css) - der Einkauf
+ * trägt seine Abschluss-Aktionen jetzt in derselben Leiste.
  */
 function bulkBarEl() {
   const bar = document.createElement('div');
-  bar.className = 'pantry-bulkbar';
+  bar.className = 'kitchen-bulkbar';
 
   const label = document.createElement('span');
-  label.className = 'pantry-bulkbar__label';
+  label.className = 'kitchen-bulkbar__label';
   label.textContent = t('pantry.bulkHint');
 
   const bulk = document.createElement('button');
   bulk.type = 'button';
-  bulk.className = 'btn btn--secondary pantry-bulkbar__action';
+  bulk.className = 'btn btn--secondary kitchen-bulkbar__action';
   bulk.insertAdjacentHTML('beforeend', '<i data-lucide="shopping-cart" class="icon-sm" aria-hidden="true"></i>');
   bulk.append(document.createTextNode(t('pantry.toShoppingAll')));
   bulk.addEventListener('click', () => sendToShopping(visibleItems()));
@@ -386,11 +422,25 @@ function bulkBarEl() {
   return bar;
 }
 
+/**
+ * Füllt den Slot über dem Scroller. Getrennt von renderList(), weil der Slot ein
+ * Geschwister der Liste ist - er darf nicht mit ihr geleert werden.
+ */
+function renderBulkBar() {
+  const slot = _container?.querySelector('#pantry-bulkbar-slot');
+  if (!slot) return;
+  slot.replaceChildren();
+  if (state.filter !== 'low' || !state.items.length || !visibleItems().length) return;
+  slot.appendChild(bulkBarEl());
+  if (window.lucide) window.lucide.createIcons({ el: slot });
+}
+
 function renderList() {
   const list = _container?.querySelector('#pantry-list');
   if (!list) return;
   list.removeAttribute('aria-busy');
   list.replaceChildren();
+  renderBulkBar();
 
   if (!state.items.length) {
     list.appendChild(emptyStateEl());
@@ -414,28 +464,32 @@ function renderList() {
     return;
   }
 
-  if (state.filter === 'low') list.appendChild(bulkBarEl());
+  // Die Sammelaktions-Leiste hängt jetzt im Slot ÜBER dem Scroller
+  // (renderBulkBar oben), nicht mehr als erstes Kind der Liste - dort scrollte
+  // sie weg, obwohl sie die ganze gefilterte Liste betrifft.
 
   for (const group of groupedItems(items)) {
     const section = document.createElement('section');
-    section.className = 'pantry-group';
+    // Geteilte Gruppen-Grammatik (styles/kitchen-row.css): die Gruppe trägt die
+    // weiße Fläche, die Zeilen darin nur Trennlinien.
+    section.className = 'kitchen-group pantry-group';
 
     if (group.label) {
       const heading = document.createElement('h2');
-      heading.className = 'pantry-group__title';
+      heading.className = 'kitchen-group__title';
       heading.insertAdjacentHTML('beforeend',
         `<i data-lucide="${esc(group.icon || 'package')}" class="icon-sm" aria-hidden="true"></i>`);
       const name = document.createElement('span');
       name.textContent = group.label;
       const count = document.createElement('span');
-      count.className = 'pantry-group__count';
+      count.className = 'kitchen-group__count';
       count.textContent = String(group.items.length);
       heading.append(name, count);
       section.appendChild(heading);
     }
 
     const rows = document.createElement('ul');
-    rows.className = 'pantry-rows';
+    rows.className = 'kitchen-rows pantry-rows';
     for (const item of group.items) rows.appendChild(rowEl(item));
     section.appendChild(rows);
     list.appendChild(section);
@@ -450,56 +504,44 @@ function renderList() {
  * und der Nutzer suchte den Fehler beim Suchbegriff.
  */
 function noResultsEl() {
-  const empty = document.createElement('div');
-  empty.className = 'empty-state';
-  empty.setAttribute('role', 'status');
-
   const active = [];
   if (state.query) active.push(`„${state.query}"`);
   if (state.filter !== 'all') {
     active.push(t({ expired: 'pantry.filterExpired', soon: 'pantry.filterSoon', low: 'pantry.filterLow' }[state.filter]));
   }
 
-  empty.insertAdjacentHTML('beforeend', `
-    <i data-lucide="search" class="empty-state__icon" aria-hidden="true"></i>
-    <div class="empty-state__title">${esc(t('pantry.noResultsTitle'))}</div>
-    <div class="empty-state__description">${esc(t('pantry.noResultsDescription'))}</div>
-    ${active.length ? `<p class="empty-state__hint">${esc(active.join(' · '))}</p>` : ''}`);
-
-  const reset = document.createElement('button');
-  reset.className = 'btn btn--secondary empty-state__cta';
-  reset.type = 'button';
-  reset.textContent = t('pantry.resetFilters');
-  reset.addEventListener('click', () => {
-    state.query = '';
-    state.filter = 'all';
-    const search = _container?.querySelector('#pantry-search');
-    if (search) search.value = '';
-    renderFilters();
-    renderList();
-    search?.focus();
+  return emptyStateComponentEl({
+    variant: 'no-results',
+    title: t('pantry.noResultsTitle'),
+    description: t('pantry.noResultsDescription'),
+    hint: active.length ? active.join(' · ') : undefined,
+    action: {
+      label: t('pantry.resetFilters'),
+      onClick: () => {
+        state.query = '';
+        state.filter = 'all';
+        const search = _container?.querySelector('#pantry-search');
+        if (search) search.value = '';
+        renderFilters();
+        renderList();
+        search?.focus();
+      },
+    },
   });
-  empty.appendChild(reset);
-  return empty;
 }
 
 function emptyStateEl() {
-  const empty = document.createElement('div');
-  empty.className = 'empty-state';
-  empty.insertAdjacentHTML('beforeend', `
-    <i data-lucide="archive" class="empty-state__icon" aria-hidden="true"></i>
-    <div class="empty-state__title">${esc(t('pantry.emptyTitle'))}</div>
-    <div class="empty-state__description">${esc(t('pantry.emptyDescription'))}</div>
-    <p class="empty-state__hint">${esc(t('emptyHint.pantry'))}</p>`);
-
-  const cta = document.createElement('button');
-  cta.className = 'btn btn--primary empty-state__cta';
-  cta.type = 'button';
-  cta.insertAdjacentHTML('afterbegin', '<i data-lucide="plus" aria-hidden="true" class="icon-md"></i>');
-  cta.append(document.createTextNode(t('pantry.emptyAction')));
-  cta.addEventListener('click', () => openItemModal('create'));
-  empty.appendChild(cta);
-  return empty;
+  return emptyStateComponentEl({
+    icon: 'archive',
+    title: t('pantry.emptyTitle'),
+    description: t('pantry.emptyDescription'),
+    hint: t('emptyHint.pantry'),
+    action: {
+      label: t('pantry.emptyAction'),
+      icon: 'plus',
+      onClick: () => openItemModal('create'),
+    },
+  });
 }
 
 /** Eine Vorratszeile. */
@@ -507,7 +549,10 @@ function rowEl(item) {
   const status = pantryItemStatus(item, state.todayKey);
 
   const li = document.createElement('li');
-  li.className = 'pantry-row';
+  // Geteilte Zeilen-Grammatik (styles/kitchen-row.css). Ohne --reserve-end: der
+  // Warenkorb sitzt nicht mehr an der Zeilenkante, sondern in einem festen Slot
+  // am Anfang der Bedienzone (siehe unten).
+  li.className = 'kitchen-row pantry-row';
   li.dataset.id = String(item.id);
   if (status.out) li.classList.add('pantry-row--out');
 
@@ -521,7 +566,7 @@ function rowEl(item) {
   // Zusatz ans Ende.
   const main = document.createElement('button');
   main.type = 'button';
-  main.className = 'pantry-row__main';
+  main.className = 'kitchen-row__main kitchen-row__main--interactive pantry-row__main';
   main.dataset.action = 'edit';
 
   // Name und Status in EINER Zeile: das Badge qualifiziert den Artikel, es ist
@@ -531,7 +576,7 @@ function rowEl(item) {
   headline.className = 'pantry-row__headline';
 
   const name = document.createElement('span');
-  name.className = 'pantry-row__name';
+  name.className = 'kitchen-row__name';
   name.textContent = item.name;
   headline.appendChild(name);
 
@@ -561,7 +606,7 @@ function rowEl(item) {
   }
   if (metaParts.length) {
     const meta = document.createElement('span');
-    meta.className = 'pantry-row__meta';
+    meta.className = 'kitchen-row__meta';
     meta.textContent = metaParts.join(' · ');
     main.appendChild(meta);
   }
@@ -584,7 +629,28 @@ function rowEl(item) {
   // deshalb wandert der Knoten selbst. Jeder Button trägt den Artikelnamen im
   // Label, die Tab-Folge bleibt also auch ohne vorangehenden Namen eindeutig.
   const actions = document.createElement('div');
-  actions.className = 'pantry-row__actions';
+  actions.className = 'kitchen-row__actions';
+
+  // Der Warenkorb sitzt am ANFANG der Bedienzone, nicht an der rechten
+  // Zeilenkante.
+  //
+  // Vorher lag er dort absolut positioniert - und damit genau in der Ecke, die
+  // der FAB besetzt: gemessen 87% Überdeckung im Ruhezustand bei 393px, der
+  // höchste Einzelwert des Moduls (Critique 2026-07-30). Ein Fehltap dort schickt
+  // einen Artikel auf die Einkaufsliste des ganzen Haushalts.
+  //
+  // Was jetzt in der FAB-Ecke liegt, ist der Stepper-„+". Ein abgefangener Tap
+  // dort ändert keine Daten, sondern öffnet das Anlegen-Formular, das man mit Esc
+  // schließt. Der Tausch ist bewusst: dieselbe Restüberdeckung, aber auf der
+  // harmlosen Aktion statt auf der folgenreichen.
+  //
+  // Der Slot ist IMMER da, auch ohne Warenkorb. Sonst wäre die Bedienzone in
+  // jeder Zeile anders breit und die Minus-Buttons stünden pro Zeile woanders -
+  // genau der Grund, aus dem der Knopf ursprünglich an die Zeilenkante wanderte.
+  const cartSlot = document.createElement('div');
+  cartSlot.className = 'pantry-row__cart-slot';
+  if (status.out || status.low) cartSlot.appendChild(cartEl(item));
+  actions.appendChild(cartSlot);
 
   const stepper = document.createElement('div');
   stepper.className = 'pantry-stepper';
@@ -616,29 +682,25 @@ function rowEl(item) {
   stepper.append(minus, value, plus);
   actions.appendChild(stepper);
 
-  li.append(actions, main);
-
-  // Kontextuelle Einkaufs-Aktion ans ZEILENENDE, nicht in die Aktionsgruppe:
-  // dort verbreiterte sie die Gruppe um 52px, schob den Namen aus der Spalte
-  // der übrigen Zeilen und trieb ihn in den Umbruch. Am Ende schrumpft
-  // stattdessen der Name, und alle Namen starten an derselben Kante.
-  //
-  // Dass sie damit wieder in der FAB-Spalte liegt, ist bewusst in Kauf
-  // genommen: sie erscheint nur bei leeren/knappen Artikeln und ist zusätzlich
-  // über den „Fast leer"-Filter und dessen Sammelaktion erreichbar - anders
-  // als „+", das die ständige Hauptbedienung ist.
-  if (status.out || status.low) {
-    const cart = document.createElement('button');
-    cart.type = 'button';
-    cart.className = 'row-action pantry-row__cart';
-    cart.dataset.action = 'to-shopping';
-    cart.setAttribute('aria-label', `${t('pantry.toShopping')}: ${item.name}`);
-    cart.title = t('pantry.toShopping');
-    cart.insertAdjacentHTML('beforeend', '<i data-lucide="shopping-cart" class="icon-md" aria-hidden="true"></i>');
-    li.appendChild(cart);
-  }
-
+  // Name zuerst, Bedienung danach: eine Vorratsliste wird nach Namen gescannt,
+  // nicht nach Zahlen. Vorher las sich die Zeile „− 500 g + Naturjoghurt" und
+  // damit gegen die Leserichtung und gegen alle drei Geschwistermodule, die
+  // ausnahmslos mit dem Namen führen. Nebeneffekt: die Namenskante steht jetzt
+  // von selbst, statt mit der Stepper-Breite zu wandern (Critique 2026-07-29).
+  li.append(main, actions);
   return li;
+}
+
+/** Kontextuelle Einkaufs-Aktion einer Zeile; nur bei leeren/knappen Artikeln. */
+function cartEl(item) {
+  const cart = document.createElement('button');
+  cart.type = 'button';
+  cart.className = 'row-action pantry-row__cart';
+  cart.dataset.action = 'to-shopping';
+  cart.setAttribute('aria-label', `${t('common.toShoppingList')}: ${item.name}`);
+  cart.title = t('common.toShoppingList');
+  cart.insertAdjacentHTML('beforeend', '<i data-lucide="shopping-cart" class="icon-md" aria-hidden="true"></i>');
+  return cart;
 }
 
 // --------------------------------------------------------
@@ -710,7 +772,43 @@ function adjustQuantity(item, direction, row) {
     }
   }, QUANTITY_DEBOUNCE_MS);
 
-  pendingQuantity.set(item.id, { timer, rollback, seq });
+  // `flush` schickt den gedebouncten Wert sofort ab, wenn die Seite verschwindet.
+  pendingQuantity.set(item.id, {
+    timer,
+    rollback,
+    seq,
+    flush: () => {
+      clearTimeout(timer);
+      pendingQuantity.delete(item.id);
+      // keepalive: der Request muss den Seitenwechsel überleben. Ohne ihn
+      // bricht der Browser ihn mit dem Dokument ab.
+      api.patch(`/pantry/${item.id}`, { quantity: item.quantity }, { keepalive: true })
+        .catch(() => { /* Die Seite ist weg; ein Toast hätte kein Ziel mehr. */ });
+    },
+  });
+  bindQuantityFlush();
+}
+
+let _quantityFlushBound = false;
+
+/**
+ * Offene Mengenänderungen beim Verschwinden der Seite noch abschicken.
+ *
+ * Der Stepper schreibt 450ms gedebounced. Genau in diesem Fenster ist der
+ * typische Ablauf: am Vorratsschrank stehen, „+" tippen, Telefon sperren. Der
+ * Timer feuerte dann nie, die UI hatte den neuen Wert aber schon optimistisch
+ * gezeigt - beim nächsten Öffnen stand der alte Bestand da, ohne jede Meldung.
+ *
+ * Dasselbe Muster wie `bindDeleteFlush` in utils/ux.js (Audit F-13): einmal
+ * global gebunden, `pagehide` deckt Tab-Schließen, Reload und den
+ * App-Wechsel auf iOS ab.
+ */
+function bindQuantityFlush() {
+  if (_quantityFlushBound) return;
+  _quantityFlushBound = true;
+  window.addEventListener('pagehide', () => {
+    for (const entry of [...pendingQuantity.values()]) entry.flush?.();
+  });
 }
 
 /** Sagt eine Bestandsänderung über die eine geteilte Live-Region der Seite an. */
@@ -741,12 +839,11 @@ function refreshRowQuantity(row, item) {
   row.classList.toggle('pantry-row--out', status.out);
 
   // Bestands-Badge und Einkaufs-Aktion hängen an der Menge und müssen mitgehen.
+  // Der Warenkorb-Slot wird als GANZES getauscht, nicht der Knopf darin: der Slot
+  // hält die Breite der Bedienzone konstant, auch wenn er leer ist.
   const fresh = rowEl(item);
   row.querySelector('.pantry-row__main')?.replaceWith(fresh.querySelector('.pantry-row__main'));
-  const oldCart = row.querySelector('.pantry-row__cart');
-  const newCart = fresh.querySelector('.pantry-row__cart');
-  if (oldCart && !newCart) oldCart.remove();
-  else if (!oldCart && newCart) row.appendChild(newCart);
+  row.querySelector('.pantry-row__cart-slot')?.replaceWith(fresh.querySelector('.pantry-row__cart-slot'));
 
   if (window.lucide) window.lucide.createIcons({ el: row });
 }
@@ -786,7 +883,7 @@ async function sendToShopping(items) {
   let listId = lists[0].id;
   if (lists.length > 1) {
     const chosen = await selectModal(
-      t('pantry.chooseList'),
+      t('common.toShoppingListWhich'),
       lists.map((l) => ({ value: String(l.id), label: l.name }))
     );
     if (!chosen) return;
@@ -797,15 +894,56 @@ async function sendToShopping(items) {
     const res = await api.post(`/shopping/${listId}/import-pantry`, {
       items: items.map((item) => ({ pantry_item_id: item.id, quantity: shortfallText(item) })),
     });
-    const { added = 0, skipped = 0 } = res.data ?? {};
+    const { added = 0, skipped = 0, added_ids: addedIds = [] } = res.data ?? {};
     if (!added) {
       window.yuvomi?.showToast(t('pantry.toShoppingNone'), 'info');
       return;
     }
+    // Zwei vollständige Sätze, mit Leerzeichen verbunden. Vorher stand ein
+    // Interpunkt dazwischen: das ergab einen zusammengesetzten Satz, der in
+    // Sprachen mit anderer Satzstellung bricht, und ein Screenreader liest das
+    // Zeichen mit (Critique 2026-07-29). Ein einziger Key mit beiden Zahlen
+    // wäre die Alternative - der müsste dann aber zwei Plurale in einem String
+    // beugen, was Intl.PluralRules nicht kann.
+    // `list` nennt das ZIEL. „… auf die Einkaufsliste übernommen." benannte den
+    // Typ, nicht die Liste - bei mehreren Listen bleibt damit offen, auf welche
+    // (Critique 2026-07-30, P1). Der Name steht hier ohnehin fest: entweder gibt es
+    // nur eine Liste, oder der Nutzer hat sie gerade ausgewählt.
+    const listName = lists.find((l) => l.id === listId)?.name ?? '';
     const message = skipped
-      ? `${t('pantry.toShoppingDone', { count: added })} · ${t('pantry.toShoppingSkipped', { count: skipped })}`
-      : t('pantry.toShoppingDone', { count: added });
-    window.yuvomi?.showToast(message, 'success');
+      ? `${t('pantry.toShoppingDone', { count: added, list: listName })} ${t('pantry.toShoppingSkipped', { count: skipped })}`
+      : t('pantry.toShoppingDone', { count: added, list: listName });
+    // Der Einkaufs-Tab zeigt jetzt eine andere Zahl.
+    refreshKitchenBadges();
+
+    // Undo für den einen Pfad im Modul, der etwas ERZEUGT und bisher keines
+    // anbot. Er ist zugleich der Pfad, den man am leichtesten versehentlich
+    // nimmt: der Warenkorb sitzt in der Zeile direkt neben „Menge erhöhen", und
+    // die beiden bedeuten das Gegenteil voneinander (Critique 2026-07-30).
+    //
+    // Echtes Rücknehmen, kein verzögerter Commit: der Server überspringt
+    // Duplikate, die Anzahl im Toast kennt also erst er. Ein verzögerter Commit
+    // müsste sie vorher versprechen. Stattdessen liefert er die erzeugten IDs und
+    // das Undo löscht genau diese.
+    //
+    // Ohne IDs (ältere Serverantwort) erscheint der Toast ohne Aktion, statt
+    // einen Knopf zu zeigen, der nichts zurücknehmen kann.
+    const undo = addedIds.length
+      ? async () => {
+          try {
+            await Promise.all(addedIds.map((id) => api.delete(`/shopping/items/${id}`)));
+            // Zählfrei: die Anzahl stand eine Sekunde vorher im Toast, den der
+            // Nutzer gerade angetippt hat. Ein zweiter Zähler wäre ein Key mit
+            // _one/_few/_two-Kategorien über 23 Locales - für eine Bestätigung,
+            // die nichts Neues sagt.
+            window.yuvomi?.showToast(t('pantry.toShoppingUndone'), 'info');
+          } catch (err) {
+            window.yuvomi?.showToast(err.data?.error ?? t('common.errorGeneric'), 'danger');
+          }
+        }
+      : null;
+
+    window.yuvomi?.showToast(message, 'success', 5000, undo);
   } catch (err) {
     window.yuvomi?.showToast(err.data?.error ?? t('common.errorGeneric'), 'danger');
   }
@@ -832,11 +970,11 @@ function openItemModal(mode, item = null) {
     .join('');
 
   openSharedModal({
-    title: isEdit ? t('pantry.editItem') : t('pantry.addItem'),
+    title: isEdit ? t('common.editItem') : t('pantry.addItem'),
     size: 'md',
     content: `
       <div class="form-group">
-        <label class="form-label" for="pantry-name">${esc(t('pantry.nameLabel'))}</label>
+        <label class="form-label" for="pantry-name">${esc(t('common.nameLabel'))}</label>
         <input id="pantry-name" class="form-input" type="text" required
                placeholder="${esc(t('pantry.namePlaceholder'))}">
       </div>
@@ -912,7 +1050,7 @@ async function saveItem(panel, mode, item) {
   const name = nameInput.value.trim();
 
   if (!name) {
-    reportFieldError(nameInput, t('pantry.nameRequired'));
+    reportFieldError(nameInput, t('common.nameRequired'));
     return;
   }
 

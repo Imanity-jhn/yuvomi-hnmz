@@ -178,4 +178,71 @@ router.delete('/:id', (req, res) => {
   }
 });
 
+// --------------------------------------------------------
+// Integration: Rezeptzutaten → Einkaufsliste
+// --------------------------------------------------------
+
+/**
+ * POST /api/v1/recipes/:id/to-shopping-list
+ * Zutaten eines Rezepts auf eine Einkaufsliste übernehmen.
+ * Body: { listId: number }
+ * Response: { data: { transferred: number, skipped: number } }
+ *
+ * Anders als bei Mahlzeiten wird hier NICHTS am Rezept markiert: ein Rezept ist
+ * eine Vorlage, die beliebig oft gekocht wird - ein „schon übertragen"-Flag wie
+ * meal_ingredients.on_shopping_list wäre nach dem ersten Einkauf für immer
+ * gesetzt. Stattdessen überspringt der Import, was unter demselben Namen bereits
+ * unabgehakt auf der Liste liegt; doppeltes Übernehmen fügt also nichts hinzu,
+ * statt die Liste zu verdoppeln.
+ */
+router.post('/:id/to-shopping-list', (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!id) return res.status(400).json({ error: 'Invalid recipe ID.', code: 400 });
+
+    const recipe = db.get().prepare('SELECT id FROM recipes WHERE id = ?').get(id);
+    if (!recipe) return res.status(404).json({ error: 'Recipe not found.', code: 404 });
+
+    const vList = num(req.body.listId, 'Listen-ID', { required: true });
+    const errors = collectErrors([vList]);
+    if (errors.length) return res.status(400).json({ error: errors.join(' '), code: 400 });
+
+    const list = db.get().prepare('SELECT id FROM shopping_lists WHERE id = ?').get(vList.value);
+    if (!list) return res.status(404).json({ error: 'Shopping list not found.', code: 404 });
+
+    const ingredients = db.get().prepare(
+      'SELECT name, quantity, category FROM recipe_ingredients WHERE recipe_id = ? ORDER BY id ASC',
+    ).all(id);
+    if (!ingredients.length) return res.json({ data: { transferred: 0, skipped: 0 } });
+
+    const result = db.transaction(() => {
+      const existing = db.get().prepare(
+        'SELECT name FROM shopping_items WHERE list_id = ? AND is_checked = 0',
+      ).all(vList.value);
+      const present = new Set(existing.map((i) => i.name.trim().toLowerCase()));
+
+      const insertItem = db.get().prepare(`
+        INSERT INTO shopping_items (list_id, name, quantity, category)
+        VALUES (?, ?, ?, ?)
+      `);
+
+      let transferred = 0;
+      let skipped = 0;
+      for (const ing of ingredients) {
+        const key = ing.name.trim().toLowerCase();
+        if (present.has(key)) { skipped += 1; continue; }
+        insertItem.run(vList.value, ing.name, ing.quantity, ing.category || 'Sonstiges');
+        present.add(key);
+        transferred += 1;
+      }
+      return { transferred, skipped };
+    });
+
+    res.json({ data: result });
+  } catch (err) {
+    log.error('POST /:id/to-shopping-list error:', err);
+    res.status(500).json({ error: 'Internal error', code: 500 });
+  }
+});
+
 export default router;

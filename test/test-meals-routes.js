@@ -429,3 +429,81 @@ test('POST /week-to-shopping-list: überträgt offene Zutaten der ganzen Woche',
 });
 
 test.after(() => server.close());
+
+// --------------------------------------------------------------------------
+// Transfer-Fallback: Mahlzeit aus Rezept ohne eigene Zutaten
+// --------------------------------------------------------------------------
+
+const RECIPE_WITH_ING = db.prepare(`INSERT INTO recipes (title, created_by) VALUES ('Curry', ?)`).run(U).lastInsertRowid;
+db.prepare(`INSERT INTO recipe_ingredients (recipe_id, name, quantity, category) VALUES (?, 'Reis', '250 g', 'Grundnahrung')`).run(RECIPE_WITH_ING);
+db.prepare(`INSERT INTO recipe_ingredients (recipe_id, name, quantity) VALUES (?, 'Kokosmilch', '400 ml')`).run(RECIPE_WITH_ING);
+
+test('GET /: rezeptbasierte Mahlzeit ohne eigene Zutaten meldet recipe_ingredient_count', async () => {
+  await createMeal({ date: '2026-10-05', title: 'Curry-Abend', recipe_id: RECIPE_WITH_ING });
+  const r = await call('GET', '/?week=2026-10-05');
+  const meal = r.body.data.find((m) => m.title === 'Curry-Abend');
+  assert.equal(meal.ingredients.length, 0, 'keine virtuellen Zutaten im Array');
+  assert.equal(meal.recipe_ingredient_count, 2, 'aber die Zahl ist bekannt');
+});
+
+test('GET /: Mahlzeit mit eigenen Zutaten meldet recipe_ingredient_count 0', async () => {
+  await createMeal({
+    date: '2026-10-06', title: 'Eigenbau', recipe_id: RECIPE_WITH_ING,
+    ingredients: [{ name: 'Nudeln' }],
+  });
+  const r = await call('GET', '/?week=2026-10-05');
+  const meal = r.body.data.find((m) => m.title === 'Eigenbau');
+  assert.equal(meal.ingredients.length, 1);
+  assert.equal(meal.recipe_ingredient_count, 0, 'eigene Zutaten haben Vorrang');
+});
+
+test('POST /:id/to-shopping-list: materialisiert Rezeptzutaten und überträgt sie', async () => {
+  const m = (await createMeal({ date: '2026-10-07', title: 'Curry-Transfer', recipe_id: RECIPE_WITH_ING })).body.data;
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM meal_ingredients WHERE meal_id = ?').get(m.id).c, 0);
+
+  const r = await call('POST', `/${m.id}/to-shopping-list`, { listId: LIST });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.data.transferred, 2);
+
+  const copied = db.prepare('SELECT name, quantity, category, on_shopping_list FROM meal_ingredients WHERE meal_id = ? ORDER BY id').all(m.id);
+  assert.equal(copied.length, 2, 'Rezeptzutaten wurden zu echten meal_ingredients');
+  assert.equal(copied[0].name, 'Reis');
+  assert.equal(copied[0].quantity, '250 g');
+  assert.equal(copied[0].category, 'Grundnahrung');
+  assert.equal(copied[1].category, 'Sonstiges', 'Default greift wie bei eigenen Zutaten');
+  assert.ok(copied.every((c) => c.on_shopping_list === 1), 'alle als übertragen markiert');
+
+  const items = db.prepare('SELECT name FROM shopping_items WHERE list_id = ? AND added_from_meal = ?').all(LIST, m.id);
+  assert.equal(items.length, 2);
+});
+
+test('POST /:id/to-shopping-list: materialisiert nicht erneut nach vollständigem Transfer', async () => {
+  const m = (await createMeal({ date: '2026-10-08', title: 'Curry-Zweitlauf', recipe_id: RECIPE_WITH_ING })).body.data;
+  await call('POST', `/${m.id}/to-shopping-list`, { listId: LIST });
+
+  const second = await call('POST', `/${m.id}/to-shopping-list`, { listId: LIST });
+  assert.equal(second.body.data.transferred, 0);
+  assert.equal(
+    db.prepare('SELECT COUNT(*) c FROM meal_ingredients WHERE meal_id = ?').get(m.id).c, 2,
+    'keine Duplikate durch zweite Materialisierung',
+  );
+});
+
+test('POST /:id/to-shopping-list: eigene Zutaten schließen die Rezeptzutaten aus', async () => {
+  const m = (await createMeal({
+    date: '2026-10-09', title: 'Nur-Eigen', recipe_id: RECIPE_WITH_ING,
+    ingredients: [{ name: 'Brot' }],
+  })).body.data;
+
+  const r = await call('POST', `/${m.id}/to-shopping-list`, { listId: LIST });
+  assert.equal(r.body.data.transferred, 1, 'nur die eigene Zutat, kein Reis/Kokosmilch');
+  const names = db.prepare('SELECT name FROM meal_ingredients WHERE meal_id = ?').all(m.id).map((i) => i.name);
+  assert.deepEqual(names, ['Brot']);
+});
+
+test('POST /:id/to-shopping-list: Mahlzeit ohne Rezept und ohne Zutaten → 0 übertragen', async () => {
+  const m = (await createMeal({ date: '2026-10-10', title: 'Leer' })).body.data;
+  const r = await call('POST', `/${m.id}/to-shopping-list`, { listId: LIST });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.data.transferred, 0);
+});

@@ -238,9 +238,29 @@ router.get('/', (req, res) => {
       }
     }
 
+    // Aus einem Rezept geplante Mahlzeiten tragen nur dessen recipe_id, keine
+    // eigenen meal_ingredients - die entstehen erst beim ersten Transfer
+    // (siehe POST /:id/to-shopping-list). Ohne diesen Zähler bliebe der
+    // Einkaufslisten-Button auf genau solchen Karten unsichtbar, obwohl die
+    // Zutaten bekannt sind. Bewusst nur die ZAHL, keine virtuellen Zutaten:
+    // Einträge ohne echte id würden das Zutaten-Formular brechen.
+    const recipeCountMap = {};
+    const fromRecipe = meals.filter((m) => m.recipe_id && !(ingredientMap[m.id]?.length));
+    if (fromRecipe.length > 0) {
+      const recipeIds = [...new Set(fromRecipe.map((m) => m.recipe_id))];
+      const counts = db.get().prepare(`
+        SELECT recipe_id, COUNT(*) AS c FROM recipe_ingredients
+        WHERE recipe_id IN (${recipeIds.map(() => '?').join(',')})
+        GROUP BY recipe_id
+      `).all(...recipeIds);
+      const byRecipe = Object.fromEntries(counts.map((r) => [r.recipe_id, r.c]));
+      for (const m of fromRecipe) recipeCountMap[m.id] = byRecipe[m.recipe_id] ?? 0;
+    }
+
     const result = meals.map((m) => ({
       ...m,
       ingredients: ingredientMap[m.id] || [],
+      recipe_ingredient_count: recipeCountMap[m.id] ?? 0,
     }));
 
     res.json({ data: result, weekStart: from, weekEnd: to });
@@ -638,7 +658,7 @@ router.delete('/ingredients/:ingId', (req, res) => {
 router.post('/:id/to-shopping-list', (req, res) => {
   try {
     const mealId = parseInt(req.params.id, 10);
-    const meal   = db.get().prepare('SELECT id FROM meals WHERE id = ?').get(mealId);
+    const meal   = db.get().prepare('SELECT id, recipe_id FROM meals WHERE id = ?').get(mealId);
     if (!meal) return res.status(404).json({ error: 'Mahlzeit nicht gefunden', code: 404 });
 
     const { listId } = req.body;
@@ -647,6 +667,31 @@ router.post('/:id/to-shopping-list', (req, res) => {
 
     const list = db.get().prepare('SELECT id FROM shopping_lists WHERE id = ?').get(listId);
     if (!list) return res.status(404).json({ error: 'Einkaufsliste nicht gefunden', code: 404 });
+
+    // Eine aus einem Rezept geplante Mahlzeit hat keine eigenen Zutaten - sie
+    // kennt nur die recipe_id. Beim ersten Transfer werden die Rezeptzutaten
+    // hier zu echten meal_ingredients materialisiert. Erst danach greift das
+    // on_shopping_list-Flag, das die Mahlzeit (anders als das wiederverwendbare
+    // Rezept) vor doppeltem Übertragen schützt. Bedingung ist bewusst „gar
+    // keine Zutaten" und nicht „keine offenen": nach einem vollständigen
+    // Transfer darf nicht erneut materialisiert werden.
+    const existingCount = db.get()
+      .prepare('SELECT COUNT(*) AS c FROM meal_ingredients WHERE meal_id = ?').get(mealId).c;
+    if (existingCount === 0 && meal.recipe_id) {
+      const recipeIngredients = db.get().prepare(
+        'SELECT name, quantity, category FROM recipe_ingredients WHERE recipe_id = ? ORDER BY id ASC',
+      ).all(meal.recipe_id);
+      if (recipeIngredients.length > 0) {
+        const copyIng = db.get().prepare(
+          'INSERT INTO meal_ingredients (meal_id, name, quantity, category) VALUES (?, ?, ?, ?)',
+        );
+        db.transaction(() => {
+          for (const ing of recipeIngredients) {
+            copyIng.run(mealId, ing.name, ing.quantity, ing.category || 'Sonstiges');
+          }
+        });
+      }
+    }
 
     const ingredients = db.get().prepare(`
       SELECT * FROM meal_ingredients

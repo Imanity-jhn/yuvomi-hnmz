@@ -930,10 +930,13 @@ html:has(.search-overlay--visible) yuvomi-install-prompt {
 
 .page-fab {
   position: fixed;
-  bottom: calc(var(--nav-bottom-height) + var(--space-6));
+  /* Geometrie aus tokens.css (--fab-size / --fab-offset-bottom): der Freiraum
+   * unter Listen (--fab-clearance) leitet sich daraus ab und kann so nicht
+   * mehr vom FAB wegdriften. */
+  bottom: var(--fab-offset-bottom);
   right: var(--space-4);
-  width: 52px;
-  height: 52px;
+  width: var(--fab-size);
+  height: var(--fab-size);
   border-radius: var(--radius-full);
   background-color: var(--module-accent, var(--color-accent));
   color: var(--color-ink-on-vivid);
@@ -944,7 +947,9 @@ html:has(.search-overlay--visible) yuvomi-install-prompt {
   cursor: pointer;
   border: none;
   z-index: calc(var(--z-nav) - 1);
-  transition: transform var(--transition-base), background-color var(--transition-fast);
+  /* `opacity` gehört dazu, seit .page-fab--retracted sie mitschaltet - ohne sie
+   * würde der FAB beim Wegfahren gleiten und gleichzeitig hart ausblenden. */
+  transition: transform var(--transition-base), opacity var(--transition-base), background-color var(--transition-fast);
   -webkit-tap-highlight-color: transparent;
   animation: fab-in 420ms var(--ease-out) backwards;
 }
@@ -966,6 +971,37 @@ html:has(.search-overlay--visible) yuvomi-install-prompt {
 /* Long Loop: FAB-Animation nach N Aufrufen deaktivieren */
 html.fab-anim-done .page-fab {
   animation: none;
+}
+
+/* Zurückgefahren beim Abwärtsscrollen (utils/fab-scroll.js).
+ *
+ * Er weicht der Zeile, über der er sonst liegt: gemessen bis 53.2% Überdeckung
+ * einer Zeilenaktion (Critique 2026-07-30). Die frühere Antwort war eine 76px
+ * breite Gasse in jeder Zeile - kollisionsfrei, aber bei 320px 24% der
+ * Viewportbreite und Artikelnamen auf vier lesbare Zeichen gekürzt.
+ *
+ * `transform` plus `opacity`, keine Layout-Property: der FAB ist fixiert, ein
+ * Wegfahren darf keinen Reflow der Liste auslösen. `pointer-events: none`, damit
+ * die verdeckte Zeilenaktion im zurückgefahrenen Zustand wirklich erreichbar ist
+ * und nicht ein unsichtbarer Knopf den Tap frisst - dieselbe Kopplung, die der
+ * opacity-Guard in test-frontend-audit.js projektweit erzwingt.
+ *
+ * `visibility` bleibt bewusst unangetastet: der FAB behält seinen Platz in der
+ * Fokusreihenfolge, damit Tastaturnutzer ihn per Tab und per `n`-Shortcut
+ * erreichen, unabhängig von der Scrollposition. */
+.page-fab--retracted {
+  transform: translateY(calc(var(--fab-size) + var(--space-6))) scale(0.9);
+  opacity: 0;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Kein sanftes Wegfahren, aber sehr wohl ein Wegfahren: die Bewegung ist hier
+   * funktional (sie gibt eine Bedienung frei), nicht dekorativ. Reduzierte
+   * Bewegung heißt weniger Animation, nicht weniger Bedienbarkeit. */
+  .page-fab--retracted {
+    transition: none;
+  }
 }
 
 /* Desktop: FAB Position anpassen (keine Bottom-Nav) und etwas kleiner */
@@ -1071,6 +1107,36 @@ html.fab-anim-done .page-fab {
   }
 }
 
+/* Opt-in: der Kopf sitzt UNTER einer Tab-Gruppenleiste (.sub-tabs-bar).
+ *
+ * Ohne diese Variante konnte die Küche den kanonischen Kopf nicht benutzen:
+ * `.kitchen-tabs-bar` trägt den 3px-Akzentstreifen der Gruppe
+ * (kitchen-tabs.css), ein `.page-toolbar` darunter hätte einen zweiten
+ * Streifen in derselben Farbe direkt darunter gesetzt - genau der
+ * Doppelstreifen aus Issue #577. Statt den Kopf zu meiden, haben sich alle
+ * vier Küchen-Tabs eigene Köpfe gebaut (week-nav / list-header / recipes-
+ * toolbar / pantry-toolbar), mit gemessenen Bauhöhen von 54 bis 188px und
+ * vier verschiedenen Slot-Ordnungen (Critique 2026-07-29).
+ *
+ * Die Variante gibt genau EINE Eigenschaft ab: den Akzentstreifen, den die
+ * Gruppenleiste schon trägt. Alles andere - Padding, Bleed, Hintergrund,
+ * Sticky-Rolle, Titel-Typografie, Slot-Grammatik - bleibt der kanonische Kopf.
+ *
+ * Das `top` NICHT verschieben. Naheliegend wäre, den Kopf um die Höhe der
+ * Gruppenleiste nach unten zu versetzen, damit er „darunter" klebt. Das
+ * unterstellt aber, der Scrollport sei das Viewport. In den Küchen-Tabs ist der
+ * Modul-Root eine Flex-Spalte mit `overflow: hidden` und damit SELBST der
+ * Scrollport; die Gruppenleiste liegt außerhalb davon. Ein `top: 56px` schob
+ * den Kopf dort 56px nach UNTEN über den folgenden Inhalt - im Vorrat lag er
+ * über der Filter-Chip-Leiste, im Essensplan über der ersten Slot-Reihe
+ * (gemessen 2026-07-29). Innerhalb eines nicht scrollenden Roots ist `top: 0`
+ * korrekt, und die Leiste darüber kann den Kopf ohnehin nicht überlaufen.
+ *
+ * Nutzer: die vier Küchen-Tabs. Für health-tabs.js ebenso verwendbar. */
+.page-toolbar--in-group {
+  border-top: none;
+}
+
 @media (max-width: 640px) {
   .page-toolbar {
     /* Nur die Bauhöhe verdichten. Der horizontale Rand bleibt bewusst
@@ -1079,6 +1145,164 @@ html.fab-anim-done .page-fab {
     padding-block: var(--space-2);
   }
 
+}
+
+/* --------------------------------------------------------
+ * Formular-Checkbox (geteilt)
+ *
+ * Nutzer: die Küchen-Dialoge („Artikel von der Einkaufsliste löschen" im
+ * Übernahme-Dialog, die Mahlzeit-Typen im Rezept-Formular).
+ *
+ * WARUM: Beide waren nackte `<input type="checkbox">` - System-Größe, System-
+ * Akzentfarbe, keine eigene Trefferfläche -, während die Liste daneben
+ * 44×44-Custom-Controls benutzt und SECHS andere Module (Geburtstage, Kontakte,
+ * Dokumente, Gesundheit, Belohnungen, Einstellungen) ihre Checkboxen bereits per
+ * `accent-color` und fester Größe einkleiden. Die folgenreichste Checkbox des
+ * Moduls - sie löscht die eingekauften Artikel von der Liste und ist
+ * standardmäßig aktiv - war damit die unauffälligste (Critique 2026-07-30, P2).
+ *
+ * DER DEFAULT BLEIBT AKTIV. Wer eingekauft hat und die Ware einräumt, will sie
+ * nicht ein zweites Mal kaufen; das Häkchen wegzunehmen wäre der seltene Fall. Was
+ * fehlte, war nicht der andere Default, sondern ein Control, das man sieht.
+ *
+ * NATIVE CHECKBOX, KEIN NACHBAU: das ist die App-Konvention (sechs Module) und die
+ * native Box bringt Tastatur, Indeterminate-Zustand und Plattform-Semantik mit.
+ * `.toggle` daneben ist bewusst etwas anderes - ein Schalter für „Zustand an/aus",
+ * keine Auswahl aus mehreren.
+ * -------------------------------------------------------- */
+
+.form-check {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  cursor: pointer;
+  /* Die Trefferfläche sitzt am LABEL, nicht an der Box: eine 20px-Box auf 44px
+   * aufzublasen würde sie visuell verfälschen, das Label ist ohnehin klickbar. */
+  min-height: var(--target-md);
+}
+
+@media (hover: none) {
+  .form-check {
+    min-height: var(--target-lg);
+  }
+}
+
+.form-check input[type="checkbox"] {
+  width: var(--space-5);
+  height: var(--space-5);
+  /* --active-module-accent, NICHT nur --module-accent: das Modal hängt im
+   * Top-Layer außerhalb der Modul-Wurzel, die --module-accent setzt. Mit dem
+   * Modul-Token allein fiel die Checkbox auf den violetten App-Akzent zurück,
+   * während der ganze Dialog um sie herum das Küchen-Orange trug (gemessen
+   * rgb(108,58,237) statt #C2410C). Genau dafür setzt der Router
+   * --active-module-accent global auf <html> - dieselbe Kette, die FAB und Nav
+   * benutzen. --module-accent bleibt vorn, damit ein Control INNERHALB einer
+   * Modul-Wurzel weiter sein eigenes Modul spiegelt. */
+  accent-color: var(--module-accent, var(--active-module-accent, var(--color-accent)));
+  flex-shrink: 0;
+  cursor: pointer;
+  margin: 0;
+}
+
+/* --------------------------------------------------------
+ * Überlaufmenü (geteilt, native Popover-API)
+ *
+ * Nutzer: der Kopf der Einkaufsliste auf Touch (utils/popover-menu.js). Er trug
+ * dort fünf Bedienelemente in 173px Höhe, drei davon unbeschriftete Icons -
+ * darunter „Liste löschen" für die Liste des ganzen Haushalts (Critique
+ * 2026-07-30).
+ *
+ * Diese Grammatik existiert im Repo bereits zweimal privat:
+ * `.contact-more-menu__panel` + `.contact-menu-item` (contacts.css) und
+ * `.documents-context-menu` + `__item` (documents.css). Beide sind bis auf die
+ * Klassennamen deckungsgleich mit dem hier. Sie sind bewusst nicht mitmigriert -
+ * der Auftrag war die Küche, und zwei fremde Module umzustellen ist ein eigener
+ * Schritt. Wer ihn geht, löscht dort rund 60 Zeilen und ändert hier nichts.
+ * -------------------------------------------------------- */
+
+/* `display: none` als Grundzustand, `flex` erst bei :popover-open: das UA-Blatt
+ * setzt `display: none` auf `[popover]`, und eine eigene display-Deklaration
+ * ohne Popover-Bedingung würde es schlagen - dieselbe Falle wie die
+ * [hidden]-Durchsetzung ein paar Zeilen weiter unten. */
+.popover-menu {
+  position: fixed;
+  margin: 0;
+  inset: auto;
+  z-index: var(--z-dropdown);
+  min-width: 200px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-0h);
+  padding: var(--space-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface);
+  box-shadow: var(--shadow-md);
+  /* Die Position rechnet JS erst im `toggle`-Ereignis; ohne die Startopazität
+   * blitzt das Panel eine Frame lang oben links auf. */
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+
+.popover-menu:popover-open {
+  display: flex;
+}
+
+/* Icon UND Textlabel, immer. Das ist der ganze Zweck des Menüs: die drei
+ * Kopf-Aktionen des Einkaufs waren mobil nackte Glyphen. */
+.popover-menu__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  font: inherit;
+  font-size: var(--text-sm);
+  color: var(--color-text-primary);
+  text-align: start;
+  cursor: pointer;
+  /* --target-md, nicht --target-lg: die Einträge stehen in einer Liste mit
+   * Trennung durch Abstand, nicht als isolierte Ziele in einer Zeile. */
+  min-height: var(--target-md);
+  transition: background-color var(--transition-fast);
+}
+
+@media (hover: none) {
+  .popover-menu__item {
+    min-height: var(--target-lg);
+  }
+}
+
+.popover-menu__item:hover,
+.popover-menu__item:focus-visible {
+  background-color: var(--color-surface-hover);
+}
+
+.popover-menu__item i,
+.popover-menu__item svg {
+  flex-shrink: 0;
+  color: var(--color-text-secondary);
+}
+
+.popover-menu__item--danger,
+.popover-menu__item--danger i,
+.popover-menu__item--danger svg {
+  color: var(--color-danger);
+}
+
+.popover-menu__item--danger:hover,
+.popover-menu__item--danger:focus-visible {
+  background-color: color-mix(in srgb, var(--color-danger) 10%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .popover-menu,
+  .popover-menu__item {
+    transition: none;
+  }
 }
 
 /* Toolbar-"Neu"-Buttons überall verstecken - FAB übernimmt.
@@ -1094,9 +1318,26 @@ html.fab-anim-done .page-fab {
  * wurde. Bisher wurde dieselbe Falle punktuell in documents.css, contacts.css
  * und budget.css entschärft; hier steht sie einmal für alle geteilten
  * Bedienelemente. `hidden` heißt versteckt, ausnahmslos. */
+/* Seit 2026-07-30 auch `.page-toolbar`: ohne aktive Liste versteckt die
+ * Einkaufsliste ihren #list-head, und dessen `display: flex` schlug das
+ * UA-`[hidden]`. Übrig blieb ein 25px hoher leerer Streifen über dem
+ * Leerzustand. Die Selektorliste bleibt bewusst lückenlos - der Guard in
+ * test-budget-ui.js prüft die Nähe von Selektor und Deklaration. */
+/* Und `.recipe-detail`: das Aufklapp-Panel der Rezeptzeile trägt `display: grid`
+ * und war deshalb dauerhaft offen, obwohl `hidden` gesetzt war und das Chevron
+ * „zu" zeigte - dieselbe Falle, drittes Mal. Ein Prüfskript, das nur die
+ * DOM-Property `hidden` liest, sieht sie NICHT; es braucht das berechnete
+ * `display`. */
+/* Und `.kitchen-bulkbar`: die Sammelaktions-Leiste des Einkaufs trägt
+ * `display: flex` und ist nur bei abgehakten Artikeln gefüllt - ohne diese Zeile
+ * blieb bei null Treffern ein leerer, gerahmter und getönter Streifen über der
+ * Liste stehen. Vierte Fundstelle derselben Falle. */
 .page-fab[hidden],
 .btn[hidden],
 .form-group[hidden],
+.page-toolbar[hidden],
+.recipe-detail[hidden],
+.kitchen-bulkbar[hidden],
 p.field-hint--warn[hidden] {
   display: none !important;
 }
@@ -2421,8 +2662,16 @@ p.field-hint--warn[hidden] {
   box-shadow: 0 0 0 3px var(--color-accent-light);
 }
 
-.input::placeholder,
-.form-input::placeholder {
+/* Auf ALLE Textfelder, nicht nur auf .input/.form-input.
+ *
+ * Vorher griff die Regel nur über die zwei Klassen. Jedes Feld ohne sie fiel auf
+ * Chromes UA-Default #757575 zurück, der im Dark Mode nicht mitkippt: gemessen
+ * 3.46:1 an den beiden Quick-Add-Feldern der Einkaufsliste und 3.12:1 am
+ * globalen Suchfeld - unter den 4.5:1, die WCAG 1.4.3 auch für Platzhaltertext
+ * fordert (Critique 2026-07-29). Der Elementselektor deckt jedes künftige Feld
+ * mit ab, statt auf die richtige Klasse zu hoffen. */
+input::placeholder,
+textarea::placeholder {
   color: var(--color-text-placeholder);
   opacity: 1; /* Firefox setzt ::placeholder sonst auf opacity < 1 und senkt den Kontrast erneut */
 }
@@ -2723,6 +2972,15 @@ p.field-hint--warn[hidden] {
   padding: var(--space-12) var(--space-6);
   text-align: center;
   animation: empty-state-in var(--duration-2xl) var(--ease-out) both;
+  /* Immer oben ansetzen, nie in der Restfläche zentriert.
+   *
+   * In einem Grid-Elternteil mit `align-content: start` (Rezepte, Vorrat) saß der
+   * Leerzustand oben, in einer gestreckten Flex-Spalte (Einkaufen) zentrierte
+   * ihn `justify-content: center` in der ganzen Resthöhe: gemessen lag der Titel
+   * bei y=174 / 242 / 482, also drei Achsen für denselben Zustand (Critique
+   * 2026-07-29). `flex: 0 0 auto` verhindert das Strecken; in Grid-Eltern ist es
+   * ein No-op. Die 48px Innenabstand oben geben den Abstand zum Kopf. */
+  flex: 0 0 auto;
 }
 
 @keyframes empty-state-in {
@@ -2745,6 +3003,10 @@ p.field-hint--warn[hidden] {
   font-size: var(--text-base);
   font-weight: var(--font-weight-semibold);
   color: var(--color-text-primary);
+  /* Der Titel ist seit dem Audit ein <h2> (Überschriften-Semantik für
+   * Screenreader). Der UA-Margin einer Überschrift würde die gap-basierte
+   * Abstandsfolge des Leerzustands verdoppeln. */
+  margin: 0;
 }
 
 .empty-state__description {

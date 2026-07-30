@@ -10,10 +10,11 @@ import { clearApiCache } from '/sw-register.js';
 import { initI18n, getLocale, t, formatDate, formatTime } from '/i18n.js';
 import { esc } from '/utils/html.js';
 import { wireScrollFade } from '/utils/ux.js';
+import { installFabRetract } from '/utils/fab-scroll.js';
 import { init as initReminders, stop as stopReminders } from '/reminders.js';
 import { initPush, stopPush } from '/push.js';
 import { numberLocaleFor } from '/settings/region-presets.js';
-import { isKitchenRoute, getLastKitchenRoute } from '/utils/kitchen-tabs.js';
+import { isKitchenRoute, isKitchenModule, getLastKitchenRoute } from '/utils/kitchen-tabs.js';
 import { getLastHealthRoute, HEALTH_ROUTES } from '/utils/health-tabs.js';
 import { activityType } from '/utils/health-activity.js';
 import { buildHelpRows } from '/utils/help.js';
@@ -595,7 +596,13 @@ async function navigate(path, userOrPushState = true, pushState = true) {
       }
     }
 
-    const accent = route?.thirdPartyModule?.accent || (route?.module ? getCSSToken(`--module-${route.module}`) : '');
+    // Küchen-Routen lösen auf --module-kitchen auf, nicht auf ihr eigenes
+    // --module-*: die vier Tabs sind EIN Modul (kitchenGroup) und teilen einen
+    // Akzent. Sonst wechselte der 3px-Streifen der Tab-Leiste und der FAB beim
+    // Tabwechsel die Farbe - dieselbe Botschaft wie ein echter Modulwechsel
+    // (Critique 2026-07-29). Begründung am Token in tokens.css.
+    const accentToken = moduleAccentToken(route?.module);
+    const accent = route?.thirdPartyModule?.accent || (accentToken ? getCSSToken(accentToken) : '');
     document.documentElement.style.setProperty('--active-module-accent', accent);
 
     // Optimistisches Chrome-Feedback: aktive Nav-Markierung + Indikator-Pille und
@@ -1008,6 +1015,14 @@ async function renderPage(route, previousPath = null) {
         localStorage.setItem(fabKey, String(fabCount));
       }
       document.documentElement.classList.toggle('fab-anim-done', fabCount >= FAB_SEEN_MAX);
+
+      // Der FAB fährt beim Abwärtsscrollen weg, damit er nicht über der
+      // Zeilenaktion liegt, nach der der Nutzer gerade sucht (gemessen bis 53.2%
+      // Überdeckung, Critique 2026-07-30). Idempotent und ohne Lebenszyklus: die
+      // Funktion installiert genau einen Document-Listener in der Capture-Phase
+      // und löst den aktuellen FAB erst zum Ereigniszeitpunkt auf. Deshalb hier
+      // aufrufbar, obwohl der FAB pro Seite neu entsteht.
+      installFabRetract();
     }
 
     // Read-only-Modus (#467): Bei „Nur lesen"-Modulen die Anlege-Affordance (FAB)
@@ -2299,6 +2314,23 @@ async function disableFailedThirdPartyModule(moduleId) {
   }
 }
 
+/**
+ * Akzent-Token-Name eines Moduls. Die vier Küchen-Module lösen gemeinsam auf
+ * --module-kitchen auf: sie sind EIN Modul mit einem Nav-Eintrag, und ein
+ * Farbwechsel beim Tabwechsel sendet dieselbe Botschaft wie ein Modulwechsel
+ * (Critique 2026-07-29). Ein Auflöser für alle Nav-Pfade - Bottom-Nav, Sidebar,
+ * More-Sheet und Streifen -, damit die Regel nicht viermal einzeln steht.
+ */
+function moduleAccentToken(mod) {
+  if (!mod) return '';
+  return isKitchenModule(mod) ? '--module-kitchen' : `--module-${mod}`;
+}
+
+function moduleAccentVar(mod) {
+  const token = moduleAccentToken(mod);
+  return token ? `var(${token})` : '';
+}
+
 function navItemEl({ path, navHref, label, icon, module: mod, accent, navId }) {
   const a = document.createElement('a');
   a.href = navHref ?? path;
@@ -2309,7 +2341,7 @@ function navItemEl({ path, navHref, label, icon, module: mod, accent, navId }) {
   a.setAttribute('aria-label', label);
   a.setAttribute('title', label);
   if (accent) a.style.setProperty('--item-module-accent', accent);
-  else if (mod) a.style.setProperty('--item-module-accent', `var(--module-${mod})`);
+  else if (mod) a.style.setProperty('--item-module-accent', moduleAccentVar(mod));
   const iconWrap = document.createElement('div');
   iconWrap.className = 'nav-item__icon-wrap';
   const well = document.createElement('div');
@@ -2335,13 +2367,16 @@ function navItemEl({ path, navHref, label, icon, module: mod, accent, navId }) {
   return a;
 }
 
-function kitchenNavButtonEl(item) {
+function kitchenNavButtonEl() {
   const kitchenBtn = document.createElement('button');
   kitchenBtn.className = 'nav-item nav-item--kitchen';
   kitchenBtn.id = 'kitchen-btn';
   kitchenBtn.type = 'button';
   kitchenBtn.dataset.navId = 'kitchen';
-  kitchenBtn.style.setProperty('--item-module-accent', `var(--module-${item.module || 'meals'})`);
+  // Konstant: EIN Eintrag, EIN Akzent. Vorher folgte er dem aktiven Sub-Tab und
+  // wechselte orange → teal → pink → oliv, obwohl der Nutzer das Modul nicht
+  // verlassen hat (Critique 2026-07-29).
+  kitchenBtn.style.setProperty('--item-module-accent', 'var(--module-kitchen)');
   kitchenBtn.setAttribute('aria-label', t('nav.kitchen'));
   kitchenBtn.setAttribute('title', t('nav.kitchen'));
 
@@ -2414,7 +2449,7 @@ function moreNavButtonEl() {
 }
 
 function mobileDestinationEl(item) {
-  return item.navId === 'kitchen' ? kitchenNavButtonEl(item) : navItemEl(item);
+  return item.navId === 'kitchen' ? kitchenNavButtonEl() : navItemEl(item);
 }
 
 function buildBottomNavItems(moreBtn = moreNavButtonEl()) {
@@ -2557,7 +2592,7 @@ function moreItemEl({ path, navHref, label, icon, module: mod, accent, navId }) 
   if (navHref) a.dataset.navHref = navHref;
   a.className = 'more-item';
   if (accent) a.style.setProperty('--item-module-accent', accent);
-  else if (mod) a.style.setProperty('--item-module-accent', `var(--module-${mod})`);
+  else if (mod) a.style.setProperty('--item-module-accent', moduleAccentVar(mod));
   const well = document.createElement('div');
   well.className = 'more-item__icon-well';
   const iconFactory = NAV_ICONS[icon];
@@ -2612,7 +2647,7 @@ function setMoreButtonState(moreBtn, activeSecondary) {
     if (activeSecondary.accent) {
       moreBtn.style.setProperty('--item-module-accent', activeSecondary.accent);
     } else if (activeSecondary.module) {
-      moreBtn.style.setProperty('--item-module-accent', `var(--module-${activeSecondary.module})`);
+      moreBtn.style.setProperty('--item-module-accent', moduleAccentVar(activeSecondary.module));
     }
   } else {
     moreBtn.removeAttribute('aria-current');
@@ -2645,14 +2680,12 @@ function updateNav(path) {
   if (kitchenNavBtn) {
     const isKitchen = isKitchenRoute(path);
     kitchenNavBtn.classList.toggle('nav-item--active', isKitchen);
+    // Der Akzent ist konstant (--module-kitchen, in kitchenNavButtonEl gesetzt)
+    // und wird hier nicht mehr je aktivem Sub-Tab nachgezogen.
     if (isKitchen) {
       kitchenNavBtn.setAttribute('aria-current', 'page');
-      const kitchenMod = navItems().find((n) => n.path === getLastKitchenRoute())?.module;
-      if (kitchenMod) kitchenNavBtn.style.setProperty('--item-module-accent', `var(--module-${kitchenMod})`);
     } else {
       kitchenNavBtn.removeAttribute('aria-current');
-      const kitchenMod = navItems().find((n) => n.path === getLastKitchenRoute())?.module;
-      kitchenNavBtn.style.setProperty('--item-module-accent', `var(--module-${kitchenMod || 'meals'})`);
     }
 
     const kitchenBtnLabel = kitchenNavBtn.querySelector('.nav-item__label');
@@ -2666,8 +2699,6 @@ function updateNav(path) {
     const isKitchen = isKitchenRoute(path);
     if (isKitchen) {
       sidebarKitchenNav.setAttribute('aria-current', 'page');
-      const kitchenMod = navItems().find((n) => n.path === getLastKitchenRoute())?.module;
-      if (kitchenMod) sidebarKitchenNav.style.setProperty('--item-module-accent', `var(--module-${kitchenMod})`);
     } else {
       sidebarKitchenNav.removeAttribute('aria-current');
     }

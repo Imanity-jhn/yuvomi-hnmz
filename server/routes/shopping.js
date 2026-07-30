@@ -523,7 +523,15 @@ router.post('/:listId/import-meal-plan', (req, res) => {
 //
 // Liegt derselbe Name bereits unabgehakt auf der Liste, wird übersprungen statt
 // dupliziert - zweimal "Milch" hilft im Supermarkt niemandem.
-// Response: { data: { added: number, skipped: number } }
+// Response: { data: { added: number, skipped: number, added_ids: number[] } }
+//
+// `added_ids` traegt das Undo im Client: der Warenkorb in einer Vorratszeile war
+// die einzige Aktion des Kuechenmoduls, die etwas erzeugt und dafuer kein
+// Zuruecknehmen anbot - und sie sitzt 4px neben "Menge erhoehen", das das
+// Gegenteil bedeutet (Critique 2026-07-30). Ein verzoegerter Commit waere die
+// Alternative gewesen; dann muesste der Toast eine Anzahl versprechen, die erst
+// der Server kennt (Duplikate werden hier uebersprungen). Deshalb echtes Undo:
+// sofort einfuegen, IDs zurueckgeben, auf Wunsch genau diese wieder loeschen.
 // --------------------------------------------------------
 router.post('/:listId/import-pantry', (req, res) => {
   try {
@@ -533,7 +541,7 @@ router.post('/:listId/import-pantry', (req, res) => {
     if (!list) return res.status(404).json({ error: 'List not found.', code: 404 });
 
     const entries = Array.isArray(req.body.items) ? req.body.items : [];
-    if (!entries.length) return res.json({ data: { added: 0, skipped: 0 } });
+    if (!entries.length) return res.json({ data: { added: 0, skipped: 0, added_ids: [] } });
 
     const validNames = validCategoryNames();
     const defaultCat = validNames[validNames.length - 1] ?? 'Sonstiges';
@@ -549,7 +557,8 @@ router.post('/:listId/import-pantry', (req, res) => {
         INSERT INTO shopping_items (list_id, name, quantity, category) VALUES (?, ?, ?, ?)
       `);
 
-      let added = 0, skipped = 0;
+      let skipped = 0;
+      const addedIds = [];
 
       for (const entry of entries) {
         const pantryItem = findPantryItem.get(Number(entry?.pantry_item_id));
@@ -558,11 +567,11 @@ router.post('/:listId/import-pantry', (req, res) => {
 
         const vQty = str(entry.quantity, 'Menge', { max: MAX_SHORT, required: false });
         const category = validNames.includes(pantryItem.category) ? pantryItem.category : defaultCat;
-        insertItem.run(req.params.listId, pantryItem.name, vQty.value, category);
-        added += 1;
+        const info = insertItem.run(req.params.listId, pantryItem.name, vQty.value, category);
+        addedIds.push(Number(info.lastInsertRowid));
       }
 
-      return { added, skipped };
+      return { added: addedIds.length, skipped, added_ids: addedIds };
     })();
 
     res.json({ data: result });

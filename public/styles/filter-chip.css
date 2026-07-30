@@ -25,7 +25,10 @@
   border: 1.5px solid var(--color-border);
   background-color: var(--color-surface);
   color: var(--color-text-secondary);
-  transition: all var(--transition-fast);
+  /* Benannt statt `all`: der Chip wechselt auf Hover und im Aktivzustand genau
+   * diese drei. `all` zieht implizit auch Layout-Properties mit (Critique
+   * 2026-07-30). */
+  transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
   min-height: var(--target-lg);
 }
 
@@ -87,6 +90,22 @@
  * solange links/rechts Inhalt verborgen liegt — der weiche Anriss ersetzt den
  * bewusst versteckten Scrollbalken (Chip-Zeilen, Tab-Leisten, Personen-Chips).
  * Vertikale Sonderfälle (Sidebar) überschreiben die Maske spezifischer.
+ *
+ * WARUM DIE LANGEN LISTEN KEINEN Y-FADE BEKOMMEN (geprüft 2026-07-30): Der
+ * Critique merkte an, dass die drei vertikalen Küchen-Scroller (#items-list,
+ * #pantry-list, die Rezeptliste) keinen Fade tragen, obwohl `wireScrollFade` einen
+ * `axis: 'y'`-Modus hat. Das ist Absicht.
+ *
+ * Der horizontale Fade existiert, weil horizontaler Überlauf NICHT erwartet wird
+ * und der Scrollbalken hier versteckt ist - ohne Anriss sieht eine Chip-Leiste aus
+ * wie eine vollständige Chip-Leiste. Vertikaler Überlauf ist die Grundannahme jeder
+ * Liste; die Geste ist dieselbe wie für die ganze Seite, und auf dem Desktop steht
+ * ein Scrollbalken daneben.
+ *
+ * Der Preis wäre real: die Maske dämpft die OBERSTE und UNTERSTE sichtbare Zeile -
+ * also genau die Artikelnamen, für deren Lesbarkeit dieser Umbau die
+ * Ellipsen abgeschafft und die FAB-Gasse zurückgebaut hat. Symmetrie der Mechanik
+ * ist kein Grund, Lesbarkeit einzutauschen.
  * -------------------------------------------------------- */
 .has-fade-end {
   mask-image: linear-gradient(to right, #000 calc(100% - var(--space-6)), transparent);

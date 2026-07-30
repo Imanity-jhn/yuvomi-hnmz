@@ -197,6 +197,10 @@
   align-items: center;
   justify-content: center;
   opacity: 0;
+  /* Unsichtbar heisst auch unklickbar: ohne pointer-events bleibt hier ein
+   * volles Trefferziel stehen, das niemand sieht (Guard
+   * `verborgene Reveal-Aktionen sind nicht klickbar` in test-frontend-audit.js). */
+  pointer-events: none;
   transition: opacity var(--transition-fast), background-color var(--transition-fast);
   color: inherit;
 }
@@ -209,16 +213,19 @@
 
 .note-card--pinned .note-card__pin {
   opacity: 1;
+  pointer-events: auto;
   background: var(--color-overlay-light);
 }
 
 .note-card:hover .note-card__pin {
   opacity: 1;
+  pointer-events: auto;
 }
 
 .note-card__pin:hover,
 .note-card__pin:focus-visible {
   opacity: 1;
+  pointer-events: auto;
   background: var(--color-overlay);
 }
 
@@ -310,6 +317,10 @@
   position: relative;
   color: inherit;
   opacity: 0;
+  /* Unsichtbar heisst auch unklickbar: ohne pointer-events bleibt hier ein
+   * volles Trefferziel stehen, das niemand sieht (Guard
+   * `verborgene Reveal-Aktionen bleiben nicht klickbar`, test-frontend-audit.js). */
+  pointer-events: none;
   transition: opacity var(--transition-fast), background-color var(--transition-fast);
 }
 
@@ -325,6 +336,7 @@
 .note-card__open:focus-visible,
 .note-card__delete:focus-visible {
   opacity: 1;
+  pointer-events: auto;
 }
 
 .note-card__open:hover {
@@ -341,6 +353,7 @@
   .note-card__open,
   .note-card__delete {
     opacity: 1;
+  pointer-events: auto;
   }
 }
 

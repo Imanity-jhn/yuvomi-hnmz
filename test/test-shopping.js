@@ -48,8 +48,18 @@ test('Shopping-Löschaktionen importieren den gemeinsamen Undo-Helper', () => {
     /import\s*\{[^}]*\bscheduleUndoableDelete\b[^}]*\}\s*from\s*'\/utils\/ux\.js'/.test(source),
     'scheduleUndoableDelete muss aus /utils/ux.js importiert werden',
   );
+  // Drei Löschwege, drei Male derselbe Helfer: Einzel-Artikel, „Abgehakt löschen"
+  // und - seit Critique 2026-07-30 - die ganze Liste. Der Sicherheitsgradient war
+  // invertiert: der einzelne Artikel hatte Undo und keine Rückfrage, die Liste des
+  // ganzen Haushalts eine Rückfrage und kein Undo.
   const calls = source.match(/\bscheduleUndoableDelete\s*\(/g) ?? [];
-  assert(calls.length === 2, `Einzel- und Sammellöschung müssen den Undo-Helper nutzen, gefunden: ${calls.length}`);
+  assert(calls.length === 3, `Einzel-, Sammel- und Listenlöschung müssen den Undo-Helper nutzen, gefunden: ${calls.length}`);
+  // Die Liste behält ZUSÄTZLICH ihre Rückfrage - eine Rückfrage schützt vor dem
+  // Fehlgriff, ein Undo vor dem falschen Entschluss.
+  const deleteList = source.slice(source.indexOf("action === 'delete-list'"));
+  assert(/confirmModal\(/.test(deleteList.slice(0, 1200)), 'die Listenlöschung braucht weiter eine Rückfrage');
+  assert(/deleteListConfirm'?,?\s*\{[\s\S]{0,120}count/.test(deleteList.slice(0, 1600)),
+    'die Rückfrage muss die Artikelzahl nennen - „und alle Artikel löschen?" sagte nicht, wie viele');
 });
 
 // --------------------------------------------------------
@@ -446,11 +456,20 @@ test('shopping.js rendert Detail-Button + Indikatoren und öffnet den Drawer', (
   assert(/action === 'item-details'/.test(source), 'wireListContentEvents muss die item-details-Aktion behandeln');
 });
 
-test('Detail-Refresh ersetzt nur die Meta-Indikatoren, nicht das .shopping-item (Swipe-Closures bleiben intakt)', () => {
+test('Detail-Refresh aktualisiert die Zeile, ohne das .shopping-item zu ersetzen (Swipe-Closures bleiben intakt)', () => {
   const source = readFileSync(new URL('../public/pages/shopping.js', import.meta.url), 'utf8');
-  const fn = source.match(/function refreshItemMeta[\s\S]*?\n\}/)?.[0] ?? '';
-  assert(fn, 'refreshItemMeta muss existieren');
-  assert(!/#items-list/.test(fn), 'refreshItemMeta darf die Liste nicht neu aufbauen');
+  // Hieß refreshItemMeta, solange der Dialog nur Link und Notiz bearbeiten konnte.
+  // Seit Name, Menge und Kategorie editierbar sind (Critique 2026-07-30, P2), muss
+  // die Zeile Name UND Menge mitziehen - die Funktion deckt beides ab.
+  const fn = source.match(/function refreshItemName[\s\S]*?\n\}/)?.[0] ?? '';
+  assert(fn, 'refreshItemName muss existieren');
+  assert(!/#items-list/.test(fn), 'refreshItemName darf die Liste nicht neu aufbauen');
+  assert(/kitchen-row__name/.test(fn), 'der Name muss aktualisiert werden');
+  assert(/kitchen-row__meta/.test(fn), 'die Menge muss aktualisiert werden - sie kann auch wegfallen');
+  // Ein Kategoriewechsel verschiebt die Zeile in eine andere Gruppe; das kann keine
+  // Zeilen-Auffrischung leisten, dafür muss die Liste neu gruppiert werden.
+  const details = source.match(/function openItemDetails[\s\S]*?\n\}\n/)?.[0] ?? '';
+  assert(/categoryChanged/.test(details), 'ein Kategoriewechsel muss die Gruppierung neu aufbauen');
 });
 
 // --------------------------------------------------------

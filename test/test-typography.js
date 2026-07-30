@@ -228,7 +228,9 @@ test('lange Inhalts- und interaktive Texte verwenden mindestens die Sekundärrol
     /\.note-card__content[\s\S]*?font-size:\s*var\(--type-body\)/,
     'Notiz-Fließtext muss die 16px-Bodyrolle verwenden',
   );
-  for (const selector of ['.recipe-card__notes', '.recipe-card__ingredient']) {
+  // Umbenannt mit dem Wechsel von der Rezeptkarte zur Rezeptzeile mit
+  // Aufklapp-Detail: die Fließtext-Rolle gilt jetzt für den Detail-Inhalt.
+  for (const selector of ['.recipe-detail__notes', '.recipe-detail__ingredient']) {
     assert.match(
       recipes,
       new RegExp(`${selector.replace('.', '\\.')}[\\s\\S]*?font-size:\\s*var\\(--type-body\\)`),

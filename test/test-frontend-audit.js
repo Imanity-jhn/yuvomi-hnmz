@@ -1488,10 +1488,814 @@ test('mobile bottom navigation avoids clipped Android labels and sparse icon spa
   assert.match(labelRule, /line-height:\s*1\.2/);
 });
 
+/**
+ * Verborgene Reveal-Aktionen bleiben nicht klickbar.
+ *
+ * Ein Element, das im Ruhezustand `opacity: 0` trägt und per :hover/:focus-within
+ * eingeblendet wird, ist ohne `pointer-events: none` ein volles Trefferziel, das
+ * niemand sieht. Gefunden wurde das Muster in der Küchen-Critique vom
+ * 2026-07-30 (18 unsichtbare 146x40-Bänder im Wochenboard); der Guard zeigte,
+ * dass es repo-weit auftrat - unter anderem an einem unsichtbaren
+ * Löschen-Button in Notizen.
+ *
+ * Bewusste Ausnahmen: Textbeschriftungen, die INNERHALB eines sichtbaren,
+ * klickbaren Elternteils ausblenden. Sie erzeugen kein eigenes Trefferziel, der
+ * Elternteil bleibt das Ziel.
+ */
+test('verborgene Reveal-Aktionen bleiben nicht klickbar', () => {
+  const ALLOW = new Set(['nav-item__label', 'nav-section-label']);
+  const findings = [];
+
+  for (const file of readdirSync(new URL('../public/styles/', import.meta.url))) {
+    if (!file.endsWith('.css')) continue;
+    const rules = cssRules(read(`../public/styles/${file}`));
+
+    // Klassen, die im Ruhezustand unsichtbar sind (Keyframe-Schritte ausgenommen).
+    const hidden = new Map();
+    for (const { selectors, body } of rules) {
+      if (selectors.some((s) => /^(from|to|\d+%)$/.test(s))) continue;
+      if (!/(^|[\s;])opacity:\s*0\s*;/.test(body)) continue;
+      const guarded = /pointer-events/.test(body);
+      for (const selector of selectors) {
+        // Nur die RECHTESTE Klasse: sie benennt das Element, das versteckt wird.
+        // Vorfahren im Selektor (`html.sidebar-collapsed .nav-sidebar .x`) sind
+        // selbst nicht unsichtbar und dürfen nicht mitgezählt werden.
+        const classes = [...selector.matchAll(/\.([a-zA-Z0-9_-]+)/g)].map((m) => m[1]);
+        const subject = classes[classes.length - 1];
+        if (subject && !hidden.has(subject)) hidden.set(subject, guarded);
+      }
+    }
+
+    // Wer davon wird per Hover/Fokus eingeblendet?
+    for (const { selectors, body } of rules) {
+      if (!selectors.some((s) => /:hover|:focus-within/.test(s))) continue;
+      if (!/opacity:\s*1/.test(body)) continue;
+      for (const selector of selectors) {
+        const classes = [...selector.matchAll(/\.([a-zA-Z0-9_-]+)/g)].map((m) => m[1]);
+        const cls = classes[classes.length - 1];
+        if (!cls || !hidden.has(cls) || hidden.get(cls) || ALLOW.has(cls)) continue;
+        hidden.delete(cls);
+        findings.push(`${file} .${cls}`);
+      }
+    }
+  }
+
+  assert.deepEqual(findings, [], `opacity:0 ohne pointer-events:none in Reveal-Regeln:\n${findings.join('\n')}`);
+});
+
+/**
+ * Die Küche baut Leerzustände nur über den geteilten Renderer.
+ *
+ * `utils/empty-state.js` erzwingt Reihenfolge (Icon, Titel, Beschreibung,
+ * Hinweis, CTA) und die ARIA-Rolle je Variante. Solange Seiten das Markup
+ * daneben von Hand zusammensetzen, driften die Zustände wieder auseinander -
+ * genau das war der Ausgangsbefund (drei Grammatiken, drei vertikale Achsen).
+ *
+ * Absichtlich auf die Küche begrenzt: die übrigen 15 Seiten bauen ihre
+ * Leerzustände noch von Hand (152 Fundstellen, Stand 2026-07-30). Das ist ein
+ * bekannter Rückstand, kein Regressionsrisiko - dieser Guard hält fest, was
+ * bereits migriert ist.
+ */
+test('die Küchen-Seiten bauen Leerzustände nur über den geteilten Renderer', () => {
+  for (const page of ['meals', 'recipes', 'shopping', 'pantry']) {
+    const src = read(`../public/pages/${page}.js`);
+    const handRolled = [...src.matchAll(/class="empty-state|className\s*=\s*['"]empty-state/g)];
+    assert.equal(handRolled.length, 0,
+      `${page}.js baut .empty-state-Markup von Hand (${handRolled.length}x) statt emptyStateEl()/mountEmptyState() zu rufen`);
+    assert.match(src, /\b(mountEmptyState|emptyStateEl)\b/,
+      `${page}.js ruft den geteilten Leerzustands-Renderer nicht auf`);
+  }
+});
+
+/**
+ * Die Küchen-Listen teilen EINE Zeilen-Grammatik.
+ *
+ * Ausgangsbefund (Critique 2026-07-30, gemessen bei 1440px): die vier Tabs
+ * teilten Akzent, Kopf, Tab-Leiste und Leerzustand - und darin vier verschiedene
+ * Zeilen. Radius 8/20/12/14px, drei weiße Zeilen und eine transparente, vier
+ * Innenpolsterungen, zwei Sichtbarkeitsregeln für dieselbe Aktion, acht
+ * Eigenbau-Klassen in Aktionsrolle neben `.row-action`.
+ *
+ * Jede einzelne Assertion hier hätte einen der gemessenen Defekte gefunden.
+ * Der Essensplan ist bewusst NICHT dabei: sein 148px-Slot im Wochenraster kann
+ * keine 48px-Aktionsgruppe tragen (begründet in meals.css), er erbt nur die
+ * Token. Das ist eine dokumentierte Ausnahme, kein vergessener Tab.
+ */
+test('die Küchen-Listen teilen eine Zeilen-Grammatik', () => {
+  const shared = read('../public/styles/kitchen-row.css');
+  const indexHtml = read('../public/index.html');
+
+  assert.match(indexHtml, /<link rel="stylesheet" href="\/styles\/kitchen-row\.css" \/>/,
+    'kitchen-row.css muss in index.html eingehängt sein (Router lädt nur EIN Page-CSS pro Seite)');
+
+  // Die Gruppe trägt die Fläche, die Zeile nur Inhalt.
+  const rowsBlock = shared.match(/\.kitchen-rows\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(rowsBlock, /background-color:\s*var\(--color-surface-work\)/,
+    '.kitchen-rows muss die opake Arbeitsfläche tragen (DESIGN.md: kein Glas unter Fließtext)');
+  assert.match(rowsBlock, /border-radius:\s*var\(--radius-md\)/,
+    '.kitchen-rows muss den Inhaltsflächen-Radius aus DESIGN.md §5 tragen');
+
+  // Keine Zeilenaktion an der rechten Zeilenkante: das ist die Ecke, die der
+  // fixierte FAB besetzt (87% Überdeckung auf dem Vorrats-Warenkorb im
+  // Ruhezustand, Critique 2026-07-30). Kontextuelle Aktionen sitzen in einem
+  // festen Slot am Anfang der Bedienzone.
+  assert.doesNotMatch(shared.replace(/\/\*[\s\S]*?\*\//g, ''), /\.kitchen-row__end-action/,
+    'an der Zeilenkante verankerte Aktionen liegen in der FAB-Ecke - fester Slot am Anfang der Bedienzone stattdessen');
+  const pantryCss = read('../public/styles/pantry.css');
+  const slot = pantryCss.match(/\.pantry-row__cart-slot\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(slot, /width:\s*var\(--target-lg\)/,
+    'der Warenkorb-Slot muss die volle .row-action-Breite reservieren, sonst springt der Stepper je Zeile');
+  assert.match(slot, /flex-shrink:\s*0/, 'der Slot darf nicht schrumpfen');
+  assert.match(read('../public/pages/pantry.js'), /cartSlot\.className = 'pantry-row__cart-slot'/,
+    'pantry.js muss den Slot IMMER rendern, auch ohne Warenkorb');
+
+  // Umbrechen statt abschneiden. Ein gekürzter Artikelname ("Broc…") war bei
+  // 320px der Verlust des einzigen Zwecks der Einkaufsliste.
+  const nameBlock = shared.match(/\.kitchen-row__name\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.doesNotMatch(nameBlock, /text-overflow|white-space:\s*nowrap/,
+    '.kitchen-row__name darf nicht ellipsieren: bei 320px blieben vier lesbare Zeichen');
+  assert.match(nameBlock, /overflow-wrap:\s*anywhere/,
+    '.kitchen-row__name muss umbrechen dürfen');
+
+  // Keine Zeile bringt ihre eigene Fläche mit.
+  //
+  // Geprüft wird `padding:` exakt, nicht die gerichteten Varianten: eine
+  // dokumentierte Reserve am Zeilenende ist erlaubt (Vorrat für den Warenkorb
+  // über --reserve-end, Einkauf für den Swipe-Hinweis-Pfeil aus layout.css).
+  // Ein vollständiges padding wäre dagegen eine zweite Zeilen-Geometrie.
+  const perTab = {
+    shopping: ['.shopping-item', '../public/styles/shopping.css'],
+    pantry:   ['.pantry-row',    '../public/styles/pantry.css'],
+  };
+  for (const [tab, [selector, path]] of Object.entries(perTab)) {
+    const css = read(path);
+    const blocks = [...css.matchAll(new RegExp(`\\${selector}\\s*\\{([^}]*)\\}`, 'g'))]
+      .map((m) => m[1]).join('\n');
+    for (const prop of ['border-radius', 'background-color', 'padding']) {
+      assert.doesNotMatch(blocks, new RegExp(`^\\s*${prop}:`, 'm'),
+        `${tab}: ${selector} darf kein eigenes ${prop} setzen - das trägt .kitchen-row bzw. .kitchen-rows`);
+    }
+  }
+
+  // Alle drei Listen-Tabs benutzen die geteilten Klassen im Markup.
+  for (const page of ['shopping', 'pantry', 'recipes']) {
+    const src = read(`../public/pages/${page}.js`);
+    for (const cls of ['kitchen-list', 'kitchen-rows', 'kitchen-row', 'kitchen-row__main', 'kitchen-row__name', 'kitchen-row__actions']) {
+      assert.ok(src.includes(cls), `${page}.js muss ${cls} verwenden`);
+    }
+  }
+
+  // Zeilenaktionen sind dauerhaft sichtbar, nicht hover-enthüllt. Die Enthüllung
+  // per opacity hat in diesem Repo zweimal dieselbe Defektklasse produziert.
+  for (const path of ['../public/styles/shopping.css', '../public/styles/pantry.css', '../public/styles/recipes.css']) {
+    const css = read(path);
+    assert.doesNotMatch(css, /@media\s*\(hover:\s*hover\)\s*\{[^}]*opacity:\s*0/,
+      `${path}: Zeilenaktionen der Listen-Tabs dürfen nicht per hover-Reveal versteckt werden`);
+  }
+
+  // `hidden` muss durchgesetzt sein, wo eine Klasse `display` setzt.
+  //
+  // Dritte Fundstelle derselben Defektklasse in diesem Repo: .recipe-detail
+  // trägt `display: grid` und schlägt damit das UA-`[hidden] { display: none }`
+  // bei gleicher Spezifität. Das Panel stand offen, während sein Chevron „zu"
+  // zeigte - und ein Prüfskript, das nur die DOM-Property `hidden` liest, sieht
+  // das nicht. Vorgänger: .page-fab/.btn/.form-group, dann .page-toolbar.
+  const recipesCssForHidden = read('../public/styles/recipes.css');
+  const layoutCss = read('../public/styles/layout.css');
+  if (/\.recipe-detail\s*\{[^}]*display:/.test(recipesCssForHidden)) {
+    assert.match(layoutCss, /\.recipe-detail\[hidden\],/,
+      '.recipe-detail setzt display und muss deshalb in der [hidden]-Durchsetzungsliste in layout.css stehen');
+  }
+
+  // Die Content-Spalte darf pro Ahnenkette genau einmal gesetzt werden.
+  // #list-content trägt sie im Einkauf; .items-list trug sie ein zweites Mal und
+  // begann deshalb 16px neben Kopf, Rezepten und Vorrat.
+  const shoppingCss = read('../public/styles/shopping.css');
+  const itemsList = shoppingCss.match(/^\.items-list\s*\{([^}]*)\}/m)?.[1] ?? '';
+  assert.doesNotMatch(itemsList, /padding-inline:|padding:\s*\S+\s+\S+/,
+    '.items-list darf kein horizontales Polster setzen: #list-content trägt schon --page-inline-pad');
+  assert.doesNotMatch(shared.match(/\.kitchen-list\s*\{([^}]*)\}/)?.[1] ?? '', /padding-inline:/,
+    '.kitchen-list darf kein padding-inline setzen: wo der Spalten-Träger sitzt, ist pro Tab verschieden');
+});
+
+/**
+ * EINE Antwort auf den FAB, nicht zwei entgegengesetzte.
+ *
+ * Ausgangslage (Critique 2026-07-30): der FAB ist fixiert in der unteren rechten
+ * Ecke und lag über den Zeilenaktionen. Es gab zwei Antworten im selben Modul.
+ * Einkauf und Vorrat reservierten eine 76px-Gasse in JEDER Zeile
+ * (`padding-inline-end: var(--fab-lane)`) - kollisionsfrei in 12/12 Messungen,
+ * aber bei 320px 24% der Viewportbreite und Artikelnamen auf rund vier lesbare
+ * Zeichen gekürzt. Mahlzeiten und Rezepte reservierten nichts und sammelten
+ * 14 Überdeckungen bis 53.2%.
+ *
+ * Die Antwort ist jetzt zeitlich statt räumlich: der FAB fährt beim
+ * Abwärtsscrollen weg (utils/fab-scroll.js).
+ */
+test('der FAB weicht der Zeile, statt eine Gasse zu reservieren', () => {
+  const layout = read('../public/styles/layout.css');
+  const tokens = read('../public/styles/tokens.css');
+  const util = read('../public/utils/fab-scroll.js');
+  const router = read('../public/router.js');
+
+  // Die Gasse darf nicht zurückkehren - in keinem Modul-CSS.
+  const styleDir = new URL('../public/styles/', import.meta.url);
+  for (const file of readdirSync(styleDir).filter((f) => f.endsWith('.css'))) {
+    const css = read(`../public/styles/${file}`);
+    const live = css
+      .replace(/\/\*[\s\S]*?\*\//g, '')  // Kommentare dürfen die Historie nennen
+      .match(/var\(--fab-lane\)/g);
+    assert.equal(live, null, `${file} reserviert wieder eine FAB-Gasse (var(--fab-lane))`);
+  }
+  assert.doesNotMatch(tokens.replace(/\/\*[\s\S]*?\*\//g, ''), /--fab-lane\s*:/,
+    '--fab-lane ist stillgelegt und darf nicht wieder definiert werden');
+
+  // Das Listenende bleibt gepolstert: dort greift das Wegfahren nicht, weil der
+  // FAB am Ende bewusst zurückkommt.
+  assert.match(tokens, /--fab-clearance:\s*calc\([^;]*--fab-offset-bottom[^;]*--fab-size[^;]*;/,
+    '--fab-clearance muss weiter aus der FAB-Position abgeleitet werden');
+
+  // Zurückgefahren heißt: unsichtbar UND nicht klickbar. Ein unsichtbarer, aber
+  // klickbarer FAB wäre genau der Defekt, den er beheben soll - er würde den Tap
+  // auf die freigelegte Zeilenaktion abfangen.
+  const retracted = layout.match(/\.page-fab--retracted\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(retracted, /transform:\s*translateY/, '.page-fab--retracted muss per transform wegfahren');
+  assert.match(retracted, /opacity:\s*0/, '.page-fab--retracted muss ausblenden');
+  assert.match(retracted, /pointer-events:\s*none/,
+    '.page-fab--retracted muss pointer-events: none setzen, sonst frisst der unsichtbare FAB den Tap');
+  assert.doesNotMatch(retracted, /visibility:\s*hidden/,
+    '.page-fab--retracted darf visibility nicht anfassen: der FAB bleibt per Tab und per n-Shortcut erreichbar');
+  assert.match(layout, /\.page-fab\s*\{[\s\S]*?transition:[^;]*opacity/,
+    '.page-fab muss opacity mit-transitionen, sonst gleitet er und blendet hart aus');
+
+  // Funktionale Bewegung, nicht dekorative: unter reduzierter Bewegung entfällt
+  // die Transition, nicht das Wegfahren.
+  assert.match(layout, /@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]{0,400}?\.page-fab--retracted\s*\{[^}]*transition:\s*none/,
+    'unter prefers-reduced-motion muss .page-fab--retracted ohne Transition schalten');
+
+  // Rückweg: kein Timer, sondern Hochscrollen / Anfang / Ende.
+  assert.match(util, /atTop\s*\|\|\s*atBottom\s*\|\|\s*delta\s*<\s*0/,
+    'der FAB muss beim Hochscrollen, am Anfang und am Ende zurückkommen');
+  assert.doesNotMatch(util, /setTimeout|setInterval/,
+    'kein Idle-Timer: er brächte den FAB genau dann zurück, wenn der Nutzer nach der Zeilenaktion greift');
+  assert.match(util, /capture:\s*true/,
+    'scroll steigt nicht auf - der Listener muss in der Capture-Phase hängen');
+  assert.match(util, /passive:\s*true/, 'Scroll-Listener muss passive sein');
+  assert.match(util, /document\.activeElement === fab|aria-expanded/,
+    'der FAB darf nicht wegfahren, während er benutzt wird');
+
+  assert.match(router, /import \{ installFabRetract \} from '\/utils\/fab-scroll\.js'/,
+    'router.js muss den Mechanismus importieren');
+  assert.match(router, /installFabRetract\(\)/, 'router.js muss ihn verdrahten');
+});
+
+/**
+ * Der Warenkorb in der Vorratszeile ist zurücknehmbar.
+ *
+ * Er sitzt in der Zeile neben „Menge erhöhen" und bedeutet das Gegenteil; bis
+ * v1.58.0 war er die einzige erzeugende Aktion des Moduls ohne Undo
+ * (Critique 2026-07-30). Echtes Rücknehmen statt verzögertem Commit, weil der
+ * Server Duplikate überspringt und die Anzahl im Toast deshalb erst nach dem
+ * Insert bekannt ist.
+ */
+test('Vorrat auf die Einkaufsliste lässt sich zurücknehmen', () => {
+  const route = read('../server/routes/shopping.js');
+  const page = read('../public/pages/pantry.js');
+
+  const block = route.slice(route.indexOf("router.post('/:listId/import-pantry'"));
+  assert.match(block, /lastInsertRowid/, 'die Route muss die erzeugten IDs sammeln');
+  assert.match(block, /added_ids:\s*addedIds/, 'die Route muss added_ids zurückgeben');
+  assert.match(block, /added:\s*addedIds\.length/,
+    'added muss aus derselben Quelle kommen wie added_ids, sonst können sie auseinanderlaufen');
+  assert.match(block, /res\.json\(\{ data: \{ added: 0, skipped: 0, added_ids: \[\] \} \}\)/,
+    'auch der Leerfall muss added_ids liefern, damit der Client nicht raten muss');
+
+  assert.match(page, /added_ids:\s*addedIds\s*=\s*\[\]/, 'pantry.js muss added_ids auslesen');
+  assert.match(page, /api\.delete\(`\/shopping\/items\/\$\{id\}`\)/,
+    'das Undo muss genau die erzeugten Artikel löschen');
+  assert.match(page, /showToast\(message, 'success', \d+, undo\)/,
+    'der Erfolgs-Toast muss die Undo-Aktion tragen');
+  assert.match(page, /addedIds\.length\s*\?/,
+    'ohne IDs darf kein Undo-Knopf erscheinen, der nichts zurücknehmen kann');
+  assertKeysExistInEveryLocale(['pantry.toShoppingUndone']);
+});
+
+/**
+ * Der Einkauf trug mobil 439 von 852px Chrome, bevor ein Artikel sichtbar war.
+ *
+ * Ausgangslage (Critique 2026-07-30, P1), selbst nachgemessen: erste Datenzeile bei
+ * y=439 von 852 (52%) bei 393px, y=495 von 720 (69%) bei 320px. Darüber sieben
+ * gestapelte Bänder, 17 Tabstops bis zum ersten Artikel (gegen 3 in den Rezepten).
+ * Der Kopf allein war 173px hoch (229px bei 320px), weil fünf Bedienelemente nicht
+ * in 361px passen - drei davon unbeschriftete Icons, darunter „Liste löschen" für
+ * die Liste des ganzen Haushalts.
+ *
+ * Drei Züge, jeder mit eigener Begründung:
+ *   1. Die drei dauerhaften Aktionen wandern MIT LABEL in ein Überlaufmenü.
+ *   2. Die zwei Abschluss-Aktionen wandern in die geteilte .kitchen-bulkbar -
+ *      dieselbe Leiste, in der der Vorrat seine Sammelaktion trägt.
+ *   3. Das Quick-Add klappt auf Touch ein; der FAB öffnet es und tut damit
+ *      dasselbe wie in den drei Geschwistertabs.
+ *
+ * Gemessen danach: Kopf 65px auf beiden Breiten, erste Zeile y=308 (36% / 43%),
+ * 11 Tabstops.
+ */
+test('der Einkaufs-Kopf trägt mobil keine unbeschrifteten Aktionen', () => {
+  const page = read('../public/pages/shopping.js');
+  const css = read('../public/styles/shopping.css');
+  const menu = read('../public/utils/popover-menu.js');
+  const layout = read('../public/styles/layout.css');
+
+  // Das Menü ist der geteilte Baustein, keine vierte private Kopie.
+  assert.match(page, /import \{ popoverMenuHtml, installPopoverMenus \} from '\/utils\/popover-menu\.js'/,
+    'shopping.js muss das geteilte Überlaufmenü nutzen');
+  assert.match(layout, /^\.popover-menu \{/m, '.popover-menu muss in layout.css stehen, nicht im Modul-CSS');
+  assert.match(layout, /\.popover-menu:popover-open\s*\{\s*display:\s*flex/,
+    'das Panel braucht display erst bei :popover-open, sonst schlägt es das UA-display:none');
+
+  // JEDER Eintrag trägt ein Label. Das ist der ganze Zweck: die drei Kopf-Aktionen
+  // waren mobil nackte Glyphen.
+  assert.match(menu, /<span>\$\{esc\(item\.label\)\}<\/span>/,
+    'jeder Menü-Eintrag muss ein sichtbares Textlabel tragen');
+  const items = page.slice(page.indexOf('id: \'list-head-menu\''), page.indexOf('</div>\n        </div>'));
+  for (const key of ['shopping.importMeals', 'shopping.manageCategories', 'shopping.deleteListLabel']) {
+    assert.ok(items.includes(`t('${key}')`), `das Überlaufmenü muss ${key} als Label führen`);
+  }
+  assert.match(items, /danger:\s*true/, '„Liste löschen" muss im Menü als destruktiv gekennzeichnet sein');
+
+  // Genau eine Fassung je Breite - sonst doppelte Tabstops.
+  assert.match(css, /\.list-header__more\s*\{\s*display:\s*none/,
+    'das Menü ist ab 768px ausgeblendet, dort trägt die Leiste die Aktionen');
+  assert.match(css, /@media \(max-width: 767px\)[\s\S]{0,400}\.list-header__inline-actions\s*\{\s*display:\s*none/,
+    'unter 768px muss die Inline-Leiste ausgeblendet sein');
+
+  // Das Icon-only-Import-Label darf nicht zurückkommen: es war der Grund, warum
+  // drei unbeschriftete Glyphen nebeneinander standen.
+  assert.doesNotMatch(css.replace(/\/\*[\s\S]*?\*\//g, ''), /\.list-header__import-btn span\s*\{\s*display:\s*none/,
+    '„Aus dem Essensplan" darf mobil nicht auf ein nacktes Icon reduziert werden - es steht mit Label im Menü');
+
+  // Quick-Add als Disclosure, und der FAB meldet den Zustand.
+  assert.match(css, /@media \(hover: none\)[\s\S]{0,600}\.quick-add\s*\{\s*display:\s*none/,
+    'das Quick-Add muss auf Touch eingeklappt sein');
+  assert.match(css, /\.shopping-page--adding \.quick-add\s*\{\s*display:\s*block/,
+    'der FAB muss es aufklappen können');
+  assert.match(page, /fab\.setAttribute\('aria-expanded', String\(open\)\)/,
+    'der FAB muss seinen Aufklapp-Zustand melden');
+  assert.match(page, /fab\.removeAttribute\('aria-expanded'\)/,
+    'auf Zeigergeräten klappt der FAB nichts auf und darf keinen Zustand behaupten');
+  assert.match(page, /e\.key !== 'Escape'/, 'Esc muss das Quick-Add wieder schließen');
+
+  // Der dritte Add-Weg entfällt, wo das Eingabefeld selbst sichtbar ist.
+  assert.match(css, /@media \(hover: hover\)[\s\S]{0,400}\.empty-state__cta\s*\{\s*display:\s*none/,
+    'auf Zeigergeräten ist der Leerzustands-CTA eine dritte Tür in denselben Raum');
+
+  assertKeysExistInEveryLocale(['common.moreActions', 'shopping.checkedHint', 'shopping.checkedHint_one']);
+});
+
+/**
+ * Eine Sammelaktions-Leiste, zwei Tabs.
+ *
+ * Der Vorrat hatte `.pantry-bulkbar` („Alles auf die Einkaufsliste" plus eine Zeile,
+ * die sagt, worauf sie wirkt) - der Critique nannte sie als das, was funktioniert.
+ * Der Einkauf hatte für dieselbe Sache zwei Buttons im Kopf, ohne erklärende Zeile,
+ * und zahlte dafür zwei Kopfzeilen. Jetzt ist es derselbe Baustein.
+ */
+test('die Küchen-Tabs teilen eine Sammelaktions-Leiste', () => {
+  const shared = read('../public/styles/kitchen-row.css');
+  const layout = read('../public/styles/layout.css');
+  const pantryCss = read('../public/styles/pantry.css');
+
+  assert.match(shared, /^\.kitchen-bulkbar \{/m,
+    '.kitchen-bulkbar gehört in die geteilte Grammatik, nicht in ein Modul-CSS');
+  assert.doesNotMatch(pantryCss.replace(/\/\*[\s\S]*?\*\//g, ''), /^\.pantry-bulkbar\s*\{/m,
+    'der Vorrat darf keine private Kopie der Leiste behalten');
+
+  for (const page of ['shopping', 'pantry']) {
+    const src = read(`../public/pages/${page}.js`);
+    assert.ok(src.includes('kitchen-bulkbar'), `${page}.js muss die geteilte Leiste verwenden`);
+    assert.ok(src.includes('kitchen-bulkbar__label'),
+      `${page}.js muss die erklärende Zeile führen - sie ist der Teil, der im Einkauf fehlte`);
+  }
+
+  // Die Leiste hat Fläche, Rahmen und Polsterung: leer wäre sie ein sichtbarer
+  // Streifen. `display: flex` schlägt das UA-`[hidden]`, also braucht sie die
+  // Durchsetzung - vierte Fundstelle derselben Falle in diesem Repo.
+  assert.match(layout, /\.kitchen-bulkbar\[hidden\][^{}]*\{\s*display:\s*none\s*!important/,
+    '.kitchen-bulkbar setzt display und muss deshalb in der [hidden]-Durchsetzungsliste stehen');
+  assert.match(read('../public/pages/shopping.js'), /wrap\.hidden = !checkedCount/,
+    'ohne abgehakte Artikel muss die Leiste verschwinden, nicht leer stehen');
+
+  // Sie steht ÜBER dem Scroller, nicht darin: im Vorrat scrollte sie weg, obwohl
+  // sie die ganze gefilterte Liste betrifft.
+  const pantry = read('../public/pages/pantry.js');
+  assert.match(pantry, /pantry-bulkbar-slot/, 'der Vorrat braucht einen Slot außerhalb des Scrollers');
+  assert.match(pantry, /page\.append\(title, live, toolbar, filters, bulk, list, fab\)/,
+    'der Slot muss zwischen Filterleiste und Liste stehen');
+  assert.doesNotMatch(pantry, /list\.appendChild\(bulkBarEl\(\)\)/,
+    'die Leiste darf nicht wieder als Kind der scrollenden Liste hängen');
+});
+
+/**
+ * Die Vorratszeile entscheidet nach ihrer EIGENEN Breite, nicht nach der des
+ * Fensters.
+ *
+ * Gemessen bei 320px (Critique-Nachlauf 2026-07-30): der Stepper belegte 167px der
+ * 262px Zeilenbreite, davon 71px allein das Mengenfeld (`min-width: 7ch`). Für den
+ * Namen blieben 31px - „Olivenöl extra vergine" auf 8 Zeilen, Zeilenhöhen 89 bis
+ * 369px. Danach: 106px Namensbreite, Zeilenhöhen 85 bis 155px.
+ */
+test('die Vorratszeile misst sich selbst, nicht das Fenster', () => {
+  const shared = read('../public/styles/kitchen-row.css');
+  const pantryCss = read('../public/styles/pantry.css');
+
+  const rows = shared.match(/\.kitchen-rows\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(rows, /container-type:\s*inline-size/,
+    '.kitchen-rows muss abfragbarer Container sein - ein Container kann sich selbst nicht abfragen');
+  assert.match(rows, /container-name:\s*kitchen-rows/, 'der Container braucht einen Namen');
+
+  assert.match(pantryCss, /@container kitchen-rows \(max-width: 30rem\)/,
+    'die Kompaktform muss an der ZEILENbreite hängen, nicht an einem Viewport-Breakpoint');
+  const compact = pantryCss.slice(pantryCss.indexOf('@container kitchen-rows'));
+  assert.match(compact, /\.pantry-stepper\s*\{[\s\S]*?flex-wrap:\s*wrap/,
+    'der Stepper muss umbrechen dürfen');
+  assert.match(compact, /width:\s*calc\(var\(--pantry-step-btn\) \* 2 \+ var\(--space-1\)\)/,
+    'ohne feste Breite wickelt der Flex-Container nie um: seine max-content-Breite ist die Summe aller drei Kinder');
+  assert.match(compact, /\.pantry-stepper__value\s*\{[\s\S]*?order:\s*-1/,
+    'der Wert rückt über die Knöpfe - per order, damit die Vorlesereihenfolge Minus/Wert/Plus bleibt');
+  assert.match(compact, /min-width:\s*0/, 'die 7ch des Mengenfelds müssen in der Kompaktform fallen');
+
+  // Eine Variable, zwei Zeigerklassen: die Kompaktbreite muss mit derselben Zahl
+  // rechnen wie die Knöpfe selbst.
+  assert.match(pantryCss, /--pantry-step-btn:\s*var\(--target-md\)/, 'Zeiger: --target-md');
+  assert.match(pantryCss, /@media \(hover: none\)\s*\{\s*\.pantry-stepper\s*\{\s*--pantry-step-btn:\s*var\(--target-base\)/,
+    'Touch: --target-base, gesetzt an derselben Variable');
+  assert.doesNotMatch(pantryCss, /\.pantry-stepper__btn\s*\{[^}]*width:\s*var\(--target-md\)/,
+    'die Knopfgröße darf nicht doppelt gepflegt werden');
+});
+
+/**
+ * Der Kreislauf lebt nicht mehr nur im Leerzustand.
+ *
+ * Die vier Leerzustands-Hinweise erzählten planen → kochen → einkaufen → lagern
+ * vollständig - und verschwanden mit dem ersten Datensatz. Übrig blieben vier
+ * Schubladen (Critique 2026-07-30, P1). Die Tab-Leiste trägt den Zustand jetzt
+ * dauerhaft: „Mahlzeiten 10" neben „Einkaufen 23" neben „Vorrat 10".
+ */
+test('die Küchen-Tab-Leiste trägt den Zustand des Kreislaufs', () => {
+  const route = read('../server/routes/kitchen.js');
+  const tabs = read('../public/utils/kitchen-tabs.js');
+  const sub = read('../public/utils/sub-tabs.js');
+  const index = read('../server/index.js');
+
+  // Eine Abfrage, vier Zahlen - keine drei Fremd-Endpunkte pro Seitenaufruf.
+  assert.match(index, /app\.use\('\/api\/v1\/kitchen', kitchenRouter\)/,
+    'der Kitchen-Router muss gemountet sein');
+  assert.match(read('../server/openapi/paths/kitchen.js'), /'\/api\/v1\/kitchen\/summary'/,
+    'die Route muss in der OpenAPI-Spec stehen');
+  assert.match(route, /router\.get\('\/summary'[\s\S]*?try \{[\s\S]*?\} catch \(err\)/,
+    'jeder Route-Handler in try/catch (Hard Constraint)');
+
+  // `today` kommt vom Client: „abgelaufen" hängt am lokalen Kalendertag, der Server
+  // rechnet in UTC. Dieselbe Entscheidung wie im Kopf von pantry-status.js.
+  assert.match(tabs, /kitchen\/summary\?today=\$\{encodeURIComponent\(toLocalDateKey\(\)\)\}/,
+    'der Client muss seinen lokalen Tag mitgeben, sonst rechnet der Server in UTC');
+  assert.match(route, /DATE_RE\.test\(req\.query\.today/, 'die Route muss `today` validieren');
+
+  // Die Zählbedingungen müssen mit pantryItemStatus() übereinstimmen, sonst zeigt
+  // die Leiste eine andere Zahl als die Filter-Chips daneben.
+  const status = read('../public/utils/pantry-status.js');
+  assert.match(status, /const out = quantity <= 0/);
+  assert.match(route, /quantity <= 0/, 'leer: dieselbe Bedingung wie pantryItemStatus');
+  assert.match(route, /min_quantity IS NOT NULL AND quantity <= min_quantity/,
+    'fast leer: dieselbe Bedingung wie pantryItemStatus');
+  assert.match(route, /expires_on IS NOT NULL AND expires_on < \?/,
+    'abgelaufen: reiner Stringvergleich wie im Client (YYYY-MM-DD ist lexikografisch chronologisch)');
+
+  // Kein Badge auf dem aktiven Tab: dort sagt die Seite es vollständiger, und eine
+  // Zahl dort müsste nach jeder Mutation nachgezogen werden.
+  assert.match(tabs, /route === _activeRoute \? 0 :/,
+    'der aktive Tab darf kein Badge tragen - sonst veraltet es bei jeder eigenen Mutation');
+
+  // Das aria-label ERSETZT den Tab-Namen, es ergänzt ihn nicht.
+  for (const [tabKey, stateKey] of [['nav.meals', 'nav.mealsGaps'], ['nav.shopping', 'nav.shoppingOpen'], ['nav.pantry', 'nav.pantryAttention']]) {
+    assert.ok(tabs.includes(`\${t('${tabKey}')}: \${t('${stateKey}'`),
+      `${stateKey} muss den Tabnamen voranstellen, sonst hört ein Screenreader nur die Zahl`);
+  }
+  assert.match(sub, /badge\.setAttribute\('aria-hidden', 'true'\)/,
+    'die Zahl ist redundant, sobald das Label sie nennt');
+  // `display: inline-flex` schlägt das UA-`[hidden]`: der aktive Tab trug ohne diese
+  // Regel ein 16 x 0px breites totes Innenmaß. Fünfte Fundstelle dieser Falle.
+  const subCss = read('../public/styles/sub-tabs.css');
+  assert.match(subCss, /\.sub-tab__badge\[hidden\]\s*\{\s*display:\s*none/,
+    'ohne diese Regel bleibt das leere Badge 16px breit stehen');
+  // Getönter Grund plus currentColor ergab auf inaktiven Tabs 4.02:1 bei 12px/600,
+  // unter der AA-Schwelle 4.5. Gemessen nach dem Fix: 11.0 hell, 16.43 dunkel.
+  assert.match(subCss, /\.sub-tab__badge\s*\{[\s\S]*?color:\s*var\(--color-text-primary\)/,
+    'die Zahl braucht Ink, nicht die zurückgenommene Tab-Tinte');
+  assertKeysExistInEveryLocale([
+    'nav.mealsGaps', 'nav.mealsGaps_one', 'nav.shoppingOpen', 'nav.shoppingOpen_one',
+    'nav.pantryAttention', 'nav.pantryAttention_one',
+  ]);
+
+  // Rezepte bekommen keins: eine Sammlung hat keinen offenen Zustand.
+  // Nur die BADGES-Liste prüfen - `/recipes` steht selbstverständlich in TABS().
+  const badges = tabs.slice(tabs.indexOf('const BADGES = ['), tabs.indexOf('/** Aktuelle Leiste'));
+  assert.ok(badges.includes("route: '/meals'") && badges.includes("route: '/shopping'") && badges.includes("route: '/pantry'"),
+    'die drei Stationen mit offenem Zustand brauchen ein Badge');
+  assert.ok(!badges.includes("route: '/recipes'"),
+    'ein Badge, das nur zählt, entwertet die drei, die etwas verlangen');
+});
+
+/**
+ * EIN Vokabular für den Kreislauf.
+ *
+ * Gemessen (Critique 2026-07-30, P1/P2): dieselbe Aktion hieß in drei Keys
+ * („meals.transferToShoppingList", „recipes.toShoppingList", „pantry.toShopping") -
+ * auf Deutsch zufällig gleich, auf Englisch schon auseinandergelaufen („To the
+ * shopping list" gegen „Add to shopping list"). Der Transfer-Toast nannte sein Ziel
+ * nicht („5 Zutaten übernommen." - wohin?). Der Tab hieß „Mahlzeiten", die Seite
+ * darunter „Essensplan". Dasselbe Feld hieß „Titel" und „Bezeichnung". Und
+ * gelöscht wurde „entfernt" im Einkauf und „gelöscht" in Mahlzeiten und Rezepten.
+ */
+test('die Küche benutzt ein Vokabular für eine Sache', () => {
+  const de = JSON.parse(read('../public/locales/de.json'));
+  const pages = Object.fromEntries(['meals', 'recipes', 'shopping', 'pantry']
+    .map((p) => [p, read(`../public/pages/${p}.js`)]));
+
+  // EIN Transfer-Label und EIN „auf welche Liste?" für alle vier Tabs.
+  assertKeysExistInEveryLocale(['common.toShoppingList', 'common.toShoppingListWhich']);
+  for (const dead of ['meals.transferToShoppingList', 'recipes.toShoppingList', 'recipes.toShoppingListTitle', 'pantry.toShopping', 'pantry.chooseList']) {
+    const [block, key] = dead.split('.');
+    assert.equal(de[block]?.[key], undefined,
+      `${dead} ist durch common.toShoppingList ersetzt - zwei Keys für ein Label laufen auseinander (auf Englisch war das schon passiert)`);
+  }
+  for (const page of ['meals', 'recipes', 'pantry']) {
+    assert.ok(pages[page].includes("t('common.toShoppingList')"),
+      `${page}.js muss das geteilte Transfer-Label nutzen`);
+  }
+
+  // Jeder Transfer-Toast nennt sein ZIEL.
+  for (const key of ['meals.transferSuccess', 'recipes.toShoppingSuccess', 'pantry.toShoppingDone']) {
+    const [block, name] = key.split('.');
+    assert.match(de[block][name], /\{\{list\}\}/,
+      `${key} muss die Ziel-Liste nennen: „übernommen" allein sagt nicht, wohin`);
+  }
+  assert.match(de.shopping.toPantryDoneAt, /\{\{location\}\}/,
+    'der Weg in den Vorrat muss den gewählten Lagerort nennen');
+  for (const [page, call] of [['meals', 'list: state.lists.find'], ['recipes', 'list: state.lists.find'], ['pantry', 'const listName = lists.find']]) {
+    assert.ok(pages[page].includes(call), `${page}.js muss den Listennamen an den Toast übergeben`);
+  }
+
+  // EIN Name pro Modul: der sichtbare Tab und die sr-only-Überschrift derselben
+  // Seite dürfen nicht zwei verschiedene Wörter sein.
+  for (const dead of ['meals.title', 'recipes.title', 'shopping.title', 'pantry.title']) {
+    const [block, key] = dead.split('.');
+    assert.equal(de[block]?.[key], undefined,
+      `${dead} ist durch nav.${block} ersetzt - ein Screenreader hörte sonst „Mahlzeiten" im Tab und „Essensplan" in der Überschrift`);
+  }
+  for (const [page, key] of [['meals', 'nav.meals'], ['recipes', 'nav.recipes'], ['shopping', 'nav.shopping'], ['pantry', 'nav.pantry']]) {
+    assert.ok(pages[page].includes(`t('${key}')`), `${page}.js muss ${key} als Seitentitel nutzen`);
+  }
+
+  // EIN Feld-Label für „wie heißt dieses Ding".
+  assertKeysExistInEveryLocale(['common.nameLabel', 'common.nameRequired']);
+  for (const dead of ['meals.titleLabel', 'meals.titleRequired', 'recipes.titleLabel', 'recipes.titleRequired', 'pantry.nameLabel', 'pantry.nameRequired']) {
+    const [block, key] = dead.split('.');
+    assert.equal(de[block]?.[key], undefined, `${dead} ist durch common.nameLabel/nameRequired ersetzt`);
+  }
+
+  // EIN Verb fürs Löschen. „entfernt" bleibt genau dort, wo etwas von einer Liste
+  // genommen wird, ohne zu verschwinden: das Undo des Vorrats-Transfers.
+  for (const key of ['meals.deletedToast', 'meals.seriesDeletedToast', 'recipes.deleted', 'pantry.deleted', 'shopping.deletedListToast', 'shopping.itemDeletedToast', 'shopping.itemsRemovedToast']) {
+    const [block, name] = key.split('.');
+    assert.match(de[block][name], /gelöscht/,
+      `${key} muss „gelöscht" sagen - „entfernt" im Einkauf gegen „gelöscht" in Mahlzeiten war dieselbe Handlung mit zwei Verben`);
+    // Toast-Interpunktion: ganze Sätze enden auf einen Punkt. „Mahlzeit gelöscht"
+    // stand ohne, „Rezept gelöscht." mit (Critique 2026-07-30).
+    assert.match(de[block][name], /\.$/, `${key} muss auf einen Punkt enden`);
+  }
+  assert.match(de.pantry.toShoppingUndone, /entfernt/,
+    'das Undo nimmt den Artikel von der Einkaufsliste, ohne ihn zu löschen - hier ist „entfernt" korrekt');
+});
+
+/**
+ * Zwei Editoren für dieselbe Handlung, und einer davon war ein halber.
+ *
+ * Gemessen (Critique 2026-07-30, P2): der Einkaufs-Dialog trug den DATENWERT als
+ * Titel („Cherry tomatoes"), hatte zwei Felder (Link, Notiz), Schließen und
+ * Speichern - kein Abbrechen -, und Name und Menge waren dort nicht änderbar. Das
+ * strukturgleiche Vorrats-Modal hieß „Artikel bearbeiten", hatte acht Felder und
+ * Löschen / Abbrechen / Speichern.
+ */
+test('die beiden Küchen-Editoren sind derselbe Dialog', () => {
+  const shopping = read('../public/pages/shopping.js');
+  const pantry = read('../public/pages/pantry.js');
+  const de = JSON.parse(read('../public/locales/de.json'));
+
+  // Ein Titel-Key für beide.
+  assertKeysExistInEveryLocale(['common.editItem']);
+  assert.equal(de.pantry?.editItem, undefined, 'pantry.editItem ist durch common.editItem ersetzt');
+  for (const [name, src] of [['shopping', shopping], ['pantry', pantry]]) {
+    assert.ok(src.includes("t('common.editItem')"), `${name}.js muss den geteilten Dialog-Titel nutzen`);
+  }
+  const details = shopping.slice(shopping.indexOf('function openItemDetails'), shopping.indexOf('function updateItemsList'));
+  assert.doesNotMatch(details, /title: item\.name/,
+    'der Datenwert ist kein Dialogtitel - er sagt nicht, was der Dialog tut');
+
+  // Abbrechen neben Speichern, wie im Vorrat.
+  assert.match(details, /id="item-details-cancel"/, 'der Dialog braucht ein Abbrechen');
+  assert.match(details, /#item-details-cancel'\)\?\.addEventListener\('click', \(\) => closeModal\(\)\)/,
+    'Abbrechen muss auch verdrahtet sein');
+
+  // Name, Menge und Kategorie editierbar.
+  for (const field of ['item-details-name', 'item-details-qty', 'item-details-cat']) {
+    assert.ok(details.includes(`id="${field}"`), `${field} muss im Dialog editierbar sein`);
+  }
+  assert.match(details, /reportFieldError\(nameEl, t\('common\.nameRequired'\)\)/,
+    'ein leerer Name muss am Feld gemeldet werden, nicht per Toast');
+
+  // Die zwei Modal-Checkboxen tragen das geteilte Control.
+  const layout = read('../public/styles/layout.css');
+  assert.match(layout, /^\.form-check \{/m, '.form-check gehört in layout.css, nicht in ein Modul-CSS');
+  // --active-module-accent muss in der Kette stehen: das Modal hängt im Top-Layer
+  // außerhalb der Modul-Wurzel, und mit --module-accent allein fiel die Checkbox auf
+  // den violetten App-Akzent zurück (gemessen rgb(108,58,237) in einem Dialog, der
+  // rundum #C2410C trug).
+  assert.match(layout, /\.form-check input\[type="checkbox"\]\s*\{[\s\S]*?accent-color:\s*var\(--module-accent,\s*var\(--active-module-accent/,
+    'die Checkbox muss den Modul-Akzent tragen, auch im Modal - sechs andere Module kleiden ihre Checkboxen schon ein');
+  assert.match(shopping, /class="form-check pantry-transfer__clear"/,
+    'die folgenreichste Checkbox des Moduls („Artikel von der Einkaufsliste löschen", standardmäßig aktiv) war die unauffälligste');
+  assert.match(read('../public/pages/recipes.js'), /class="form-check recipe-meal-types__option"/,
+    'die Mahlzeit-Typen im Rezept-Formular waren die zweite nackte System-Checkbox');
+  // Die Modul-CSS dürfen die Geometrie nicht zurückholen.
+  for (const [file, selector] of [['shopping.css', '.pantry-transfer__clear'], ['recipes.css', '.recipe-meal-types__option']]) {
+    const block = read(`../public/styles/${file}`).match(new RegExp(`\\${selector}\\s*\\{([^}]*)\\}`))?.[1] ?? '';
+    assert.doesNotMatch(block, /display:|align-items:|cursor:/,
+      `${file}: ${selector} darf Geometrie und Zielgröße nicht doppelt pflegen - das leistet .form-check`);
+  }
+
+  // „Übernehmen" darf bei 0 Treffern nicht klickbar sein. Die Schwesteraktion
+  // („Plan zufällig füllen") macht das seit dem Audit korrekt.
+  assert.match(shopping, /id="shopping-import-submit" disabled/,
+    'der Import-Knopf muss deaktiviert starten');
+  assert.match(shopping, /submitBtn\.disabled = !transferred/,
+    'die Vorschau muss ihn freischalten, sobald der Zeitraum Zutaten enthält');
+});
+
+/**
+ * DESIGN.md und tokens.css widersprachen sich über die Touch-Zielgröße.
+ *
+ * DESIGN.md: „size touch targets at 48px (mobile) or 40px (desktop) minimum. The
+ * --target-lg and --target-md tokens encode this — never go below them."
+ * tokens.css: `--target-base: 44px` mit der Begründung „iOS-Minimum 44pt", benutzt
+ * an 111 Stellen in 18 Modulen - darunter sechs der meistbenutzten Bedienelemente
+ * der Küche (.sub-tab, .item-check, #item-qty-input, .quick-add__btn,
+ * .pantry-stepper__btn, #week-randomize). Auf Touch lagen die damit 4px unter dem
+ * eigenen dokumentierten Minimum (Critique 2026-07-30: „Eine der beiden Zahlen ist
+ * falsch.").
+ *
+ * Falsch war die 44 - und nur auf Touch. Der Wert kennt jetzt die
+ * Zeigerfähigkeit: Desktop unverändert 44 (über der 40er-Grenze), Touch 48.
+ * Nachgemessen über 4 Routen × 3 Viewports: kein Bedienelement der Küche mehr
+ * unter 48px, und kein horizontaler Dokumentüberlauf.
+ */
+test('die Touch-Zielgröße folgt DESIGN.md statt einer dritten Zahl', () => {
+  const tokens = read('../public/styles/tokens.css');
+
+  // Die Quelle der Untergrenze ist DESIGN.md: „size touch targets at 48px (mobile)
+  // or 40px (desktop) minimum. The --target-lg and --target-md tokens encode this -
+  // never go below them on interactive elements."
+  //
+  // Der Satz wird hier ZITIERT und nicht gelesen: DESIGN.md steht in .gitignore
+  // (Zeile 44), liegt also nur lokal und fehlt in der CI. Ein Guard, der eine
+  // ignorierte Datei liest, ist lokal grün und im Build rot - genau so ist dieser
+  // Test beim Release v1.59.0 aufgefallen.
+  assert.match(tokens, /--target-base:\s*44px/, 'auf Zeigergeräten bleibt es bei 44px (über der 40er-Grenze)');
+  assert.match(tokens, /@media \(hover: none\)\s*\{\s*:root\s*\{\s*--target-base:\s*var\(--target-lg\)/,
+    'auf Fingergeräten muss --target-base die 48px aus DESIGN.md erreichen');
+
+  // Das Kriterium ist die Zeigerfähigkeit, nicht die Breite: ein schmales
+  // Desktop-Fenster wird mit der Maus bedient, ein 1180px-Tablet mit dem Finger.
+  const scope = tokens.slice(tokens.indexOf('Touch-Ziele auf Fingergeräten'));
+  assert.doesNotMatch(scope.slice(0, 1400), /--target-base[\s\S]{0,80}@media \(max-width/,
+    'die Touch-Größe darf nicht an einer Viewport-Breite hängen');
+});
+
+/**
+ * Nicht-Text-Kontrast: gemessen, dokumentiert, bewusst offen.
+ *
+ * Die Kanten der Bedienelemente erreichen die 3:1 aus WCAG 1.4.11 nicht (1.13:1
+ * hell / 1.96:1 dunkel an den Eingabefeldern). Der Betreiber hat am 2026-07-30
+ * entschieden, das vorerst nur zu dokumentieren statt --color-border anzuheben -
+ * die Änderung ginge durch jedes Modul.
+ *
+ * Der Guard hält die MESSUNG fest, nicht den Fix: verschwindet der Kommentar,
+ * verschwindet auch das Wissen, warum die Zahl so steht.
+ */
+test('der offene Nicht-Text-Kontrast bleibt an den Tokens dokumentiert', () => {
+  const tokens = read('../public/styles/tokens.css');
+  const block = tokens.slice(0, tokens.indexOf('--color-border:'));
+  assert.match(block, /WCAG 1\.4\.11/, 'der Befund muss an --color-border dokumentiert bleiben');
+  assert.match(block, /1\.13:1/, 'der gemessene Ist-Wert gehört dazu');
+  assert.match(block, /#8A8A86/, 'der Zielwert für 3:1 gehört dazu, sonst muss ihn jeder neu ausrechnen');
+  assert.match(block, /nicht für dekorative Gruppierung/,
+    'die Abgrenzung Bedienelement gegen Kartenkante gehört dazu - der Critique warf beides zusammen');
+});
+
+/**
+ * Feinschliff: benannte Transitions, eine Abbrechen-Optik, dokumentierte
+ * Nicht-Entscheidungen.
+ */
+test('die Küche animiert benannte Properties und sagt Abbrechen überall gleich', () => {
+  // `transition: all` zieht implizit Layout-Properties mit. Im Modul wurden sonst
+  // 0 animierte Layout-Properties gemessen - drei Stellen in shopping.css waren die
+  // einzige Lücke in dieser Zusage (Critique 2026-07-30).
+  // filter-chip.css und sub-tabs.css gehören dazu: die Küche nutzt beide (Vorrats-
+  // Filter, Tab-Leiste), und `transition: all` auf .filter-chip war der Rest, den
+  // die auf die vier Modul-CSS beschränkte Prüfung nicht sah.
+  for (const file of ['shopping.css', 'meals.css', 'recipes.css', 'pantry.css', 'kitchen-row.css', 'kitchen-tabs.css', 'filter-chip.css', 'sub-tabs.css']) {
+    const css = read(`../public/styles/${file}`);
+    assert.doesNotMatch(css, /transition:\s*all\b/,
+      `${file}: transition: all animiert implizit auch Layout-Properties`);
+  }
+
+  // EINE Abbrechen-Optik. Sie war `btn--secondary` in den Seiten-Modalen und
+  // `btn--ghost` in den drei geteilten Helfern - also genau im Löschen-Confirm,
+  // wo sie am wichtigsten ist, am unauffälligsten.
+  const modal = read('../public/components/modal.js');
+  for (const which of ['prompt', 'select', 'confirm']) {
+    assert.match(modal, new RegExp(`class="btn btn--secondary" id="${which}-modal-cancel"`),
+      `${which}Modal: Abbrechen muss dieselbe Optik tragen wie in den Seiten-Modalen`);
+  }
+  assert.doesNotMatch(modal, /btn--ghost" id="\w+-modal-cancel"/,
+    'kein Abbrechen darf als Ghost zurückkommen');
+
+  // Zwei geprüfte Nicht-Änderungen. Ohne die Begründung im Code wird beides beim
+  // nächsten Lauf erneut als Befund gemeldet und erneut untersucht.
+  assert.match(read('../public/styles/filter-chip.css'), /WARUM DIE LANGEN LISTEN KEINEN Y-FADE BEKOMMEN/,
+    'die Entscheidung gegen den vertikalen Fade gehört an die geteilte Konvention');
+  assert.match(read('../public/styles/tokens.css'), /Semantik-Kollision|GEPRÜFT UND BEWUSST SO GELASSEN/,
+    'die Farbgleichheit der Mahlzeit-Punkte mit warning/accent gehört an die Tokens');
+  assert.match(read('../public/styles/meals.css'), /1920px\s+Content-Spalte gedeckelt auf 1280 → passt/,
+    'die Wochenboard-Rechnung gehört ins CSS: „auf keiner Desktop-Breite" stimmt nicht, es fehlen 52px bei 1440');
+});
+
+/**
+ * Der geteilte Zeilenname überlebt auch einen FLEX-Elternteil.
+ *
+ * Die schwerste Regression des Umbaus (Critique 2026-07-30, P0), gemessen bei 320px:
+ * `.kitchen-row__name` = **8px breit, 432px hoch**. „Chicken Tikka Masala" stand ein
+ * Zeichen pro Zeile, eine Zeile war 448px hoch, auf den Bildschirm passte EIN
+ * Rezept.
+ *
+ * Die Ursache ist die Kombination zweier für sich richtiger Entscheidungen:
+ *   - `overflow-wrap: anywhere` am Namen (rettete den Artikelnamen im Einkauf, der
+ *     bei 320px auf vier lesbare Zeichen ellipsiert war)
+ *   - `.recipe-row__toggle { display: flex }` in den Rezepten
+ * Als Flex-Item löst `flex-basis: auto` auf min-content auf, und mit
+ * `overflow-wrap: anywhere` ist min-content die Breite des breitesten
+ * EINZELZEICHENS. Drei von vier Aufrufstellen hatten einen Grid-Elternteil und
+ * blieben unauffällig.
+ *
+ * Danach: Namensbreite 182px bei 320px, Zeilenhöhe 69px, Desktop unverändert.
+ */
+test('der Zeilenname bricht in Wörtern, nicht in Zeichen', () => {
+  const shared = read('../public/styles/kitchen-row.css');
+  const recipes = read('../public/styles/recipes.css');
+  const recipesJs = read('../public/pages/recipes.js');
+
+  const nameBlock = shared.match(/\.kitchen-row__name\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(nameBlock, /overflow-wrap:\s*anywhere/,
+    'der Name muss umbrechen dürfen - die Ellipse war der P0 des vorigen Laufs');
+  assert.match(nameBlock, /flex:\s*1 1 auto/,
+    'ohne flex-basis fällt der Name in einem Flex-Elternteil auf min-content, also auf ein Zeichen');
+
+  // Die Rezeptzeile hatte drei Zeilenaktionen: 3 × 48 + 2 × 8 = 152px von 262px
+  // Zeilenbreite bei 320px. Sie wandern unter 30rem ins geteilte Überlaufmenü.
+  assert.match(recipesJs, /import \{ popoverMenuHtml, installPopoverMenus \} from '\/utils\/popover-menu\.js'/,
+    'die Zeile muss das geteilte Überlaufmenü nutzen, keine vierte Eigenkonstruktion');
+  assert.match(recipesJs, /id: `recipe-menu-\$\{recipe\.id\}`/, 'jede Zeile braucht eine eigene Menü-ID');
+  assert.match(recipesJs, /installPopoverMenus\(page\)/, 'das Menü muss an der stabilen Seitenwurzel verdrahtet sein');
+
+  assert.match(recipes, /@container kitchen-rows \(max-width: 30rem\)/,
+    'die Umschaltung hängt an der ZEILENbreite, wie beim Vorrats-Stepper');
+  // Die Quellreihenfolge entscheidet: `@container` erhöht die Spezifität nicht.
+  const inlineBase = recipes.indexOf('.recipe-row__inline-actions {');
+  const query = recipes.indexOf('@container kitchen-rows');
+  assert.ok(inlineBase !== -1 && inlineBase < query,
+    'der Basiszustand muss VOR der Container-Query stehen, sonst gewinnt er gegen sie');
+  const compact = recipes.slice(query);
+  assert.match(compact, /\.recipe-row__inline-actions\s*\{\s*display:\s*none/,
+    'die drei Inline-Aktionen müssen in der schmalen Zeile weichen');
+  assert.match(compact, /\.recipe-row__toggle \.kitchen-row__meta\s*\{[\s\S]*?flex:\s*1 0 100%/,
+    'die Zutatenzahl muss unter den Namen rücken - sie ist flex-shrink: 0 und nähme ihm sonst 70px');
+});
+
 test('phase 3 high-frequency controls use tokenized touch targets', () => {
   const tasks = read('../public/styles/tasks.css');
   const shopping = read('../public/styles/shopping.css');
   const notes = read('../public/styles/notes.css');
+  const layout = read('../public/styles/layout.css');
 
   assert.match(tasks, /\.task-status-btn::before[\s\S]*var\(--target-base\)/);
   assert.match(tasks, /\.task-bulk-checkbox[\s\S]*(?:min-width|width):\s*var\(--target-base\)/);
@@ -1499,9 +2303,25 @@ test('phase 3 high-frequency controls use tokenized touch targets', () => {
   assert.match(tasks, /\.task-card__inline-action[\s\S]*height:\s*var\(--target-base\)/);
   assert.match(tasks, /\.bulk-actions-bar__actions \.btn[\s\S]*min-height:\s*var\(--target-base\)/);
   assert.match(shopping, /\.item-check[\s\S]*(?:min-width|width):\s*var\(--target-base\)/);
-  assert.match(shopping, /\.item-delete[\s\S]*width:\s*var\(--target-base\)/);
-  assert.match(shopping, /\.item-delete[\s\S]*height:\s*var\(--target-base\)/);
-  assert.match(shopping, /\.shopping-item[\s\S]*min-height:\s*var\(--target-base\)/);
+  // Die Zeilenhöhe liegt seit der geteilten Zeilen-Grammatik in
+  // kitchen-row.css und ist dort mit --target-lg (48px) strenger als die alte
+  // --target-base-Untergrenze (44px) auf .shopping-item. Ein Tab-lokales
+  // min-height gibt es nicht mehr - es wäre genau die Divergenz, die der Guard
+  // „die Küchen-Listen teilen eine Zeilen-Grammatik" verbietet.
+  assert.match(read('../public/styles/kitchen-row.css'),
+    /\.kitchen-row\s*\{[\s\S]*?min-height:\s*var\(--target-lg\)/);
+  // Die beiden Zeilenaktionen der Einkaufsliste trugen bis zum Audit
+  // 2026-07-29 eigene .item-details/.item-delete-Regeln mit --target-base.
+  // Sie nutzen jetzt die geteilte .row-action-Komponente aus layout.css, die
+  // mit --target-lg (48px) über der alten Größe liegt - die Invariante
+  // („tokenisierte Trefferfläche, nicht kleiner als --target-base") gilt
+  // dadurch strenger, aber an einer anderen Stelle. Deshalb hier auf die
+  // Komponente geprüft statt auf die entfallenen Modul-Klassen.
+  const shoppingPage = read('../public/pages/shopping.js');
+  assert.match(shoppingPage, /class="row-action"\s+data-action="item-details"/);
+  assert.match(shoppingPage, /class="row-action row-action--danger"\s+data-action="delete-item"/);
+  assert.match(layout, /\.row-action\s*\{[\s\S]*?width:\s*var\(--target-lg\)/);
+  assert.match(layout, /\.row-action\s*\{[\s\S]*?height:\s*var\(--target-lg\)/);
   assert.match(notes, /\.note-card__pin[\s\S]*width:\s*var\(--target-base\)/);
   assert.match(notes, /\.note-card__delete[\s\S]*width:\s*var\(--target-base\)/);
 });
@@ -1631,21 +2451,56 @@ test('dashboard weather widget adapts to selected widget size', () => {
   assert.doesNotMatch(dashboard, /\.weather-widget\s*\{[^}]*grid-column:\s*1\s*\/\s*-1/);
 });
 
-test('responsive adaptation keeps all three Kitchen tabs visible on narrow phones', () => {
+test('responsive adaptation keeps all four Kitchen tabs readable on narrow phones', () => {
   const kitchenTabs = read('../public/styles/kitchen-tabs.css');
 
+  // Platz für die Labels kommt seit dem vierten Tab (Vorrat) daher, dass der
+  // Modultitel mobil entfällt - die Bottom-Nav trägt dasselbe Wort bereits.
+  // Vorher fraß er ~70px, wodurch alle drei inaktiven Labels ellipsierten.
+  // Ersetzt das frühere padding-inline: var(--space-2), das den Platz nur
+  // umverteilt statt geschaffen hat; die Leiste erbt jetzt --page-inline-pad
+  // aus .sub-tabs-bar und fluchtet damit mit dem Body-Inhalt.
   assert.match(
     kitchenTabs,
-    /@media \(max-width:\s*640px\)[\s\S]*\.kitchen-tabs-bar\s*\{[\s\S]*padding-inline:\s*var\(--space-2\)/
+    /@media \(max-width:\s*640px\)[\s\S]*\.kitchen-tabs-bar \.sub-tabs-bar__title\s*\{[\s\S]*display:\s*none/
   );
+  assert.doesNotMatch(
+    kitchenTabs,
+    /@media \(max-width:\s*640px\)[\s\S]*\.kitchen-tabs-bar\s*\{[^}]*padding-inline/,
+    'kitchen-tabs-bar darf --page-inline-pad aus .sub-tabs-bar nicht überschreiben',
+  );
+  // Die Labels werden NICHT gekürzt - die Leiste scrollt lieber.
+  //
+  // Hier stand `flex: 1 1 0` + `min-width: 0` + `text-overflow: ellipsis`: alle vier
+  // Tabs gleich breit, wer nicht passt wird gekürzt. Das ging auf, solange die Tabs
+  // nur Labels trugen. Mit den Zustandszahlen der Küchen-Leiste kostet jeder Badge
+  // 20-22px aus derselben Zelle, und gemessen war „Mahlzeiten" bei 393px wieder
+  // gekürzt (61 von 72px), bei 320px drei von vier Labels.
+  //
+  // Ohne Gleichverteilung: 72+55+66+41 Label + 42 Badge + Polster = 344px. Bei 393px
+  // passt das mit 49px Luft, bei 320px scrollt die Leiste (Überlauf 58px, gemessen)
+  // mit has-fade-Maske und scrollActiveSubTabIntoView().
+  //
+  // Der Test prüft jetzt die INVARIANTE („kein Label wird gekürzt") statt des
+  // Mechanismus, mit dem sie damals erreicht wurde.
   assert.match(
     kitchenTabs,
-    /\.kitchen-tabs-bar \.sub-tab\s*\{[\s\S]*flex:\s*1 1 0[\s\S]*min-width:\s*0/
+    /\.kitchen-tabs-bar \.sub-tab\s*\{[^}]*flex:\s*0 0 auto/,
+    'die Tabs behalten ihre natürliche Breite - Gleichverteilung kürzt Labels, sobald ein Badge dazukommt',
   );
-  assert.match(
+  assert.doesNotMatch(
     kitchenTabs,
-    /\.kitchen-tabs-bar \.sub-tab__label\s*\{[\s\S]*text-overflow:\s*ellipsis/
+    /\.kitchen-tabs-bar \.sub-tab__label\s*\{[^}]*text-overflow:\s*ellipsis/,
+    'ein gekürztes „Mahlz…" kostet mehr Orientierung als ein Tab, für den man wischen muss',
   );
+  // Die Leiste muss scrollen KÖNNEN, sonst wird aus „nicht kürzen" ein Überlauf.
+  const subTabs = read('../public/styles/sub-tabs.css');
+  assert.match(subTabs, /\.sub-tabs-bar\s*\{[^}]*overflow-x:\s*auto/,
+    'ohne overflow-x: auto läuft die Leiste bei natürlicher Breite über statt zu scrollen');
+  assert.match(read('../public/utils/sub-tabs.js'), /export function scrollActiveSubTabIntoView/,
+    'der aktive Tab muss nachträglich eingescrollt werden können: die Badges kommen asynchron und verbreitern die Leiste');
+  assert.match(read('../public/utils/kitchen-tabs.js'), /scrollActiveSubTabIntoView\(_bar\)/,
+    'nach dem Setzen der Badges muss der aktive Tab wieder ins Bild geholt werden');
 });
 
 test('responsive adaptation uses tablet space without crowding module toolbars', () => {
@@ -2084,7 +2939,13 @@ test('desktop Meals and Calendar date-navigation icons use the accent color', ()
   const meals = read('../public/styles/meals.css');
   const calendar = read('../public/styles/calendar.css');
 
-  assert.match(cssRuleBody(meals, '.week-nav .btn--icon'), /color:\s*var\(--color-accent\)/);
+  // Meals folgt der Module-Accent-Leads-Rule (DESIGN.md §2, 2026-07): innerhalb
+  // eines Moduls führt der Modul-Akzent, globales Violett bleibt der Shell
+  // vorbehalten. Die Wochennavigation ist Modul-Bedienung, keine Shell-Chrome -
+  // vorher stand die violette „Heute"-Pille direkt neben dem orangen
+  // Zufallsplan-Button und beide lasen sich wie Controls aus zwei Apps.
+  // Calendar zieht bewusst noch nicht mit: eigenes Modul, eigener Durchgang.
+  assert.match(cssRuleBody(meals, '.week-nav .btn--icon'), /color:\s*var\(--module-accent\)/);
   assert.match(cssRuleBody(calendar, '.cal-toolbar__nav .btn--icon'), /color:\s*var\(--color-accent\)/);
 });
 
@@ -2955,11 +3816,15 @@ const ALLOWED_INLINE = /^(0|0px|var\(--page-inline-pad\))$/;
 const RAIL_PAD_EXCEPTIONS = [
   {
     file: 'kitchen-tabs.css',
-    selector: '.kitchen-tabs-bar',
-    // Drei Tabs plus das Titel-Label „Küche" spannen auf 375px randvoll; mit
-    // --page-inline-pad (16px) blieben 343px für 359px Inhalt und die Leiste
-    // scrollte horizontal. Der Restversatz zum Body ist 8px und nur mobil.
-    reason: 'Tab-Dichte auf 375px, gemessen randvoll bei --space-2',
+    selector: '.kitchen-tabs-bar .sub-tab',
+    // Der Tab-Button liegt IN der Rail, er ist nicht die Rail: sein
+    // padding-inline ist Innenabstand zwischen Icon und Pill-Rand, nicht die
+    // Einrückung der Content-Spalte. Vorher stand hier die Rail selbst
+    // (.kitchen-tabs-bar mit padding-inline: var(--space-2)) und deckte diesen
+    // Selektor per Substring-Match versehentlich mit ab. Seit der Modultitel
+    // mobil entfällt (Critique 2026-07-29), braucht die Rail keinen Override
+    // mehr und erbt --page-inline-pad - der 8px-Versatz zum Body ist damit weg.
+    reason: 'Button-Innenabstand des Tabs, keine Rail-Einrückung',
   },
 ];
 

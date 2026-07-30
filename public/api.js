@@ -146,9 +146,13 @@ const api = {
     ...opts,
   }),
 
-  patch: (path, body) => apiFetch(path, {
+  // opts wie bei put/delete: { keepalive: true } für Writes, die beim
+  // Tab-Schließen noch rausgehen müssen - genutzt vom pagehide-Flush des
+  // Vorrats-Steppers, dessen PATCH 450ms gedebounced ist.
+  patch: (path, body, opts = {}) => apiFetch(path, {
     method: 'PATCH',
     body: JSON.stringify(body),
+    ...opts,
   }),
 
   // opts erlaubt fetch-Optionen wie { keepalive: true } — genutzt vom
