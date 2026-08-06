@@ -50,11 +50,24 @@ export function isKitchenModule(mod) {
  * dieses Moduls, und erzählt wurde er ausschließlich in den vier
  * Leerzustands-Hinweisen. Mit dem ersten Datensatz verschwand er, und übrig blieben
  * vier Schubladen (Critique 2026-07-30, P1). Mit „Einkaufen 12" neben „Vorrat 8"
- * neben „Mahlzeiten 10" ist der nächste Schritt immer sichtbar.
+ * ist der nächste Schritt immer sichtbar.
  *
- * WARUM REZEPTE KEIN BADGE BEKOMMEN: eine Rezeptsammlung hat keinen offenen
- * Zustand. „6 Rezepte" wäre eine Bestandszahl, keine Aufforderung - und ein Badge,
- * das nur zählt, entwertet die drei, die etwas verlangen.
+ * WARUM REZEPTE UND MAHLZEITEN KEINS BEKOMMEN: ein Badge sagt „dort wartet
+ * etwas". Eine Rezeptsammlung hat keinen offenen Zustand - „6 Rezepte" wäre eine
+ * Bestandszahl, keine Aufforderung.
+ *
+ * Der Essensplan hatte eins („{{count}} freie Mahlzeiten diese Woche") und es
+ * zählte das Gegenteil: nicht was wartet, sondern was fehlt, gemessen an einem
+ * Maximum, das niemand füllen will. Sichtbare Mahlzeitentypen × 7 Tage minus die
+ * belegten Slots - bei leerer Woche und vier Typen also 28, die lauteste Zahl in
+ * der Leiste, ausgerechnet für den Zustand „nichts geplant". Dazu zählte es Tage
+ * mit, die schon vorbei waren: freitags stand das Frühstück vom Montag in der
+ * Zahl, und das lässt sich nicht mehr planen. Eine Aufforderung, die
+ * Unerreichbares mitzählt und die Null nie erreicht, ist keine. Die freien Slots
+ * auf der Seite selbst erzählen es vollständiger.
+ *
+ * Übrig bleiben die zwei Stationen, die wirklich einen offenen Vorrat haben:
+ * offene Artikel auf der Einkaufsliste, Vorratsartikel mit einer Frist.
  *
  * WARUM DER AKTIVE TAB KEIN BADGE TRÄGT: das Badge sagt „dort wartet etwas". Auf dem
  * Tab, auf dem man steht, sagt die Seite das vollständiger - die Einkaufsliste hat
@@ -74,11 +87,6 @@ export function isKitchenModule(mod) {
 // ohne das hörte ein Screenreader „12 offene Artikel" und wüsste nicht, wohin der
 // Knopf führt.
 const BADGES = [
-  {
-    route: '/meals',
-    pick: (d) => d.meals?.gaps ?? 0,
-    label: (count) => `${t('nav.meals')}: ${t('nav.mealsGaps', { count })}`,
-  },
   {
     route: '/shopping',
     pick: (d) => d.shopping?.open ?? 0,

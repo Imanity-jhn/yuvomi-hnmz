@@ -11,6 +11,7 @@ import { renderSkeletonList } from '/utils/skeleton.js';
 import { openModal, closeModal, confirmModal } from '/components/modal.js';
 import { createPageFab, setPageFabAction } from '/utils/fab.js';
 import { wireTablist } from '/utils/tablist.js';
+import { amountPlaceholder, amountStep, amountIsSavable, smallestUnitLabel } from '/utils/money.js';
 
 const MAX_FILE_SIZE = 5 * 1024 * 1024;
 
@@ -448,6 +449,7 @@ function renderTasks(content) {
       `}
     </section>
   `);
+  if (window.lucide) window.lucide.createIcons({ el: content });
 
   content.querySelectorAll('[data-template-index]').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -505,7 +507,7 @@ function renderTasks(content) {
       if (!task) return;
       if (!await confirmModal(
         t('housekeeping.deleteTaskConfirm', { name: task.name }),
-        { danger: true, confirmLabel: t('common.delete') },
+        { danger: true, confirmLabel: t('common.delete'), detail: t('housekeeping.deleteTaskConfirmDetail') },
       )) return;
       try {
         await api.delete(`/housekeeping/decay-tasks/${task.id}`);
@@ -577,6 +579,7 @@ function renderReports(content) {
       ${rows || `<p class="housekeeping-muted">${esc(t('housekeeping.noVisitReports'))}</p>`}
     </section>
   `);
+  if (window.lucide) window.lucide.createIcons({ el: content });
 
   content.querySelectorAll('[data-visit-report]').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -743,7 +746,8 @@ function renderStaff(content) {
     btn.addEventListener('click', async () => {
       const visit = state.staffVisits.find((item) => String(item.id) === btn.dataset.deleteVisit);
       if (!visit) return;
-      if (!await confirmModal(t('housekeeping.deleteVisitConfirm'), { danger: true, confirmLabel: t('common.delete') })) return;
+      if (!await confirmModal(t('housekeeping.deleteVisitConfirm'),
+        { danger: true, confirmLabel: t('common.delete'), detail: t('housekeeping.deleteVisitConfirmDetail') })) return;
       try {
         await api.delete(`/housekeeping/visits/${visit.id}`);
         window.yuvomi?.showToast(t('housekeeping.visitDeletedToast'), 'success');
@@ -878,12 +882,14 @@ function openVisitEditModal(visit, content, { onDone } = {}) {
           ` : `
             <label class="housekeeping-field">
               <span>${esc(t('housekeeping.dailyRate'))}</span>
-              <input name="daily_rate" type="number" min="0" step="0.01" inputmode="decimal" value="${esc(visit.daily_rate ?? 0)}">
+              <input name="daily_rate" type="number" min="0" step="${amountStep(state.currency, visit.daily_rate ?? 0)}"
+                     placeholder="${amountPlaceholder(state.currency)}" inputmode="decimal" value="${esc(visit.daily_rate ?? 0)}">
             </label>
           `}
           <label class="housekeeping-field">
             <span>${esc(t('housekeeping.extras'))}</span>
-            <input name="extras" type="number" min="0" step="0.01" inputmode="decimal" value="${esc(visit.extras ?? 0)}">
+            <input name="extras" type="number" min="0" step="${amountStep(state.currency, visit.extras ?? 0)}"
+                   placeholder="${amountPlaceholder(state.currency)}" inputmode="decimal" value="${esc(visit.extras ?? 0)}">
           </label>
         </div>
         <label class="document-dropzone" id="housekeeping-receipt-dropzone" for="housekeeping-receipt-file">
@@ -916,6 +922,22 @@ function openVisitEditModal(visit, content, { onDone } = {}) {
           ? null
           : Number(fields.daily_rate.value || 0);
         const extras = Number(fields.extras.value || 0);
+        // Wie beim Mitarbeitersatz: liegt der Bestandswert neben dem Raster,
+        // gibt amountStep "any" zurück, und ohne diese Prüfung wäre aus 12,5 JPY
+        // anschliessend auch 12,555 JPY speicherbar.
+        const offGrid = [
+          [fields.daily_rate, dailyRate, visit.daily_rate],
+          [fields.extras, extras, visit.extras],
+        ].find(([field, value, original]) => field && value != null
+          && !amountIsSavable(value, state.currency, { original: original ?? null }));
+        if (offGrid) {
+          window.yuvomi?.showToast(t('common.amountPrecisionRequired', {
+            currency: state.currency,
+            step: smallestUnitLabel(state.currency),
+          }), 'danger');
+          offGrid[0].focus();
+          return;
+        }
         let receiptDocumentId = visit.receipt_document_id || null;
         try {
           const file = panel.querySelector('#housekeeping-receipt-file')?.files?.[0];
@@ -1037,11 +1059,13 @@ function openStaffModal(worker, content, options = {}) {
           </label>
           <label class="housekeeping-field" id="housekeeping-field-daily-rate">
             <span>${esc(t('housekeeping.dailyRate'))}</span>
-            <input name="daily_rate" type="number" min="0" step="0.01" inputmode="decimal" value="${esc(item.daily_rate ?? 0)}">
+            <input name="daily_rate" type="number" min="0" step="${amountStep(state.currency, item.daily_rate ?? 0)}"
+                   placeholder="${amountPlaceholder(state.currency)}" inputmode="decimal" value="${esc(item.daily_rate ?? 0)}">
           </label>
           <label class="housekeeping-field" id="housekeeping-field-hourly-rate"${(!item.rate_type || item.rate_type === 'daily') ? ' hidden' : ''}>
             <span>${esc(t('housekeeping.hourlyRate'))}</span>
-            <input name="hourly_rate" type="number" min="0" step="0.01" inputmode="decimal" value="${esc(item.hourly_rate ?? 0)}">
+            <input name="hourly_rate" type="number" min="0" step="${amountStep(state.currency, item.hourly_rate ?? 0)}"
+                   placeholder="${amountPlaceholder(state.currency)}" inputmode="decimal" value="${esc(item.hourly_rate ?? 0)}">
           </label>
           <label class="housekeeping-field housekeeping-field--color">
             <span>${esc(t('housekeeping.calendarColor'))}</span>
@@ -1075,6 +1099,30 @@ function openStaffModal(worker, content, options = {}) {
         event.preventDefault();
         const form = event.currentTarget;
         const fields = form.elements;
+        // Bei einem Bestandssatz neben dem Raster liefert amountStep "any" -
+        // sonst liesse sich der vorhandene Eintrag gar nicht mehr speichern.
+        // Dieses "any" gilt aber fürs ganze Feld, also muss der neu eingegebene
+        // Wert hier geprüft werden: sonst wäre aus 12,5 JPY auch 12,555 JPY
+        // speicherbar, mehr Bruch als die feste Schrittweite je zuliess.
+        const isHourly = fields.rate_type.value === 'hourly';
+        const rateField = isHourly ? fields.hourly_rate : fields.daily_rate;
+        const rateValue = Number(rateField?.value || 0);
+        const rateOriginal = isHourly ? item.hourly_rate : item.daily_rate;
+        // Nur der Satz zum gewählten Tarif-Typ zählt. Der andere wird unten
+        // trotzdem mitgesendet - dort geht der gespeicherte Wert raus, nicht
+        // eine liegengebliebene Eingabe: wer 12,5 als Tagessatz tippt und dann
+        // auf Stundensatz umstellt, schriebe sonst den ungeprüften Rest weg.
+        const inactiveField = isHourly ? fields.daily_rate : fields.hourly_rate;
+        const inactiveOriginal = isHourly ? item.daily_rate : item.hourly_rate;
+        if (inactiveField) inactiveField.value = String(inactiveOriginal ?? 0);
+        if (!amountIsSavable(rateValue, state.currency, { original: rateOriginal ?? null })) {
+          window.yuvomi?.showToast(t('common.amountPrecisionRequired', {
+            currency: state.currency,
+            step: smallestUnitLabel(state.currency),
+          }), 'danger');
+          rateField?.focus();
+          return;
+        }
         try {
           await api.post('/housekeeping/worker', {
             id: fields.id.value || null,
@@ -1114,8 +1162,21 @@ function openStaffModal(worker, content, options = {}) {
     const isHourly = rateTypeSelect?.value === 'hourly';
     if (dailyRateField) dailyRateField.hidden = isHourly;
     if (hourlyRateField) hourlyRateField.hidden = !isHourly;
+    // Das Label zu verstecken genügt nicht: ein verstecktes Feld nimmt weiter an
+    // der Formularprüfung des Browsers teil. Ein liegengebliebener Tagessatz von
+    // 12,5 blockierte damit unter JPY (Schrittweite 1) das Speichern, ohne dass
+    // irgendwo etwas zu sehen war - der Absenden-Knopf tat schlicht nichts.
+    // `disabled` nimmt das Feld aus der Prüfung; sein Wert bleibt lesbar, und
+    // der Speicherpfad liest ihn direkt über form.elements, nicht über FormData.
+    const dailyInput = dailyRateField?.querySelector('input');
+    const hourlyInput = hourlyRateField?.querySelector('input');
+    if (dailyInput) dailyInput.disabled = isHourly;
+    if (hourlyInput) hourlyInput.disabled = !isHourly;
   }
   rateTypeSelect?.addEventListener('change', updateRateFields);
+  // Einmal beim Öffnen: das Markup setzt zwar `hidden`, aber nicht `disabled` -
+  // ohne diesen Aufruf bliebe das inaktive Feld von Anfang an in der Prüfung.
+  updateRateFields();
 
   const avatarFile = panel?.querySelector('#housekeeping-avatar-file');
   const avatarButton = panel?.querySelector('#housekeeping-avatar-btn');

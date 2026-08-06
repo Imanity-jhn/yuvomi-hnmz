@@ -7,6 +7,24 @@
  */
 
 /**
+ * Die Zone, in der dieser Haushalt lebt: Container-TZ (TZ-Env, siehe
+ * .env.example) → System-Zone → UTC.
+ *
+ * Überall dort nötig, wo ein Zeitpunkt ohne eigene Zone auf eine Wanduhrzeit
+ * trifft: Google-Outbound (Zielkalender ohne Zone), VTODO-Fälligkeiten (#617).
+ * Aufgaben tragen keine TZID - `due_date`/`due_time` sind reine Wanduhr-Werte,
+ * und die Uhr, die hier gemeint ist, ist diese.
+ * @returns {string} IANA-Zone
+ */
+export function serverTimeZone() {
+  const envTz = (process.env.TZ || '').trim();
+  if (envTz) return envTz;
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  } catch { return 'UTC'; }
+}
+
+/**
  * Lokale Wanduhrzeit in einer IANA-Zone -> UTC-ISO (…Z).
  * @param {string} localStr  'YYYY-MM-DDTHH:mm:ss' ohne Offset
  * @param {string} tzid      z.B. 'Europe/Berlin'

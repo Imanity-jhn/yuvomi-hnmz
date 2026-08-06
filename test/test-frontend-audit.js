@@ -32,6 +32,38 @@ function walkFrontendFiles(dir) {
   });
 }
 
+// Zerlegt jedes `Promise.allSettled([...])` einer Datei in die Namen der
+// Destrukturierung und die Top-Level-Eintraege des Arrays, damit der Index eines
+// Aufrufs zu seinem Ergebnis-Bezeichner passt.
+function settledCalls(source) {
+  const marker = 'Promise.allSettled([';
+  const calls = [];
+  let from = 0;
+
+  for (;;) {
+    const start = source.indexOf(marker, from);
+    if (start === -1) return calls;
+
+    const names = source.slice(0, start).match(/const\s*\[([^\]]*)\]\s*=\s*await\s*$/);
+    const entries = [''];
+    let depth = 1;
+    let index = start + marker.length;
+
+    while (index < source.length && depth > 0) {
+      const char = source[index];
+      if ('([{'.includes(char)) depth += 1;
+      else if (')]}'.includes(char)) depth -= 1;
+      if (depth === 0) break;
+      if (char === ',' && depth === 1) entries.push('');
+      else entries[entries.length - 1] += char;
+      index += 1;
+    }
+
+    if (names) calls.push({ names: names[1].split(',').map((name) => name.trim()), entries });
+    from = index + 1;
+  }
+}
+
 function resolveLocaleKey(obj, key) {
   return key.split('.').reduce((value, part) => (value != null ? value[part] : undefined), obj);
 }
@@ -56,9 +88,14 @@ function assertKeysExistInEveryLocale(keys) {
   assert.deepEqual(missing, []);
 }
 
+// Jeder aus Quelltext gelesene Bezeichner, der in ein RegExp-Literal wandert,
+// muss vollstaendig escaped werden - ein Teil-Escape (nur `.`) laesst
+// Backslash und die uebrigen Metazeichen stehen und baut ein anderes Muster
+// als gemeint (CodeQL js/incomplete-sanitization).
+const escapeForRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 function cssRuleBody(css, selector) {
-  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const match = css.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`, 'm'));
+  const match = css.match(new RegExp(`${escapeForRegExp(selector)}\\s*\\{([^}]*)\\}`, 'm'));
   return match?.[1] ?? '';
 }
 
@@ -224,6 +261,23 @@ test('service worker release caches track package version and include the early 
   assert.match(sw, /const SHELL_CACHE\s*=\s*`yuvomi-shell-\$\{APP_RELEASE\}`/);
   assert.match(sw, /const PAGES_CACHE\s*=\s*`yuvomi-pages-\$\{APP_RELEASE\}`/);
   assert.match(sw, /['"]\/lang-init\.js['"]/, 'early lang/dir bootstrap must be available offline');
+});
+
+test('an announced update stops the router from loading further page modules (#616)', () => {
+  const router = read('../public/router.js');
+
+  // Die Modul-Map eines Dokuments lässt sich nicht leeren. Wird nach einem
+  // SW-Update noch ein Seitenmodul nachgeladen, bindet der Browser es gegen die
+  // bereits geladenen, alten geteilten Module - ein neu hinzugekommener Export
+  // fliegt dann als SyntaxError auf. Erlaubt ist deshalb nur noch der Reload.
+  assert.match(router, /shellStale\s*=\s*true;/, 'SW_UPDATED must mark the running shell as stale');
+  assert.match(router, /if \(shellStale && reloadOnce\(\)\)/, 'importPage() must reload instead of importing a page module');
+  assert.match(router, /function prefetchRoute\(path\) \{[\s\S]*?if \(shellStale\) return;/, 'prefetchRoute() must stop warming modules after an update');
+  assert.doesNotMatch(
+    router,
+    /SW_UPDATED[\s\S]{0,400}moduleCache\.clear\(\)/,
+    'moduleCache.clear() on SW_UPDATED is ineffective - it empties only the router map, not the document module map',
+  );
 });
 
 test('runtime locale changes keep language and writing direction synchronized', () => {
@@ -424,7 +478,7 @@ test('module-specific settings leaves only reference their owned preferences and
     },
     '../public/settings/pages/modules-options.js': {
       endpoints: ['/preferences'],
-      preferences: ['budget_mode', 'health_cycle_enabled', 'housekeeping_payment_tasks'],
+      preferences: ['budget_mode', 'health_cycle_enabled', 'housekeeping_payment_tasks', 'tasks_subtasks_expanded'],
     },
   };
 
@@ -457,6 +511,43 @@ test('module-specific settings leaves only reference their owned preferences and
       [...approved.preferences].sort(),
       `${file} must only reference its owned preference keys`,
     );
+  }
+});
+
+// `api.get('/preferences')` liefert den `{ data }`-Envelope, `getPreferences()`
+// dagegen das bereits entpackte Objekt. Beim Umstellen der Blaetter auf den
+// Cache blieb in modules-navigation.js ein `?.data` stehen: `preferences` war ab
+// v1.49.0 dauerhaft leer, `disabled_modules` kam nie an, und jede abgehakte
+// Checkbox sprang beim Re-Render zurueck (#615). Der Guard laeuft ueber jede
+// Datei, die den Cache benutzt - eine Allowlist deckte nur diese eine Datei ab,
+// nicht die Regel.
+test('preferences cache consumers never unwrap a data envelope', () => {
+  const consumers = walkJsFiles('../public/').filter((file) => /\bgetPreferences\(/.test(read(file)));
+  assert.ok(consumers.length >= 8, 'expected the settings leaves to read preferences through the cache');
+
+  for (const file of consumers) {
+    const source = read(file);
+    assert.doesNotMatch(
+      source,
+      /getPreferences\(\)\s*\)*\s*\??\.data\b/,
+      `${file} must not read .data off getPreferences() - it already returns the preferences object`,
+    );
+
+    const bindings = [...source.matchAll(/(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*await\s+getPreferences\(\)/g)]
+      .map((match) => match[1]);
+    for (const call of settledCalls(source)) {
+      call.entries.forEach((entry, index) => {
+        if (/\bgetPreferences\(/.test(entry) && call.names[index]) bindings.push(`${call.names[index]}.value`);
+      });
+    }
+
+    for (const binding of bindings) {
+      assert.doesNotMatch(
+        source,
+        new RegExp(`${escapeForRegExp(binding)}\\s*\\??\\.data\\b`),
+        `${file} must not read .data off the cached preferences (${binding})`,
+      );
+    }
   }
 });
 
@@ -498,14 +589,15 @@ test('module-specific settings leaves preserve their required controls and behav
 
   // Budget, Gesundheit und Haushaltshilfe hatten je ein Blatt für je eine
   // Checkbox (Critique 2026-07-27). Sie teilen sich jetzt eines - mit genau
-  // diesen drei Schaltern und einem einzigen /preferences-Request statt dreien.
+  // diesen Schaltern (Aufgaben kam später dazu) und einem einzigen
+  // /preferences-Request statt einem pro Schalter.
   const options = read('../public/settings/pages/modules-options.js');
-  for (const id of ['budget-mode-personal', 'health-cycle-enabled', 'housekeeping-payment-tasks']) {
+  for (const id of ['budget-mode-personal', 'health-cycle-enabled', 'housekeeping-payment-tasks', 'tasks-subtasks-expanded']) {
     assert.match(options, controlIdPattern(id));
   }
-  // Drei Schalter, sonst nichts: die Schalter selbst kommen aus dem geteilten
-  // Primitiv, deshalb zählt das Blatt keine `<input>`-Literale mehr.
-  assert.equal([...options.matchAll(/toggleRowHtml\(\{/g)].length, 3);
+  // Genau diese Schalter, sonst nichts: sie kommen aus dem geteilten Primitiv,
+  // deshalb zählt das Blatt keine `<input>`-Literale mehr.
+  assert.equal([...options.matchAll(/toggleRowHtml\(\{/g)].length, 4);
   assert.equal([...options.matchAll(/<(?:input|select|textarea)\b/g)].length, 0);
   assert.equal([...options.matchAll(/getPreferences\(\)/g)].length, 1);
   assert.match(options, /budget_mode: checked \? 'personal' : 'shared'/);
@@ -688,6 +780,13 @@ test('sync-reminders leaf maps CalDAV reminder lists and syncs without calendars
   assert.match(source, /settings\.caldavReminderMapTasks/);
   assert.match(source, /settings\.caldavReminderMapShopping/);
   assert.match(source, /settings\.caldavRemindersHint/);
+
+  // Apple hat die Erinnerungen-App aus CalDAV genommen (#677): ein iCloud-Konto
+  // liefert hier höchstens Altlisten, deshalb steht der Hinweis am Konto - aber
+  // nur dort, sonst läse ihn auch, wer Nextcloud oder Radicale nutzt.
+  assert.match(source, /isICloudAccount\(account\.caldavUrl\)/);
+  assert.match(source, /settings\.caldavRemindersAppleNote/);
+  assert.match(source, /icloud\.com/);
 
   // Konto-Felder als camelCase, Toggle mit Fokus-Rückgabe (#534-Nachlauf).
   assert.match(source, /account\.lastSync/);
@@ -1179,8 +1278,13 @@ test('More button active state keeps visible More identity and accessible active
 
   assert.match(source, /function\s+setMoreButtonState/);
   assert.match(source, /moreBtn\.setAttribute\('aria-current',\s*'page'\)/);
-  assert.match(source, /moreBtn\.setAttribute\('aria-label',\s*moreLabel\)/);
+  // Der zugängliche Name muss aus `moreLabel` entstehen (es trägt den aktiven
+  // Abschnitt). Ob noch etwas angehängt wird - seit #490 der Update-Hinweis -
+  // ist offen; ersetzt werden darf `moreLabel` nicht.
+  assert.match(source, /moreBtn\.setAttribute\('aria-label',[^;]*\bmoreLabel\b/);
   assert.match(source, /moreBtn\.setAttribute\('title',\s*t\('nav\.more'\)\)/);
+  // Der sichtbare Text bleibt „Mehr", egal was im Namen steht.
+  assert.match(source, /moreBtnLabel\.textContent\s*=\s*t\('nav\.more'\)/);
   assert.doesNotMatch(source, /moreBtn\.toggleAttribute\('aria-current',\s*inMoreSheet\)/);
 });
 
@@ -1294,8 +1398,12 @@ test('mobile navigation Quiet Precision keeps state feedback stable and accessib
   // verschwinden.
   assert.match(focusRule, /outline:\s*none/);
   const focusWellRule = cssRuleBody(layout, '.nav-bottom .nav-item:focus-visible .nav-item__icon-well');
-  assert.match(focusWellRule, /outline:\s*var\(--space-0h\)\s+solid/);
-  assert.match(focusWellRule, /outline-offset:\s*var\(--space-0h\)/);
+  // Breite und Offset kommen aus den geteilten Fokus-Tokens (tokens.css §7b),
+  // vorher aus --space-0h. Abweichen darf hier nur die FARBE: ein Nav-Item zeigt
+  // auf SEIN Modul, nicht auf das gerade offene.
+  assert.match(focusWellRule, /outline:\s*var\(--focus-ring-width\)\s+solid\s+var\(--focus-ring-color\)/);
+  assert.match(focusWellRule, /outline-offset:\s*var\(--focus-ring-offset\)/);
+  assert.match(focusWellRule, /--focus-ring-color:\s*var\(--item-module-accent,/);
   assert.match(pressedWellRule, /transform:\s*translateY\(var\(--space-px\)\) scale\(0\.96\)/);
   assert.doesNotMatch(layout, /(^|\n)\.nav-item:active\s*\{[\s\S]*?transform:/);
   assert.doesNotMatch(layout, /\.nav-bottom \.nav-item:active\s*\{[\s\S]*?transform:/);
@@ -1568,6 +1676,138 @@ test('die Küchen-Seiten bauen Leerzustände nur über den geteilten Renderer', 
 });
 
 /**
+ * Ein fehlgeschlagener Ladevorgang zeigt nie den Leerzustand.
+ *
+ * Ausgangsbefund (Critique P0, 2026-07-30): bei erzwungenem HTTP 500 sagte
+ * `/shopping` „Keine Listen · [Neue Liste erstellen]" bei 31 vorhandenen
+ * Artikeln, `/meals` dasselbe bei 28 geplanten Mahlzeiten. Beide Loader fingen
+ * den Fehler, leerten den State und legten die Meldung in einen Toast - von den
+ * zwei Aussagen überlebte damit die falsche, denn der Toast verging und der
+ * Leerzustand blieb. Ein Leerzustand ist die schädlichste Antwort auf einen
+ * Serverfehler: er behauptet Datenverlust und bietet als einzige Handlung eine
+ * schreibende an.
+ *
+ * Der Guard hält die drei Bedingungen fest, die den Defekt strukturell
+ * ausschließen. Die dritte ist die eigentliche: Reihenfolge im Rumpf. Ein
+ * Fehler-Feld, das erst NACH dem Leer-Zweig geprüft wird, ist wirkungslos -
+ * `state.items` ist nach einem Fehler ebenfalls leer, und nur die Reihenfolge
+ * trennt „nichts angelegt" von „nicht geladen".
+ */
+test('die Küchen-Seiten zeigen bei einem Ladefehler den Fehlerzustand, nicht den Leerzustand', () => {
+  for (const page of ['meals', 'recipes', 'shopping', 'pantry']) {
+    const src = read(`../public/pages/${page}.js`);
+
+    // 1. Es gibt überhaupt einen Fehlerzustand.
+    assert.match(src, /\bmountLoadError\s*\(/,
+      `${page}.js ruft den geteilten Fehler-Renderer mountLoadError() nicht auf`);
+
+    // 2. Jedes gesetzte Fehler-Feld wird auch gelesen. Ein Feld, das nur
+    //    geschrieben wird, ist genau der Zustand vor dem Fix: der Fehler ist
+    //    bekannt und wird trotzdem nicht gezeigt.
+    const assigned = new Set(
+      [...src.matchAll(/\bstate\.(\w*[eE]rror)\s*=/g)].map((m) => m[1]),
+    );
+    for (const field of assigned) {
+      const readPattern = new RegExp(`(if\\s*\\(|&&|\\|\\||!)\\s*!?state\\.${field}\\b`);
+      assert.match(src, readPattern,
+        `${page}.js setzt state.${field}, prüft es aber nirgends - der Fehler bleibt unsichtbar`);
+    }
+
+    // 3. Wo beide Zustände im selben Funktionsrumpf gerendert werden, kommt der
+    //    Fehlerzustand zuerst.
+    for (const [name, body] of topLevelFunctions(src)) {
+      const errorAt = body.search(/\bmountLoadError\s*\(/);
+      const emptyAt = body.search(/\bmountEmptyState\s*\(/);
+      if (errorAt === -1 || emptyAt === -1) continue;
+      assert.ok(errorAt < emptyAt,
+        `${page}.js: ${name}() rendert den Leerzustand vor dem Fehlerzustand - `
+        + 'nach einem Ladefehler ist die Sammlung ebenfalls leer, der Leer-Zweig greift also zuerst');
+    }
+
+    // 4. Kein Ladefehler wird nur noch in einen Toast gelegt.
+    for (const [name, body] of topLevelFunctions(src)) {
+      if (!/\bcatch\b/.test(body)) continue;
+      const toastOnly = /showToast\s*\(\s*t\(\s*['"][\w.]*[lL]oadError/.test(body);
+      assert.ok(!toastOnly,
+        `${page}.js: ${name}() meldet einen Ladefehler per Toast - der vergeht, `
+        + 'während der falsche Zustand darunter stehen bleibt');
+    }
+  }
+});
+
+/**
+ * Der Fokusring hat genau eine Spezifikation.
+ *
+ * Ausgangsbefund (Critique P1, 2026-07-30): sechs. Zwei konkurrierende
+ * Basisregeln - reset.css (2px, App-Akzent, offset 2px) und glass.css, das den
+ * Offset global auf 3px hob - plus rund 45 lokale Regeln darüber. Auf
+ * /shopping alternierte der Ring beim Durchtabben violett → orange → violett →
+ * orange, sechs Farbwechsel in 15 Tabstops, weil ein Teil der Komponenten
+ * `--active-module-accent` las und der andere `--color-accent` festverdrahtet
+ * hatte. Der Fokusring ist das einzige Bauteil, das ein Tastaturnutzer
+ * ununterbrochen sieht; ein Farbwechsel darin liest sich als Kontextwechsel.
+ *
+ * Der Guard erlaubt genau zwei Formen: die Tokens lesen, oder - für die
+ * begründeten Ausnahmen - `--focus-ring-color` lokal überschreiben. Eine eigene
+ * `outline`-Farbe in einer Fokusregel ist die siebte Spezifikation.
+ */
+test('Fokusringe lesen die Tokens aus tokens.css §7b', () => {
+  const tokens = read('../public/styles/tokens.css');
+  for (const token of ['--focus-ring-width', '--focus-ring-color', '--focus-ring-offset', '--focus-ring-offset-inset']) {
+    assert.ok(tokens.includes(`${token}:`), `tokens.css führt ${token} nicht`);
+  }
+
+  const findings = [];
+  for (const file of readdirSync(new URL('../public/styles/', import.meta.url))) {
+    if (!file.endsWith('.css')) continue;
+    const lines = read(`../public/styles/${file}`).split('\n');
+
+    lines.forEach((line, i) => {
+      const decl = line.split('/*')[0];
+      // `outline` muss eine Deklaration sein, kein Namensteil: `\b` matcht auch
+      // in `.btn--danger-outline:focus-visible`. Also nur nach Zeilenanfang,
+      // `{` oder `;`.
+      if (!/(^|[{;])\s*outline(-color|-offset|-width)?\s*:/.test(decl)) return;
+      if (/outline\s*:\s*(none|0)\s*[;}]/.test(decl)) return;
+      if (/var\(--focus-ring/.test(decl)) return;
+
+      // Nur Fokusregeln. Eine `outline` als Zustandsmarkierung (Drop-Target,
+      // „heute", aria-current) ist kein Fokusring und darf eigene Werte tragen.
+      let selector = null;
+      let depth = 0;
+      for (let j = i; j >= 0; j--) {
+        depth += (lines[j].match(/\}/g) || []).length - (lines[j].match(/\{/g) || []).length;
+        if (depth < 0) { selector = lines[j]; break; }
+      }
+      if (!selector || !/:focus-visible|:focus-within/.test(selector)) return;
+
+      findings.push(`${file}:${i + 1}  ${selector.split('{')[0].trim().slice(0, 50)} → ${decl.trim().slice(0, 50)}`);
+    });
+  }
+
+  assert.deepEqual(findings, [],
+    'Fokusregeln mit eigenen Werten statt der --focus-ring-*-Tokens. Begründete '
+    + 'Ausnahmen überschreiben --focus-ring-color lokal und lesen Breite/Offset '
+    + `weiter aus den Tokens:\n${findings.join('\n')}`);
+});
+
+/**
+ * Zerlegt eine Modulquelle in ihre Top-Level-Funktionen.
+ * Grob, aber ausreichend: die Küchen-Seiten deklarieren durchgängig mit
+ * `function name()` an der linken Spalte.
+ */
+function topLevelFunctions(src) {
+  const out = [];
+  const pattern = /^(?:export\s+)?(?:async\s+)?function\s+(\w+)/gm;
+  const starts = [...src.matchAll(pattern)];
+  starts.forEach((match, i) => {
+    const end = i + 1 < starts.length ? starts[i + 1].index : src.length;
+    out.push([match[1], src.slice(match.index, end)]);
+  });
+  return out;
+}
+
+/**
  * Die Küchen-Listen teilen EINE Zeilen-Grammatik.
  *
  * Ausgangsbefund (Critique 2026-07-30, gemessen bei 1440px): die vier Tabs
@@ -1676,6 +1916,403 @@ test('die Küchen-Listen teilen eine Zeilen-Grammatik', () => {
     '.items-list darf kein horizontales Polster setzen: #list-content trägt schon --page-inline-pad');
   assert.doesNotMatch(shared.match(/\.kitchen-list\s*\{([^}]*)\}/)?.[1] ?? '', /padding-inline:/,
     '.kitchen-list darf kein padding-inline setzen: wo der Spalten-Träger sitzt, ist pro Tab verschieden');
+
+  // Die Kappung aufs Lesemaß sitzt an den KINDERN des Scrollers, nicht am
+  // Scroller selbst (PR #614). Die Begründung dafür stand bisher nur als
+  // Kommentar im CSS.
+  //
+  // Gescannt wird JEDE Regel JEDER Stylesheet-Datei, nicht der erste Textblock
+  // je Selektor. Zwei Wege führen sonst am Guard vorbei: ein zweiter Block
+  // hinter einem Breakpoint, und das Modul-CSS, das später lädt und auf
+  // demselben Element sitzt (`class="kitchen-list items-list"`).
+  //
+  // Und jede Regel weiß, OB sie bedingt gilt. cssRules() wirft das At-Rule-
+  // Präludium weg; eine geforderte Kappung, die nur unter `@media (max-width:
+  // 640px)` steht, ist auf jedem breiteren Fenster keine.
+  const styleDir = new URL('../public/styles/', import.meta.url);
+  const allRules = readdirSync(styleDir).filter((f) => f.endsWith('.css'))
+    .flatMap((file) => scopedRules(read(`../public/styles/${file}`)).map((rule) => ({ file, ...rule })));
+
+  // Der WIRKSAME Wert einer Eigenschaft, oder null. Drei Fallen stecken darin:
+  //
+  //   - Eine Deklaration ist kein Textvorkommen: `--eigene-max-width: 40rem`
+  //     setzt keine Breite, und `--x: var(--content-max-width-narrow)` erfüllt
+  //     keine Zusage.
+  //   - Die LETZTE Deklaration gewinnt, wie im Browser. Sonst gilt
+  //     `max-width: var(--content-max-width-narrow); max-width: none` als
+  //     erfüllt, obwohl das Element bildschirmbreit läuft.
+  //   - Kurzschreibweisen setzen dieselbe Eigenschaft mit: `place-self:
+  //     stretch` setzt `align-self` zurück. Deshalb nimmt die Funktion eine
+  //     Liste und gibt bei `place-*` den ersten Teilwert (die Block-Achse).
+  //   - `!important` schlägt die Quellreihenfolge. `max-width: none !important;
+  //     max-width: var(…)` sieht sonst erfüllt aus, obwohl das `none` gewinnt.
+  const declaredValue = (body, props, axis = 'block') => {
+    const list = [].concat(props);
+    const alternatives = list.map((p) => escapeForRegExp(p)).join('|');
+    // Standard-Eigenschaften sind ASCII-case-insensitiv (`MAX-WIDTH` wirkt),
+    // Custom Properties dagegen nicht: `--Foo` und `--foo` sind zwei Namen.
+    const flags = list.some((p) => p.startsWith('--')) ? 'gm' : 'gmi';
+    const hits = [...body.matchAll(new RegExp(`(?:^|;)\\s*(${alternatives})\\s*:\\s*([^;]+)`, flags))]
+      .map(([, prop, raw]) => ({ prop, raw: raw.trim() }));
+    if (!hits.length) return null;
+    const important = hits.filter(({ raw }) => /!\s*important$/i.test(raw));
+    const { prop, raw } = (important.length ? important : hits).at(-1);
+    const value = raw.replace(/!\s*important$/i, '').trim();
+    if (!prop.toLowerCase().startsWith('place-')) return value;
+    // `place-self: <align> <justify>` - fehlt der zweite Wert, gilt der erste
+    // fuer beide Achsen.
+    const parts = value.split(/\s+/);
+    return axis === 'inline' ? (parts[1] ?? parts[0]) : parts[0];
+  };
+  const NARROW = 'var(--content-max-width-narrow)';
+  const ALIGN_SELF = ['align-self', 'place-self'];
+  // Eine Kappung ist eine Kappung, egal wie buchstabiert: die logischen Formen
+  // wirken im Schreibmodus dieser App auf dieselbe Achse. Dasselbe Paar prüft
+  // der Modul-Root-Breiten-Guard weiter unten schon.
+  // ZWEI Gruppen, nicht eine Liste: `width` und `max-width` konkurrieren nicht,
+  // sie beschränken die Box gemeinsam. Als eine Liste gelesen gewönne bei
+  // `max-width: 20rem; width: 100%` das erlaubte `100%` - und die Kappung auf
+  // 20rem stünde ungeprüft daneben. Innerhalb einer Gruppe konkurrieren die
+  // Schreibweisen sehr wohl (logisch gegen physisch, gleiche Achse).
+  const WIDTH_AXES = [['width', 'inline-size'], ['max-width', 'max-inline-size']];
+  const MAX_WIDTH = ['max-width', 'max-inline-size'];
+  // Werte, die dem Scroller NICHTS wegnehmen. Ein Modul darf `max-width: none`
+  // ausdrücklich hinschreiben - verboten ist die Kappung, nicht die Erwähnung.
+  const FREE_WIDTH = ['none', 'auto', 'initial', 'unset', 'revert', '100%'];
+  // Ausrichtungen, die das Element seine Spur füllen lassen.
+  const FILLS = ['stretch', 'normal', 'auto', 'initial', 'unset', 'revert'];
+
+  // Die WIRKSAMEN Inline-Margen einer Regel. In Deklarationsreihenfolge
+  // aufgelöst, weil der Shorthand die Langformen zurücksetzt: nach
+  // `margin-inline-end: 20rem; margin: 0` ist die Marge null, und wer nur
+  // sammelt statt zu kaskadieren, meldet dort einen Verstoß, den es
+  // nicht gibt.
+  const inlineMargins = (body) => {
+    let start = null;
+    let end = null;
+    let startFixed = false;   // von einer !important-Deklaration gesetzt
+    let endFixed = false;
+    const setStart = (value, important) => {
+      if (startFixed && !important) return;
+      start = value;
+      startFixed = startFixed || important;
+    };
+    const setEnd = (value, important) => {
+      if (endFixed && !important) return;
+      end = value;
+      endFixed = endFixed || important;
+    };
+    const pattern = /(?:^|;)\s*(margin|margin-inline|margin-inline-start|margin-inline-end|margin-left|margin-right)\s*:\s*([^;]+)/gim;
+    for (const [, rawProp, rawValue] of body.matchAll(pattern)) {
+      const prop = rawProp.toLowerCase();
+      // Eine wichtige Langform überlebt einen späteren gewöhnlichen
+      // Shorthand - sonst meldete `margin-inline-end: 20rem !important;
+      // margin: 0` eine Marge von null, die der Browser nie sieht.
+      const important = /!\s*important$/i.test(rawValue.trim());
+      const value = rawValue.replace(/!\s*important$/i, '').trim();
+      const parts = value.split(/\s+/);
+      if (prop === 'margin') {
+        const [top, right = top, , left = right] = parts;
+        setStart(left, important);
+        setEnd(right, important);
+      } else if (prop === 'margin-inline') {
+        const [first, second = first] = parts;
+        setStart(first, important);
+        setEnd(second, important);
+      } else if (prop === 'margin-inline-start' || prop === 'margin-left') {
+        setStart(value, important);
+      } else {
+        setEnd(value, important);
+      }
+    }
+    return [['margin-inline-start', start], ['margin-inline-end', end]].filter(([, value]) => value !== null);
+  };
+
+  // Zielt der Selektor auf das Element selbst, nicht auf einen Nachfahren?
+  // Geprüft wird der LETZTE Compound, damit auch `.kitchen-list#items-list`,
+  // `.kitchen-list:hover` und `:is(.kitchen-list)` als Treffer gelten -
+  // `.kitchen-list .row` dagegen nicht.
+  //
+  // `:not(…)` und `:has(…)` fallen vorher weg, und zwar VOR dem Zerlegen:
+  // beide nennen die Klasse, ohne dass die Regel sie stylt. `.page:has(
+  // .kitchen-list)` gestaltet den Vorfahren, nicht den Scroller - dort rot zu
+  // werden hieße, eine korrekte Layoutregel zu blockieren.
+  // Das Token ist `.klasse` oder `#id`: dasselbe Element lässt sich über beide
+  // ansprechen, und eine Regel auf der ID nennt keine seiner Klassen.
+  const targets = (selector, token) => {
+    const subject = selector.replace(/:(?:not|has)\([^)]*\)/g, '');
+    const compound = subject.trim().split(/[\s>+~]+/).pop() ?? '';
+    // Ein Pseudo-Element ist ein eigener Kasten, nicht das Element selbst:
+    // `.recipes-list::before { width: 1rem }` kappt den Scroller nicht, und
+    // dort rot zu werden hieße, eine harmlose Dekoration zu verbieten.
+    if (/::|:(?:before|after|first-line|first-letter|marker|backdrop|selection|placeholder)\b/.test(compound)) return false;
+    return new RegExp(`${escapeForRegExp(token)}(?![\\w-])`).test(compound);
+  };
+  const rulesFor = (token) => allRules.filter(({ selectors }) => selectors.some((s) => targets(s, token)));
+
+  // 1. Der Scroller selbst darf nicht gekappt werden. Er ist das Element mit
+  //    `overflow-y: auto`; kappt man es aufs Lesemaß, endet damit auch sein
+  //    eigener Trefferbereich fürs Mausrad an der Lesespalten-Kante, und auf
+  //    einem breiten Fenster greift das Rad rechts davon ins Leere.
+  //
+  //    Welche Klassen den Scroller mitbenennen, sagt das Markup, nicht diese
+  //    Liste: wer auf demselben Element sitzt, kann seine Breite kappen.
+  //    JEDE geprüfte Seite muss ihre eigene Kombination liefern. Eine globale
+  //    Mindestzahl genügt nicht: fiele nur eine Seite aus der Erkennung, würden
+  //    die beiden anderen sie weiter erfüllen, und deren Modul-Klasse wäre
+  //    ungeprüft.
+  const scrollerTokens = new Set(['.kitchen-list']);
+  for (const page of ['shopping', 'pantry', 'recipes']) {
+    const src = read(`../public/pages/${page}.js`);
+    const combos = [...src.matchAll(/class(?:Name)?\s*=\s*(['"`])([^'"`]*\bkitchen-list\b[^'"`]*)\1/g)];
+    assert.ok(combos.length > 0,
+      `${page}.js hängt seine Klasse nicht mehr literal an .kitchen-list - dieser Scan findet sie dann nicht und prüft den Scroller des Tabs ungewollt gar nicht`);
+    combos.forEach(([, , combo]) => combo.trim().split(/\s+/).forEach((cls) => scrollerTokens.add(`.${cls}`)));
+
+    // Und über die ID, die alle drei Scroller tragen: `#recipes-list` trifft
+    // dasselbe Element, ohne eine seiner Klassen zu nennen. Keine ID im
+    // Markup heißt umgekehrt, dass kein ID-Selektor es treffen kann - deshalb
+    // ist hier nichts zu fordern, nur einzusammeln.
+    const inTag = (src.match(/<[^>]*\bkitchen-list\b[^>]*>/g) ?? [])
+      .map((tag) => tag.match(/\bid="([^"]+)"/)?.[1]);
+    const nextToClassName = [...src.matchAll(
+      /(\w+)\.className\s*=\s*['"`][^'"`]*\bkitchen-list\b[^'"`]*['"`];\s*\1\.id\s*=\s*['"`]([^'"`]+)/g)]
+      .map(([, , id]) => id);
+    [...inTag, ...nextToClassName].filter(Boolean).forEach((id) => scrollerTokens.add(`#${id}`));
+
+    // Inline-Styles stehen in keiner der gescannten Dateien und schlagen
+    // trotzdem jede Regel darin. Der Scroller wird im JS gebaut, also muss
+    // der Scan dort nachsehen - an derselben Variablen, die die Klasse bekommt,
+    // und im Tag, das sie im Markup trägt.
+    for (const [, variable] of src.matchAll(/(\w+)\.className\s*=\s*['"`][^'"`]*\bkitchen-list\b/g)) {
+      const name = escapeForRegExp(variable);
+      assert.doesNotMatch(src, new RegExp(`\\b${name}\\.style\\.(?:max)?(?:Width|InlineSize)\\s*=`, 'i'),
+        `${page}.js setzt eine Inline-Breite am Scroller - die schlägt jede Regel im Stylesheet und damit auch diesen Guard`);
+      assert.doesNotMatch(src, new RegExp(`\\b${name}\\.style\\.(?:alignSelf|placeSelf)\\s*=`),
+        `${page}.js setzt align-self inline am Scroller - das nimmt ihm die volle Breite`);
+      assert.doesNotMatch(src, new RegExp(`\\b${name}\\.style\\.setProperty\\(\\s*['"\`](?:(?:max-)?(?:width|inline-size)|align-self|place-self|margin(?:-inline)?(?:-start|-end)?|margin-left|margin-right)`, 'i'),
+        `${page}.js setzt eine Breite, Ausrichtung oder Marge inline am Scroller (setProperty)`);
+      assert.doesNotMatch(src, new RegExp(`\\b${name}\\.style\\.cssText\\s*=`),
+        `${page}.js überschreibt den Stil des Scrollers per cssText - was darin steht, sieht dieser Guard nicht`);
+      assert.doesNotMatch(src, new RegExp(`\\b${name}\\.setAttribute\\(\\s*['"\`]style`, 'i'),
+        `${page}.js setzt den Stil des Scrollers per setAttribute - derselbe Inline-Stil über einen anderen Weg`);
+      assert.doesNotMatch(src, new RegExp(`\\b${name}\\.style\\.margin(?:Inline|Left|Right)?[A-Za-z]*\\s*=`),
+        `${page}.js setzt eine Inline-Marge am Scroller - die zieht als gestrecktes Flex-Item direkt von seiner Breite ab`);
+    }
+    (src.match(/<[^>]*\bkitchen-list\b[^>]*>/g) ?? []).forEach((tag) => {
+      assert.doesNotMatch(tag, /\sstyle\s*=/,
+        `${page}.js gibt dem Scroller ein style-Attribut - Inline-Stile schlagen jede Regel im Stylesheet`);
+    });
+  }
+  assert.ok(rulesFor('.kitchen-list').length > 0,
+    '.kitchen-list ist nirgends definiert: ein leerer Treffer darf hier nicht still grün bleiben');
+  for (const cls of scrollerTokens) {
+    for (const { file, selectors, body } of rulesFor(cls)) {
+      for (const axis of WIDTH_AXES) {
+        const cap = declaredValue(body, axis);
+        assert.ok(cap === null || FREE_WIDTH.includes(cap),
+          `${file} ${selectors.join(', ')}: ${axis[0]}: ${cap} kappt den Scroller - dann endet sein Mausrad-Trefferbereich an der Lesespalten-Kante`);
+      }
+
+      // Dieselbe Verengung ohne Breitenangabe: als gestrecktes Flex-Item zieht
+      // eine Inline-Marge direkt von der Randbox ab. `margin-inline-end: 20rem`
+      // beendet den Trefferbereich 20rem vor der Seitenkante.
+      for (const [prop, value] of inlineMargins(body)) {
+        assert.ok(/^0[a-z%]*$/.test(value),
+          `${file} ${selectors.join(', ')}: ${prop}: ${value} nimmt dem Scroller Breite - der Trefferbereich endet dann davor`);
+      }
+
+      // Dieselbe Kante ohne jede Breitenangabe: der Scroller ist Flex-Item
+      // seines Modul-Roots (.recipes-page & Co. sind flex column). Ein
+      // `align-self: start` nimmt ihm das voreingestellte Strecken und lässt
+      // ihn auf Inhaltsbreite schrumpfen - der Trefferbereich fürs Mausrad
+      // endet dann genau dort. Erlaubt bleibt nur, was ihn füllen lässt.
+      const spread = declaredValue(body, ALIGN_SELF);
+      assert.ok(spread === null || FILLS.includes(spread),
+        `${file} ${selectors.join(', ')}: align-self: ${spread} nimmt dem Scroller die volle Breite - dann greift das Mausrad rechts daneben ins Leere`);
+
+      // `all` setzt jede der oben geprüften Eigenschaften mit zurück, ohne
+      // eine davon zu nennen.
+      assert.equal(declaredValue(body, 'all'), null,
+        `${file} ${selectors.join(', ')}: die all-Kurzschreibweise setzt Breite und Ausrichtung des Scrollers zurück`);
+    }
+  }
+
+  //    Und das Lesemaß behält EINE Quelle. Definierte ein Modul
+  //    --content-max-width-narrow lokal um, trüge das Kind zwar weiter die
+  //    geforderte Deklaration, löste sie aber auf ein anderes Maß auf - der
+  //    Guard unten vergliche dann zwei Texte, die dasselbe sagen und
+  //    Verschiedenes bedeuten.
+  for (const { file, selectors, body } of allRules) {
+    // Ausgenommen ist die KANONISCHE Deklaration, nicht die Datei: eine auf
+    // einen Selektor gescopte Neudefinition in tokens.css selbst umginge
+    // dieselbe Invariante, die dieser Block schützt.
+    if (file === 'tokens.css' && selectors.every((s) => /^:root\b/.test(s.trim()))) continue;
+    assert.equal(declaredValue(body, '--content-max-width-narrow'), null,
+      `${file} ${selectors.join(', ')}: --content-max-width-narrow wird hier lokal umdefiniert - das Lesemaß kommt aus tokens.css und nirgendwo sonst`);
+  }
+
+  //    Und es muss sie geben: fehlt die :root-Deklaration, wird jedes
+  //    `var(--content-max-width-narrow)` ungültig und das max-width fällt auf
+  //    `none` zurück - die Listen liefen bildschirmbreit, während dieser Test
+  //    weiter zwei Texte vergleicht, die zueinander passen.
+  // Die GEWINNENDE Deklaration über alle kanonischen Regeln. Weder „die
+  // letzte" noch „die erste" genügt: `!important` schlägt die
+  // Quellreihenfolge auch zwischen zwei :root-Blöcken. Deshalb werden die
+  // Rümpfe in Quellreihenfolge aneinandergehängt und einmal ausgewertet -
+  // declaredValue() kennt die Vorrangregel bereits.
+  const canonicalBodies = allRules
+    .filter(({ file, selectors, conditional }) => file === 'tokens.css' && !conditional
+      && selectors.some((sel) => /^:root\b/.test(sel)))
+    .map(({ body }) => body).join(';');
+  const tokenValue = declaredValue(canonicalBodies, '--content-max-width-narrow');
+  assert.ok(tokenValue !== null,
+    'tokens.css muss --content-max-width-narrow unbedingt in :root definieren - ohne die Deklaration löst var(…) auf nichts auf und die Kappung entfällt');
+  assert.match(tokenValue, /^(?:\d+(?:\.\d+)?(?:px|rem|em|ch|ex|vw|vmin|vmax|%)|(?:min|max|clamp|calc)\(.*\))$/,
+    `--content-max-width-narrow ist auf "${tokenValue}" gesetzt - das ist keine Breite, und die Kappung der Kinder läuft ins Leere`);
+
+  // 2. Tragen muss die Kappung stattdessen jedes Kind, das ALLEIN Kind des
+  //    Scrollers sein kann: .kitchen-group bei gruppierten Tabs (Einkauf,
+  //    Vorrat), .kitchen-rows ungruppiert (Rezepte). Fehlt sie an einem der
+  //    beiden, läuft der betroffene Tab bildschirmbreit - und ein zweiter
+  //    Block darf sie auch nicht auf einen abweichenden Wert ziehen.
+  for (const cls of ['.kitchen-group', '.kitchen-rows']) {
+    const rules = rulesFor(cls);
+    // Unbedingt heißt dreierlei: nicht hinter einem Breakpoint, nicht an einen
+    // Zustand gebunden, und nicht an einen Vorfahren geknüpft.
+    // `.kitchen-rows:hover` kappt nur unter dem Mauszeiger;
+    // `.shopping-page .kitchen-rows` kappt die Rezeptliste gar nicht, obwohl
+    // der Selektor die Klasse nennt und dieser Scan ihn findet.
+    // Anders als in targets() bleiben :not() und :has() hier STEHEN. Dort
+    // sagen sie nur, dass die genannte Klasse nicht das Subjekt ist; hier
+    // sagen sie, dass die Kappung an eine Bedingung geknüpft ist -
+    // `.kitchen-rows:not(.uncapped)` lässt jede Zeile mit dieser Klasse
+    // ungekappt. `:is()`/`:where()` gehören zum Subjekt: Inhalt behalten.
+    const plain = (sel) => {
+      const bare = sel.replace(/:(?:is|where)\(([^)]*)\)/g, '$1');
+      return !/:/.test(bare) && !/[\s>+~,]/.test(bare);
+    };
+    assert.ok(rules.some(({ body, conditional, selectors }) =>
+      !conditional && selectors.some(plain) && declaredValue(body, MAX_WIDTH) === NARROW),
+    `${cls} muss das Lesemaß UNBEDINGT tragen: eine Kappung hinter einem Breakpoint, an einem Zustand (:hover) oder unter einem Vorfahren (.foo ${cls}) greift nicht in jedem Kontext, in dem das Element gerendert wird`);
+    for (const { file, body } of rules) {
+      // Eine feste Breite schlägt die Kappung, ohne sie anzufassen: mit
+      // `width: 20rem` bleibt das max-width korrekt stehen und die Liste steht
+      // trotzdem schmal. Prozentwerte und `auto` sind unschädlich - sie messen
+      // den (ungekappten) Scroller, und das max-width begrenzt weiter.
+      const definite = declaredValue(body, ['width', 'inline-size']);
+      assert.ok(definite === null || definite === 'auto' || definite === '100%',
+        `${file}: ${cls} bekommt hier eine feste Breite (${definite}) - gekappt wird über max-width, sonst steht die Liste unabhängig vom Lesemaß schmal`);
+
+      // Dasselbe ohne Breitenangabe: als Grid-Item von .kitchen-list füllt das
+      // Kind seine Spur per Voreinstellung. `justify-self: start` nimmt ihm
+      // das, und die auto-Breite fällt auf den Inhalt zusammen - das Lesemaß
+      // bleibt dabei unangetastet und unwirksam.
+      const inline = declaredValue(body, ['justify-self', 'place-self'], 'inline');
+      assert.ok(inline === null || FILLS.includes(inline),
+        `${file}: ${cls} bekommt justify-self: ${inline} - dann schrumpft die Gruppe auf ihren Inhalt, statt das Lesemaß auszufüllen`);
+      assert.equal(declaredValue(body, 'all'), null,
+        `${file}: ${cls} wird per all-Kurzschreibweise zurückgesetzt - das nimmt Kappung und Ausrichtung mit`);
+
+      const width = declaredValue(body, MAX_WIDTH);
+      if (width === null) continue;
+      assert.equal(width, NARROW,
+        `${file}: ${cls} bekommt hier eine zweite, abweichende Breite - das Lesemaß ist EIN Wert`);
+    }
+  }
+
+  // 3. Und wer aufs Lesemaß kappt UND clippt, muss auf seine Inhaltshöhe
+  //    wachsen dürfen.
+  //
+  //    Absichtlich eine Regel und keine Allowlist: `overflow: hidden` (hier für
+  //    die Eckenradien) macht aus dem gekappten Kind einen Clipper. Ohne
+  //    `align-self: start` streckt das voreingestellte `align-items: stretch`
+  //    es auf die volle Spurhöhe, und es schneidet alles darüber still ab,
+  //    bevor .kitchen-list den Überlauf je sieht. Gemessen an einer Rezeptliste
+  //    mit 50 gespiegelten Einträgen: scrollHeight 3249px gegen clientHeight
+  //    657px, kein Scrollbalken, kein Weg an die übrigen Zeilen. Harmlos ist
+  //    das nur, solange mehrere kurze Gruppen dieselbe Spur teilen.
+  //
+  //    Der Scan bleibt auf kitchen-row.css, wo die geteilten Bausteine
+  //    definiert werden. Andere Module kappen mit demselben Token Elemente, die
+  //    nie Grid-Item dieses Scrollers werden (shopping.css die Eingabezeile,
+  //    layout.css den Leerzustand) - für die wäre `align-self: start` falsch.
+  //    Innerhalb dieser Datei gilt dieselbe Einschränkung für .kitchen-bulkbar:
+  //    sie steht ÜBER dem Scroller (siehe dort) und trägt das Lesemaß, clippt
+  //    aber nicht. Käme dort ein `overflow: hidden` dazu, meldet dieser Guard
+  //    einen Fall, den ein Mensch entscheiden muss.
+  //    Kombiniert wird über REGELGRENZEN hinweg: der Browser sammelt die
+  //    Deklarationen aller passenden Regeln, bevor er den Wert bestimmt.
+  //    Stünden Kappung und `overflow` in zwei getrennten Blöcken, sähe eine
+  //    Prüfung pro Block in keinem von beiden ein gekapptes, clippendes
+  //    Element - und genau das ist es.
+  //    Gruppiert wird nach dem ELEMENT, nicht nach dem Selektortext: `.kitchen-rows`
+  //    und `ul.kitchen-rows` treffen dasselbe `ul`, stünden als zwei Einträge
+  //    aber je unvollständig da. Maßgeblich sind die Klassen und IDs im
+  //    Subjekt; eine Regel zählt zu jedem Element, dessen Merkmale sie
+  //    vollständig enthält.
+  const subjectKeys = (selector) => {
+    const subject = selector
+      .replace(/:(?:not|has)\([^)]*\)/g, '')
+      .replace(/:(?:is|where)\(([^)]*)\)/g, '$1')
+      .trim().split(/[\s>+~]+/).pop() ?? '';
+    return new Set(subject.match(/[.#][\w-]+/g) ?? []);
+  };
+  //    Der Vorfahren-Kontext bleibt dabei erhalten. Ohne ihn landeten
+  //    `.context-a .kitchen-rows { overflow: hidden }` und
+  //    `.context-b .kitchen-rows { align-self: start }` im selben Topf,
+  //    obwohl kein Element je beide Regeln sieht - der Guard hielte das
+  //    Clipping für ausgeglichen, das es in Kontext A nicht ist.
+  const contextOf = (selector) => {
+    const parts = selector.replace(/:(?:is|where)\(([^)]*)\)/g, '$1').trim().split(/[\s>+~]+/);
+    return parts.slice(0, -1).join(' ');
+  };
+  // Der Zustand des Subjekts gehört ebenfalls zum Schlüssel: sonst gliche
+  // `.kitchen-rows:hover { align-self: start }` eine Lücke aus, die im
+  // Ruhezustand - also fast immer - besteht.
+  const stateOf = (selector) => {
+    const subject = selector.replace(/:(?:is|where)\(([^)]*)\)/g, '$1')
+      .trim().split(/[\s>+~]+/).pop() ?? '';
+    return (subject.match(/:(?!:)[\w-]+(?:\([^)]*\))?/g) ?? []).sort().join('');
+  };
+  const sharedRules = scopedRules(shared)
+    .flatMap(({ selectors, body }) => selectors.map((sel) => ({
+      keys: subjectKeys(sel), context: contextOf(sel), state: stateOf(sel), sel, body,
+    })))
+    .filter(({ keys }) => keys.size > 0);
+  const elements = new Map();
+  for (const { keys, context, state, sel } of sharedRules) {
+    const id = `${context}|${state}|${[...keys].sort().join('')}`;
+    if (!elements.has(id)) elements.set(id, { keys, context, state, label: sel });
+  }
+  for (const [, { keys, context, state, label }] of elements) {
+    const body = sharedRules
+      // Eine kontext- und zustandsfreie Regel trifft das Element immer; eine
+      // gebundene nur in ihrem eigenen Kontext beziehungsweise Zustand.
+      .filter(({ keys: own, context: ownContext, state: ownState }) =>
+        [...own].every((key) => keys.has(key))
+        && (ownContext === '' || ownContext === context)
+        && (ownState === '' || ownState === state))
+      .map(({ body: part }) => part).join(';');
+    const selectors = [label];
+    if (declaredValue(body, MAX_WIDTH) !== NARROW) continue;
+    // `clip` kappt wie `hidden`, nur ohne Scrollport - und die Block-Achse
+    // lässt sich auch als Langform setzen. Der Grund für die Zusicherung ist
+    // das Abschneiden, nicht die eine Schreibweise dafür.
+    const overflow = declaredValue(body, ['overflow', 'overflow-y', 'overflow-block']);
+    if (overflow === null || !/\b(?:hidden|clip)\b/.test(overflow)) continue;
+    assert.equal(declaredValue(body, ALIGN_SELF), 'start',
+      `${selectors.join(', ')} kappt aufs Lesemaß und clippt zugleich, ist also ein gekapptes Kind des Scroller-Grids: ohne align-self: start schneidet es den Überlauf ab, bevor .kitchen-list ihn sieht`);
+  }
+
+  // Und kein später geladenes Modul-Stylesheet biegt den Wert wieder um -
+  // auch nicht über die Kurzschreibweise place-self.
+  for (const { file, body } of rulesFor('.kitchen-rows')) {
+    const align = declaredValue(body, ALIGN_SELF);
+    if (align === null) continue;
+    assert.equal(align, 'start',
+      `${file}: .kitchen-rows bekommt hier ein anderes align-self - genau der Rückfall, den die Regel darüber verhindert`);
+  }
 });
 
 /**
@@ -1689,13 +2326,13 @@ test('die Küchen-Listen teilen eine Zeilen-Grammatik', () => {
  * Zeichen gekürzt. Mahlzeiten und Rezepte reservierten nichts und sammelten
  * 14 Überdeckungen bis 53.2%.
  *
- * Die Antwort ist jetzt zeitlich statt räumlich: der FAB fährt beim
- * Abwärtsscrollen weg (utils/fab-scroll.js).
+ * Die Antwort ist ein kürzerer Scrollport (`--fab-safe-zone`), nicht Platz in
+ * der Zeile - und ausdrücklich auch kein Wegfahren des FAB mehr (siehe unten,
+ * #634).
  */
 test('der FAB weicht der Zeile, statt eine Gasse zu reservieren', () => {
   const layout = read('../public/styles/layout.css');
   const tokens = read('../public/styles/tokens.css');
-  const util = read('../public/utils/fab-scroll.js');
   const router = read('../public/router.js');
 
   // Die Gasse darf nicht zurückkehren - in keinem Modul-CSS.
@@ -1710,74 +2347,390 @@ test('der FAB weicht der Zeile, statt eine Gasse zu reservieren', () => {
   assert.doesNotMatch(tokens.replace(/\/\*[\s\S]*?\*\//g, ''), /--fab-lane\s*:/,
     '--fab-lane ist stillgelegt und darf nicht wieder definiert werden');
 
-  // Das Listenende bleibt gepolstert: dort greift das Wegfahren nicht, weil der
-  // FAB am Ende bewusst zurückkommt.
-  assert.match(tokens, /--fab-clearance:\s*calc\([^;]*--fab-offset-bottom[^;]*--fab-size[^;]*;/,
-    '--fab-clearance muss weiter aus der FAB-Position abgeleitet werden');
+  // Die FAB-Zone ist eine Höhe, kein Padding. `padding-bottom` am scrollenden
+  // Element sitzt am Inhaltsende und wandert beim Scrollen mit - es wirkte
+  // deshalb nur, wenn der Nutzer schon unten war, und ließ bei scrollTop=0 bis
+  // 80,6% einer Zeilenaktion verdeckt (Critique P1, 2026-07-30).
+  assert.match(tokens, /--fab-safe-zone:\s*calc\([^;]*--fab-gap[^;]*--fab-size[^;]*;/,
+    '--fab-safe-zone muss aus --fab-gap und --fab-size abgeleitet werden');
+  assert.match(tokens, /--fab-offset-bottom:\s*calc\([^;]*--fab-gap[^;]*\)/,
+    '--fab-offset-bottom und --fab-safe-zone müssen dieselbe Quelle (--fab-gap) haben');
+  assert.match(layout, /:has\([^)]*\.page-fab[^)]*\)[^{]*\.app-content\s*\{[^}]*margin-block-end:\s*var\(--fab-safe-zone\)/,
+    'der Scrollport muss über der FAB-Zone enden (Marge an .app-content)');
 
-  // Zurückgefahren heißt: unsichtbar UND nicht klickbar. Ein unsichtbarer, aber
-  // klickbarer FAB wäre genau der Defekt, den er beheben soll - er würde den Tap
-  // auf die freigelegte Zeilenaktion abfangen.
-  const retracted = layout.match(/\.page-fab--retracted\s*\{([^}]*)\}/)?.[1] ?? '';
-  assert.match(retracted, /transform:\s*translateY/, '.page-fab--retracted muss per transform wegfahren');
-  assert.match(retracted, /opacity:\s*0/, '.page-fab--retracted muss ausblenden');
-  assert.match(retracted, /pointer-events:\s*none/,
-    '.page-fab--retracted muss pointer-events: none setzen, sonst frisst der unsichtbare FAB den Tap');
-  assert.doesNotMatch(retracted, /visibility:\s*hidden/,
-    '.page-fab--retracted darf visibility nicht anfassen: der FAB bleibt per Tab und per n-Shortcut erreichbar');
-  assert.match(layout, /\.page-fab\s*\{[\s\S]*?transition:[^;]*opacity/,
-    '.page-fab muss opacity mit-transitionen, sonst gleitet er und blendet hart aus');
+  // Die drei auseinandergedrifteten Kopien bleiben abgeschafft. Sie rechneten
+  // `--target-lg + --space-6 + --space-4` = 88px und zählten --nav-bottom-height
+  // nicht mit - mobil also um mehr als 60px zu klein.
+  for (const file of readdirSync(styleDir).filter((f) => f.endsWith('.css'))) {
+    const live = read(`../public/styles/${file}`).replace(/\/\*[\s\S]*?\*\//g, '');
+    assert.doesNotMatch(live, /--[\w-]*fab-clearance/,
+      `${file} führt wieder ein eigenes FAB-Freiraum-Token statt --fab-safe-zone`);
+  }
 
-  // Funktionale Bewegung, nicht dekorative: unter reduzierter Bewegung entfällt
-  // die Transition, nicht das Wegfahren.
-  assert.match(layout, /@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]{0,400}?\.page-fab--retracted\s*\{[^}]*transition:\s*none/,
-    'unter prefers-reduced-motion muss .page-fab--retracted ohne Transition schalten');
+  // #634: Der FAB darf sich beim Scrollen nicht mehr zurückziehen.
+  //
+  // Er tat es einmal, um die Zeilenaktion unter sich freizugeben - eine
+  // Begründung, die `--fab-safe-zone` (oben geprüft) vollständig übernommen hat.
+  // Übrig blieb ein Zustand an einer Klasse, den nur ein weiteres Scroll-
+  // Ereignis wieder abnahm: ein einziges Abwärts-Delta ohne Nutzergeste (die
+  // iOS-Adressleiste, Scroll-Anchoring beim Nachladen einer Liste) machte die
+  // Primäraktion des Moduls unerreichbar. Gemeldet für /tasks auf iPhone-Safari,
+  // möglich in jedem Modul mit FAB.
+  //
+  // Diese Zusicherung ist absichtlich eine Regel und keine Allowlist: sie
+  // verbietet die MECHANIK, nicht den einen Klassennamen, unter dem sie stand.
+  assert.doesNotMatch(layout.replace(/\/\*[\s\S]*?\*\//g, ''), /\.page-fab--retracted/,
+    '.page-fab--retracted ist entfallen (#634) und darf nicht zurückkehren');
+  assert.doesNotMatch(router, /fab-scroll\.js|installFabRetract/,
+    'router.js darf keinen Scroll-Mechanismus mehr am FAB verdrahten (#634)');
+  assert.equal(existsSync(new URL('../public/utils/fab-scroll.js', import.meta.url)), false,
+    'utils/fab-scroll.js ist entfallen (#634)');
+  assert.doesNotMatch(read('../public/sw.js'), /fab-scroll\.js/,
+    'sw.js darf die entfallene Datei nicht precachen - ein 404 lässt die gesamte SW-Installation scheitern');
 
-  // Rückweg: kein Timer, sondern Hochscrollen / Anfang / Ende.
-  assert.match(util, /atTop\s*\|\|\s*atBottom\s*\|\|\s*delta\s*<\s*0/,
-    'der FAB muss beim Hochscrollen, am Anfang und am Ende zurückkommen');
-  assert.doesNotMatch(util, /setTimeout|setInterval/,
-    'kein Idle-Timer: er brächte den FAB genau dann zurück, wenn der Nutzer nach der Zeilenaktion greift');
-  assert.match(util, /capture:\s*true/,
-    'scroll steigt nicht auf - der Listener muss in der Capture-Phase hängen');
-  assert.match(util, /passive:\s*true/, 'Scroll-Listener muss passive sein');
-  assert.match(util, /document\.activeElement === fab|aria-expanded/,
-    'der FAB darf nicht wegfahren, während er benutzt wird');
-
-  assert.match(router, /import \{ installFabRetract \} from '\/utils\/fab-scroll\.js'/,
-    'router.js muss den Mechanismus importieren');
-  assert.match(router, /installFabRetract\(\)/, 'router.js muss ihn verdrahten');
+  // Und niemand baut sie unter anderem Namen nach: kein Modul darf dem FAB seine
+  // Bedienbarkeit nehmen und sie an einen Zustand hängen, den der Nutzer nicht
+  // selbst wieder auflöst.
+  //
+  // AUSGENOMMEN ist `.keyboard-visible` - der einzige Zustand, der den FAB
+  // legitim verbirgt. Hier stand, er ende „immer, wenn der Nutzer die Tastatur
+  // schließt". Das war die unbelegte Annahme, die den Melder ein zweites Mal
+  // traf: die Erkennung las nur den Viewport, und den schrumpft die
+  // iOS-Adressleiste ohne jede Tastatur. Was die Ausnahme trägt, ist nicht der
+  // Klassenname, sondern die Bedingung dahinter - und die prüft der Test
+  // „die Tastatur-Erkennung hängt am Fokus, nicht nur am Viewport".
+  for (const file of readdirSync(styleDir).filter((f) => f.endsWith('.css'))) {
+    const live = read(`../public/styles/${file}`).replace(/\/\*[\s\S]*?\*\//g, '');
+    const fabRules = (live.match(/[^{}]*\.page-fab[^{]*\{[^}]*\}/g) ?? [])
+      .filter((rule) => !/keyboard-visible/.test(rule));
+    for (const rule of fabRules) {
+      assert.doesNotMatch(rule, /opacity:\s*0\s*[;}]/,
+        `${file} blendet den FAB per opacity aus - genau der Zustand aus #634`);
+      assert.doesNotMatch(rule, /pointer-events:\s*none/,
+        `${file} nimmt dem FAB die Bedienbarkeit - genau der Zustand aus #634`);
+    }
+  }
 });
 
 /**
- * Der Warenkorb in der Vorratszeile ist zurücknehmbar.
+ * #634, dritte Runde: der FAB gehört nicht in den Scrollport.
  *
- * Er sitzt in der Zeile neben „Menge erhöhen" und bedeutet das Gegenteil; bis
- * v1.58.0 war er die einzige erzeugende Aktion des Moduls ohne Undo
- * (Critique 2026-07-30). Echtes Rücknehmen statt verzögertem Commit, weil der
- * Server Duplikate überspringt und die Anzahl im Toast deshalb erst nach dem
- * Insert bekannt ist.
+ * Nach Retract und Tastatur-Erkennung meldete derselbe Nutzer den Defekt ein
+ * drittes Mal - in der PWA, ohne Adressleiste, ohne Tastatur. Was blieb, war der
+ * Ort: der FAB ist `position: fixed`, hing aber im Modul-Root und damit INNERHALB
+ * von `.app-content`, dem Container, der auf den meisten Routen scrollt. Ein
+ * fixiertes Kind eines Scrollers ist auf iOS nicht verlässlich viewport-fest; es
+ * wird gegen den gescrollten Inhalt aufgelöst und wandert mit der wachsenden
+ * Liste aus dem Bild. Genau die Falle, die die Bottom-Nav schon aus
+ * `position: fixed` geholt hatte - der FAB war das letzte fixierte Element, das
+ * noch im Scrollport stand.
+ *
+ * Die Zusicherung ist der ORT, nicht der Weg dorthin: der FAB hängt in einer
+ * Shell-Layer neben `.app-content`, und kein Stylesheet darf ihn wieder über
+ * einen Modul-Kontext adressieren - eine solche Kette existiert nach dem Umzug
+ * nicht mehr und wäre still wirkungslos.
  */
-test('Vorrat auf die Einkaufsliste lässt sich zurücknehmen', () => {
-  const route = read('../server/routes/shopping.js');
-  const page = read('../public/pages/pantry.js');
+test('der Page-FAB hängt in der Shell, nicht im Scrollport', () => {
+  const router = read('../public/router.js');
+  const layout = read('../public/styles/layout.css');
+  const styleDir = new URL('../public/styles/', import.meta.url);
 
-  const block = route.slice(route.indexOf("router.post('/:listId/import-pantry'"));
-  assert.match(block, /lastInsertRowid/, 'die Route muss die erzeugten IDs sammeln');
-  assert.match(block, /added_ids:\s*addedIds/, 'die Route muss added_ids zurückgeben');
-  assert.match(block, /added:\s*addedIds\.length/,
-    'added muss aus derselben Quelle kommen wie added_ids, sonst können sie auseinanderlaufen');
-  assert.match(block, /res\.json\(\{ data: \{ added: 0, skipped: 0, added_ids: \[\] \} \}\)/,
-    'auch der Leerfall muss added_ids liefern, damit der Client nicht raten muss');
+  // 1. Die Layer ist ein Geschwister von .app-content, kein Kind.
+  assert.match(router, /shellNodes\s*=\s*\[[^\]]*\bmain\b\s*,\s*fabLayer\s*,\s*bottomNav/,
+    'die FAB-Layer muss als Shell-Kind zwischen Scrollport und Bottom-Nav hängen (#634)');
+  assert.match(layout, /\.fab-layer\s*\{[^}]*position:\s*absolute/,
+    '.fab-layer braucht einen eigenen Kasten an der Shell-Ecke (#634)');
 
-  assert.match(page, /added_ids:\s*addedIds\s*=\s*\[\]/, 'pantry.js muss added_ids auslesen');
-  assert.match(page, /api\.delete\(`\/shopping\/items\/\$\{id\}`\)/,
-    'das Undo muss genau die erzeugten Artikel löschen');
-  assert.match(page, /showToast\(message, 'success', \d+, undo\)/,
-    'der Erfolgs-Toast muss die Undo-Aktion tragen');
-  assert.match(page, /addedIds\.length\s*\?/,
+  // 2. Jede Seite zieht ihren FAB dorthin um - auch die, die ihn erst nach den
+  //    Daten anlegt, und auch die Soft-Navigation zwischen Tabs.
+  assert.ok((router.match(/adoptPageFab\(\)/g) ?? []).length >= 4,
+    'adoptPageFab() muss definiert und an allen Renderpfaden aufgerufen werden (#634)');
+  assert.match(router, /clearPageFab\(\)/,
+    'der FAB der alten Seite muss mit ihrem Inhalt verschwinden, nicht später (#634)');
+
+  // 3. Und niemand adressiert ihn wieder über einen Modul-Vorfahren. Das ist eine
+  //    Regel über alle Stylesheets, keine Allowlist: erlaubt sind nur Wurzeln,
+  //    die den Umzug überleben (Dokument, Shell, Layer).
+  const ALLOWED_ROOT = /^(html|body|:root|\.app-shell|\.fab-layer|\.keyboard-visible)/;
+  for (const file of readdirSync(styleDir).filter((f) => f.endsWith('.css'))) {
+    const live = read(`../public/styles/${file}`).replace(/\/\*[\s\S]*?\*\//g, '');
+    for (const block of live.match(/[^{}]*\{[^}]*\}/g) ?? []) {
+      const selectors = block.slice(0, block.indexOf('{')).split(',');
+      for (const selector of selectors) {
+        if (!selector.includes('.page-fab')) continue;
+        const prefix = selector.slice(0, selector.indexOf('.page-fab')).trim();
+        assert.ok(prefix === '' || ALLOWED_ROOT.test(prefix),
+          `${file}: "${selector.trim()}" adressiert den FAB über einen Modul-Kontext - `
+          + 'seit #634 hängt er in der Shell, die Kette greift nicht mehr');
+      }
+    }
+  }
+});
+
+/**
+ * #634, zweite Runde: auch eine falsch erkannte Tastatur darf den FAB nicht
+ * nehmen.
+ *
+ * Nach dem Entfernen des Scroll-Retracts meldete derselbe Nutzer denselben
+ * Defekt weiter, jetzt in /tasks UND /pantry. Übrig war der zweite Zustand, der
+ * den FAB verbirgt: `.keyboard-visible`. Er wurde allein aus einem geschrumpften
+ * visualViewport geschlossen - eine Messung, die auf iOS auch die ausfahrende
+ * Adressleiste auslöst, ganz ohne Tastatur. Und er hing an genau einem
+ * `resize`: blieb ein zweites aus, blieb der FAB weg.
+ *
+ * Damit hatte der Retract-Fix die Mechanik entfernt, aber nicht ihre Form. Die
+ * Form ist: ein Zustand, der die Primäraktion verbirgt, aus einem Signal
+ * geschlossen wird, das nicht bedeutet was es soll, und keinen Rückweg hat, der
+ * garantiert kommt. Dieser Test hält die Gegenform fest - nicht den Namen der
+ * Funktion, sondern die drei Eigenschaften.
+ */
+test('die Tastatur-Erkennung hängt am Fokus, nicht nur am Viewport', () => {
+  const router = read('../public/router.js');
+
+  const sync = router.match(/function syncKeyboardVisible\(\)\s*\{([\s\S]*?)\n\}/)?.[1] ?? '';
+  assert.ok(sync, 'syncKeyboardVisible() muss es geben - sie hält die Bedingung an einer Stelle');
+
+  // 1. Das Signal muss bedeuten, was es behauptet: eine Tastatur ist offen,
+  //    wenn ein Texteingabefeld den Fokus hat. Der Viewport bestätigt nur.
+  assert.match(sync, /isTextEntry\(document\.activeElement\)/,
+    'die Tastatur gilt nur als offen, wenn ein Texteingabefeld den Fokus hat (#634)');
+  assert.match(sync, /focused && shrunk|shrunk && focused/,
+    'Fokus UND Viewport - eine der beiden Bedingungen allein reicht nicht (#634)');
+
+  // 2. Der Rückweg, der dem Retract fehlte: focusout kommt immer, und jede
+  //    Navigation fokussiert #main-content, was die Bedingung ebenfalls löst.
+  assert.match(router, /addEventListener\('focusout', scheduleKeyboardSync\)/,
+    'focusout muss den Zustand auflösen - der Rückweg, der nicht ausbleiben kann (#634)');
+  assert.match(router, /addEventListener\('focusin', scheduleKeyboardSync\)/,
+    'focusin muss den Zustand nachziehen');
+
+  // 3. Eine Stelle, nicht zwei: ein zweiter Setzer hätte einen eigenen Rückweg,
+  //    und genau daran ist die erste Fassung gestorben.
+  assert.equal((router.match(/keyboard-visible/g) ?? []).length, 1,
+    'keyboard-visible darf nur in syncKeyboardVisible() gesetzt werden (#634)');
+
+  // 4. Und der Rückweg selbst darf nicht wieder an einem Ereignis hängen, das
+  //    ausbleiben kann: `requestAnimationFrame` ruht in verborgenen Tabs. Beim
+  //    Nachmessen im Browser blieb der Zustand damit stehen - dieselbe Form wie
+  //    der Defekt, nur eine Ebene tiefer. Timer werden gedrosselt, aber laufen.
+  const scheduler = router.match(/function scheduleKeyboardSync\(\)\s*\{([\s\S]*?)\n\}/)?.[1] ?? '';
+  assert.ok(scheduler, 'scheduleKeyboardSync() muss es geben');
+  assert.doesNotMatch(scheduler, /requestAnimationFrame/,
+    'der Rückweg darf nicht an rAF hängen - das ruht in verborgenen Tabs (#634)');
+  assert.match(scheduler, /setTimeout/,
+    'der aufgeschobene Abgleich läuft über einen Timer, der auch verborgen feuert (#634)');
+
+  // Picker öffnen keine Tastatur. Ohne diese Trennung verschwände der FAB,
+  // sobald jemand ein Datums- oder Farbfeld antippt.
+  const nonText = router.match(/NON_TEXT_INPUT_TYPES = new Set\(\[([\s\S]*?)\]\)/)?.[1] ?? '';
+  for (const type of ['date', 'checkbox', 'radio', 'color', 'file', 'range']) {
+    assert.match(nonText, new RegExp(`'${type}'`),
+      `input[type=${type}] öffnet keine Tastatur und darf den FAB nicht verbergen`);
+  }
+});
+
+// --------------------------------------------------------
+// Küche: der Weg in eine fremde Liste
+// --------------------------------------------------------
+
+/**
+ * Alle Aufrufe, mit denen eine Seite Artikel in einen anderen Tab schiebt.
+ *
+ * Erkannt am Muster, nicht an einer Liste: letztes Segment `to-shopping-list`
+ * oder `import-<etwas>`. Ein künftiger Geschwister-Pfad fällt damit auf, ohne
+ * dass jemand daran denken muss, ihn hier einzutragen.
+ */
+function transferCalls(source) {
+  return [...source.matchAll(/api\.post\(\s*[`'"]([^`'"]+)[`'"]/g)]
+    .map((match) => match[1])
+    .filter((url) => /\/to-shopping-list$|\/import-[a-z-]+$/.test(url));
+}
+
+/** Dieselben Pfade auf der Serverseite. */
+function transferRoutes(source) {
+  const heads = [...source.matchAll(/^router\.(get|post|put|patch|delete)\('([^']+)'/gm)];
+  return heads
+    .map((head, index) => ({
+      method: head[1],
+      path: head[2],
+      body: source.slice(head.index, heads[index + 1]?.index ?? source.length),
+    }))
+    .filter(({ method, path }) => method === 'post' && /\/to-shopping-list$|\/import-[a-z-]+$/.test(path));
+}
+
+/**
+ * Wege mit eigenem Bestätigungsdialog. Dort ist die Rückfrage der Schutz, und
+ * der Nutzer steht beim Auslösen auf dem ZIEL - beides fehlt den drei Ein-Tipp-
+ * Pfaden, um die es hier geht.
+ */
+const CONFIRMED_TRANSFERS = new Map([
+  ['import-meal-plan', 'Einkauf holt sich den Essensplan: eigener Dialog mit Zeitraum-Wahl und '
+    + 'Vorschau („X Zutaten aus Y Mahlzeiten"), bestätigt auf der Zielliste selbst.'],
+  ['import-shopping', 'Einkauf räumt in den Vorrat ein: eigener Dialog, in dem Menge, Einheit und '
+    + 'Lagerort pro Artikel gesetzt werden - kein versehentlich auslösbarer Knopf.'],
+]);
+
+const isConfirmedTransfer = (url) => [...CONFIRMED_TRANSFERS.keys()].some((name) => url.endsWith(name));
+
+/**
+ * Der Zustand „es gibt noch keine Einkaufsliste" hatte VIER Antworten.
+ *
+ * Gemessen (Audit 2026-07-30, P1-A): zwei Zeichenketten, zwei Töne und genau ein
+ * Ausweg. `pantry.js` sagte in `warning`, was zu tun ist; `recipes.js` und
+ * `meals.js` benannten in `danger` nur den Zustand - rot behauptet dabei, etwas
+ * sei kaputt, obwohl eine noch nicht angelegte Liste bloß eine fehlende
+ * Voraussetzung ist. Im Mahlzeiten-Modal stand derselbe Satz ein viertes Mal als
+ * deaktiviertes `<option>` neben einem Knopf, der nichts tat. Und `recipes.js`
+ * lieh sich dafür `meals.noShoppingLists`: ein Refactor im Essensplan hätte den
+ * Text der Rezepte stillschweigend mitgenommen.
+ *
+ * Der Guard hält die Regel, nicht die vier Dateien: er findet JEDEN Transfer im
+ * Seitenbestand und verlangt, dass dessen Vorprüfung aus dem geteilten Baustein
+ * kommt.
+ */
+test('der Zustand „keine Einkaufsliste" hat genau eine Antwort', () => {
+  const de = JSON.parse(read('../public/locales/de.json'));
+  const helper = read('../public/utils/kitchen-transfer.js');
+
+  // Der Helfer kapselt Prüfung UND Antwort. Ein geteilter Locale-Key allein
+  // hätte Ton, Ausweg und Vorprüfung unberührt gelassen - genau die Teile, die
+  // auseinandergelaufen waren.
+  assert.match(helper, /export async function resolveShoppingTarget/,
+    'die Vorprüfung gehört in den geteilten Baustein, nicht in die drei Aufrufer');
+  assert.match(helper, /showToast\(message, 'warning', TRANSFER_TOAST_MS, action\)/,
+    'Ton warning statt danger: eine fehlende Voraussetzung ist keine Störung');
+  assert.match(helper, /navigate\('\/shopping'\)/,
+    'die Antwort muss einen Ausweg tragen, nicht nur den Zustand benennen');
+  assert.match(helper, /isModuleDisabled\?\.\('shopping'\)/,
+    'ist der Einkauf abgeschaltet, wäre der Ausweg eine Sackgasse - dann entfällt er');
+
+  const pagesDir = new URL('../public/pages/', import.meta.url);
+  let checked = 0;
+  for (const entry of readdirSync(pagesDir)) {
+    if (!entry.endsWith('.js')) continue;
+    const source = read(`../public/pages/${entry}`);
+    for (const url of transferCalls(source)) {
+      if (isConfirmedTransfer(url)) continue;
+      checked += 1;
+      assert.match(source, /from '\/utils\/kitchen-transfer\.js'/,
+        `${entry} überträgt nach ${url} und muss dafür den geteilten Baustein importieren`);
+      assert.match(source, /resolveShoppingTarget\(/,
+        `${entry} muss sein Transfer-Ziel über resolveShoppingTarget() bestimmen, nicht selbst prüfen`);
+    }
+  }
+  assert.ok(checked >= 3, `mindestens die drei erzeugenden Pfade müssen erfasst sein, gefunden: ${checked}`);
+
+  // Keine Seite hält eine EIGENE Antwort auf diesen Zustand. Die beiden
+  // verbliebenen Vorkommen sind ein anderer Zustand: dort hat der Nutzer gar
+  // keine Liste UND steht auf der Fläche, auf der er eine anlegt - beide tragen
+  // ihren eigenen Anlege-CTA und sind keine Vorbedingung eines Transfers.
+  const ownEmptyStates = new Set(['shopping.noLists', 'dashboard.noShoppingLists']);
+  for (const entry of readdirSync(pagesDir)) {
+    if (!entry.endsWith('.js')) continue;
+    for (const [, key] of read(`../public/pages/${entry}`)
+      .matchAll(/t\('([a-zA-Z]+\.(?:noShoppingLists|noLists))'/g)) {
+      assert.ok(
+        key.startsWith('kitchen.') || ownEmptyStates.has(key),
+        `${entry} beantwortet „keine Einkaufsliste" mit ${key} statt über den geteilten Baustein`,
+      );
+    }
+  }
+
+  // Der Key gehört der Gruppe, nicht einem der drei Aufrufer.
+  assertKeysExistInEveryLocale(['kitchen.noShoppingLists', 'kitchen.createShoppingList']);
+  assert.equal(de.meals.noShoppingLists, undefined,
+    'der Text darf nicht in meals.* liegen - die Rezepte liehen ihn sich von dort');
+  assert.equal(de.pantry.noLists, undefined, 'auch der Vorrat besitzt den Zustand nicht mehr allein');
+  assert.doesNotMatch(de.kitchen.noShoppingLists, /Tab/,
+    'den Zielort nennt der Knopf; ein zweites Mal im Satz wäre der Tab-Name doppelt');
+});
+
+/**
+ * Zurücknehmen konnte man nur im Vorrat.
+ *
+ * Gemessen (Audit 2026-07-30, P1-B): drei Wege erzeugen mit EINEM Tippen Artikel
+ * in einer Liste, die der Nutzer gerade nicht ansieht - und nur `pantry.js` bot
+ * eine Rücknahme an. Das Rezept überträgt dabei am meisten auf einmal, eine
+ * ganze Zutatenliste. Dazu zwei Abweichungen auf demselben Pfad: die Standzeit
+ * des Toasts (Vorrat 5000, sonst Default) und das Sperren des Knopfes während
+ * des Transfers (Rezepte ja, Vorrat nein).
+ *
+ * Auch dieser Guard sucht den Bestand ab: jeder Transfer-Aufruf im Seitenbestand
+ * und jeder Transfer-Handler im Routenbestand muss die Regel erfüllen. Ausnahmen
+ * stehen mit Begründung in CONFIRMED_TRANSFERS.
+ */
+test('jeder Ein-Tipp-Transfer in eine fremde Liste ist rücknehmbar', () => {
+  const helper = read('../public/utils/kitchen-transfer.js');
+
+  // Eine Standzeit für alle, und sie ist länger als der Default: diese Toasts
+  // tragen eine Aktion, der Nutzer muss lesen UND entscheiden können.
+  assert.match(helper, /export const TRANSFER_TOAST_MS = 5000/);
+  assert.match(helper, /showToast\(message, 'success', TRANSFER_TOAST_MS, undo\)/,
+    'der Erfolgs-Toast muss die Rücknahme tragen');
+  assert.match(helper, /ids\.length\s*\?/,
     'ohne IDs darf kein Undo-Knopf erscheinen, der nichts zurücknehmen kann');
-  assertKeysExistInEveryLocale(['pantry.toShoppingUndone']);
+  assert.match(helper, /api\.post\('\/shopping\/items\/undo-transfer', \{ ids \}\)/,
+    'die Rücknahme läuft über EINEN Aufruf - N einzelne DELETEs können zur Hälfte scheitern');
+  assert.match(helper, /refreshKitchenBadges\(\)/,
+    'die Zahl des Einkaufs-Tabs ändert sich in beide Richtungen, beide Male hier');
+
+  // Serverbestand: was einen Transfer entgegennimmt, liefert die erzeugten IDs.
+  // Ohne sie gibt es nichts zurückzunehmen - die Anzahl kennt erst der Server,
+  // weil er Duplikate überspringt.
+  const routesDir = new URL('../server/routes/', import.meta.url);
+  let routesChecked = 0;
+  for (const entry of readdirSync(routesDir)) {
+    if (!entry.endsWith('.js')) continue;
+    for (const route of transferRoutes(read(`../server/routes/${entry}`))) {
+      if (isConfirmedTransfer(route.path)) continue;
+      routesChecked += 1;
+      assert.match(route.body, /added_ids/,
+        `POST ${route.path} (${entry}) muss die erzeugten IDs zurückgeben`);
+      assert.match(route.body, /lastInsertRowid/,
+        `POST ${route.path} (${entry}) muss die IDs beim Einfügen einsammeln`);
+      assert.match(route.body, /added_ids: \[\] \} \}\)/,
+        `POST ${route.path} (${entry}) muss auch im Leerfall added_ids liefern, damit der Client nicht raten muss`);
+    }
+  }
+  assert.ok(routesChecked >= 3, `mindestens drei Transfer-Routen erwartet, gefunden: ${routesChecked}`);
+
+  // Die Rücknahme nimmt den GANZEN Übertrag zurück, nicht nur seine Artikel: der
+  // Mahlzeit-Pfad setzt beim Übertragen `on_shopping_list`. Wer nur die
+  // Einkaufsartikel löscht, lässt die Zutaten für immer als „schon übertragen"
+  // zurück - weder auf der Liste noch erneut übertragbar.
+  const shoppingRoute = read('../server/routes/shopping.js');
+  const undoBlock = shoppingRoute.slice(shoppingRoute.indexOf("router.post('/items/undo-transfer'"));
+  assert.match(undoBlock, /UPDATE meal_ingredients SET on_shopping_list = 0/,
+    'das Undo muss das Zutaten-Flag mit zurücknehmen');
+  assert.match(undoBlock, /db\.get\(\)\.transaction\(/,
+    'die Rücknahme ist eine Handlung und gehört in eine Transaktion');
+
+  // Seitenbestand: jeder Transfer meldet über den geteilten Baustein - damit
+  // erbt er Standzeit, Tab-Zahl und Rücknahme, statt sie je Modul zu setzen.
+  const pagesDir = new URL('../public/pages/', import.meta.url);
+  for (const entry of readdirSync(pagesDir)) {
+    if (!entry.endsWith('.js')) continue;
+    const source = read(`../public/pages/${entry}`);
+    for (const url of transferCalls(source)) {
+      if (isConfirmedTransfer(url)) continue;
+      assert.match(source, /announceTransfer\(\{/,
+        `${entry} überträgt nach ${url} und muss den Erfolg über announceTransfer() melden`);
+      assert.match(source, /added_ids/,
+        `${entry} muss die added_ids der Antwort weiterreichen, sonst gibt es nichts zurückzunehmen`);
+      assert.doesNotMatch(source, /showToast\([^)]*'success',\s*\d+/,
+        `${entry} darf keine eigene Toast-Standzeit für einen Transfer setzen`);
+    }
+  }
+
+  // Knopf-Sperre während des Transfers in allen drei Aufrufern: ohne sie erzeugt
+  // jedes weitere Tippen einen eigenen Toast mit eigenem Undo, von denen nur der
+  // letzte etwas zurücknimmt.
+  for (const page of ['pantry.js', 'recipes.js', 'meals.js']) {
+    assert.match(read(`../public/pages/${page}`), /if \(btn\) btn\.disabled = true;/,
+      `${page} muss den auslösenden Knopf während des Transfers sperren`);
+  }
+
+  assertKeysExistInEveryLocale(['kitchen.transferUndone']);
 });
 
 /**
@@ -1977,7 +2930,7 @@ test('die Küchen-Tab-Leiste trägt den Zustand des Kreislaufs', () => {
     'der aktive Tab darf kein Badge tragen - sonst veraltet es bei jeder eigenen Mutation');
 
   // Das aria-label ERSETZT den Tab-Namen, es ergänzt ihn nicht.
-  for (const [tabKey, stateKey] of [['nav.meals', 'nav.mealsGaps'], ['nav.shopping', 'nav.shoppingOpen'], ['nav.pantry', 'nav.pantryAttention']]) {
+  for (const [tabKey, stateKey] of [['nav.shopping', 'nav.shoppingOpen'], ['nav.pantry', 'nav.pantryAttention']]) {
     assert.ok(tabs.includes(`\${t('${tabKey}')}: \${t('${stateKey}'`),
       `${stateKey} muss den Tabnamen voranstellen, sonst hört ein Screenreader nur die Zahl`);
   }
@@ -1993,17 +2946,36 @@ test('die Küchen-Tab-Leiste trägt den Zustand des Kreislaufs', () => {
   assert.match(subCss, /\.sub-tab__badge\s*\{[\s\S]*?color:\s*var\(--color-text-primary\)/,
     'die Zahl braucht Ink, nicht die zurückgenommene Tab-Tinte');
   assertKeysExistInEveryLocale([
-    'nav.mealsGaps', 'nav.mealsGaps_one', 'nav.shoppingOpen', 'nav.shoppingOpen_one',
+    'nav.shoppingOpen', 'nav.shoppingOpen_one',
     'nav.pantryAttention', 'nav.pantryAttention_one',
   ]);
 
-  // Rezepte bekommen keins: eine Sammlung hat keinen offenen Zustand.
-  // Nur die BADGES-Liste prüfen - `/recipes` steht selbstverständlich in TABS().
+  // Ein Badge zählt, was WARTET - nie, was fehlt.
+  //
+  // Rezepte bekamen nie eins („6 Rezepte" ist eine Bestandszahl), der Essensplan
+  // hatte eins und es zählte die Gegenrichtung: freie Slots der Woche, also
+  // Mahlzeitentypen × 7 minus die belegten. Bei leerer Woche stand dort 28 - das
+  // Maximum, die lauteste Zahl der Leiste, ausgerechnet für „nichts geplant" -
+  // und mitgezählt wurden Tage, die schon vorbei waren. Übrig bleiben die zwei
+  // Stationen mit echtem offenem Vorrat.
+  //
+  // Nur die BADGES-Liste prüfen - `/meals` und `/recipes` stehen
+  // selbstverständlich weiter in TABS().
   const badges = tabs.slice(tabs.indexOf('const BADGES = ['), tabs.indexOf('/** Aktuelle Leiste'));
-  assert.ok(badges.includes("route: '/meals'") && badges.includes("route: '/shopping'") && badges.includes("route: '/pantry'"),
-    'die drei Stationen mit offenem Zustand brauchen ein Badge');
-  assert.ok(!badges.includes("route: '/recipes'"),
-    'ein Badge, das nur zählt, entwertet die drei, die etwas verlangen');
+  assert.ok(badges.includes("route: '/shopping'") && badges.includes("route: '/pantry'"),
+    'die zwei Stationen mit offenem Zustand brauchen ein Badge');
+  for (const route of ['/recipes', '/meals']) {
+    assert.ok(!badges.includes(`route: '${route}'`),
+      `${route}: ein Badge, das Bestand oder Abwesenheit zählt, entwertet die zwei, die etwas verlangen`);
+  }
+  // Und die Rechnung dahinter ist mit weg: kein toter COUNT auf jedem
+  // Seitenaufruf. Ohne Kommentare geprüft - beide Dateien erklären in ihrem Kopf,
+  // was hier entfallen ist, und würden sich sonst selbst auslösen.
+  const code = (src) => src.replace(/\/\*[\s\S]*?\*\/|(^|[^:])\/\/.*$/gm, '$1');
+  assert.doesNotMatch(code(route), /\bgaps\b|FROM meals\b|visible_meal_types/,
+    'server/routes/kitchen.js: die Lücken-Rechnung ist ohne Badge tot - sie darf nicht stehenbleiben');
+  assert.doesNotMatch(code(tabs), /meals\?\.gaps|mealsGaps/,
+    'kitchen-tabs.js: kein Rest des entfallenen Mahlzeiten-Badges');
 });
 
 /**
@@ -2042,8 +3014,13 @@ test('die Küche benutzt ein Vokabular für eine Sache', () => {
   }
   assert.match(de.shopping.toPantryDoneAt, /\{\{location\}\}/,
     'der Weg in den Vorrat muss den gewählten Lagerort nennen');
-  for (const [page, call] of [['meals', 'list: state.lists.find'], ['recipes', 'list: state.lists.find'], ['pantry', 'const listName = lists.find']]) {
-    assert.ok(pages[page].includes(call), `${page}.js muss den Listennamen an den Toast übergeben`);
+  // Geprüft wird der AUFRUF, nicht die Zeile, aus der der Name stammt: die drei
+  // holten ihn vorher je anders (`state.lists.find`, eine lokale `listName`), und
+  // ein Guard auf diese Schreibweisen scheiterte am nächsten Refactor, obwohl die
+  // Regel weiter galt.
+  for (const [page, key] of [['meals', 'meals.transferSuccess'], ['recipes', 'recipes.toShoppingSuccess'], ['pantry', 'pantry.toShoppingDone']]) {
+    assert.match(pages[page], new RegExp(`t\\('${key}',\\s*\\{[^}]*list:`),
+      `${page}.js muss den Listennamen an ${key} übergeben`);
   }
 
   // EIN Name pro Modul: der sichtbare Tab und die sr-only-Überschrift derselben
@@ -2074,7 +3051,7 @@ test('die Küche benutzt ein Vokabular für eine Sache', () => {
     // stand ohne, „Rezept gelöscht." mit (Critique 2026-07-30).
     assert.match(de[block][name], /\.$/, `${key} muss auf einen Punkt enden`);
   }
-  assert.match(de.pantry.toShoppingUndone, /entfernt/,
+  assert.match(de.kitchen.transferUndone, /entfernt/,
     'das Undo nimmt den Artikel von der Einkaufsliste, ohne ihn zu löschen - hier ist „entfernt" korrekt');
 });
 
@@ -3391,6 +4368,312 @@ test('module accents stay readable as text on the page background in both themes
   }
 });
 
+// Fuellflaechen, die zur Laufzeit entstehen und daher in tokens.css GAR NICHT
+// stehen. Sie einfach nachzuschlagen liefert undefined - und ein Guard, der
+// undefined still ueberspringt, bewacht genau die Stellen nicht, um die es
+// geht (drei von acht Mutationen blieben so gruen):
+//
+//   --active-module-accent  setzt der Router auf <html>, je nach offener Seite.
+//   --module-accent         setzt jedes Modul-CSS scoped auf seiner Page-Root
+//                           (`--module-accent: var(--module-birthdays)`).
+//
+// Die zweite laesst sich pro Datei exakt aufloesen, die erste nicht - dort ist
+// jede Modulfarbe moeglich, also zaehlt der schlechteste Fall.
+const RUNTIME_FILL_TOKENS = new Set(['--active-module-accent', '--module-accent']);
+
+// Das lokale `--module-accent: var(--module-x)` einer Modul-CSS-Datei.
+function localModuleAccent(src) {
+  const m = src.match(/--module-accent\s*:\s*var\(\s*(--module-[\w-]+)\s*\)/);
+  return m ? m[1] : null;
+}
+
+function themeTokenMaps() {
+  const tokens = read('../public/styles/tokens.css');
+  const rootBlock = tokens.match(/:root\s*\{([\s\S]*?)\n\}/);
+  const darkBlock = tokens.match(/\n\[data-theme="dark"\]\s*\{([\s\S]*?)\n\}/);
+  assert.ok(rootBlock && darkBlock, 'expected :root and [data-theme="dark"] token blocks');
+  const light = parseTokenMap(rootBlock[1]);
+  const dark = new Map(light);
+  for (const [k, v] of parseTokenMap(darkBlock[1])) dark.set(k, v);
+  return { light, dark };
+}
+
+// Die Flaechen, die ein Fuell-Token in einem Theme annehmen kann. Fuer
+// --active-module-accent sind das alle Modulfarben, sonst genau eine.
+function fillColors(token, map, scopedAccent) {
+  if (RUNTIME_FILL_TOKENS.has(token)) {
+    const names = token === '--module-accent' && scopedAccent
+      ? [scopedAccent]
+      : [...map.keys()].filter((name) => /^--module-[\w-]+$/.test(name));
+    return names.map((name) => ({ label: name, hex: resolveColor(name, map) }));
+  }
+  const hex = resolveColor(token, map);
+  return hex && /^#[0-9a-f]{6}$/i.test(hex) ? [{ label: token, hex }] : [];
+}
+
+/**
+ * Genau die Flaechen, um die es geht: die, die zwischen den Themes die
+ * TEXTPOLARITAET wechseln - im Light gesaettigt-dunkel (weiss traegt), im Dark
+ * pastellig-hell (weiss traegt nicht). Das ist das Muster der gesamten
+ * Yuvomi-Akzentpalette und der Grund, warum eine statische Textfarbe dort
+ * zwangslaeufig in einem der beiden Themes falsch liegt.
+ *
+ * Ruhige Flaechen (Surfaces, Rahmen) kippen nicht: sie sind in beiden Themes
+ * auf derselben Seite. Sie gehoeren nicht unter diese Regel, sonst zieht der
+ * Guard jeden gewoehnlichen Text-auf-Karte-Fall herein und misst etwas, das er
+ * gar nicht meint.
+ */
+function flipsTextPolarity(lightHex, darkHex) {
+  if (!lightHex || !darkHex) return false;
+  return contrastRatio('#ffffff', lightHex) >= 4.5 && contrastRatio('#ffffff', darkHex) < 4.5;
+}
+
+/**
+ * Die Regel, nicht die Fundstellen.
+ *
+ * `--color-text-on-accent` ist statisches Weiss und wird in KEINEM Dark-Block
+ * redefiniert. Die vividen Fuellfarben kippen dagegen alle: im Light sind sie
+ * gesaettigt-dunkel (weiss traegt), im Dark pastellig-hell (weiss traegt nicht).
+ * Gemessen lagen alle 18 Modulakzente im Dark zwischen 1,44:1 (Notizen #FCD34D)
+ * und 3,21:1 - der Datepicker faerbte den gewaehlten Tag so unlesbar ein.
+ *
+ * Der Guard listet keine Dateien auf, sondern RECHNET: jede Deklaration, die
+ * eine Textfarbe auf eine Fuellflaeche setzt, muss in beiden Themes 4,5:1
+ * halten. Damit faellt auch ein kuenftiges Token durch, das heute noch nicht
+ * existiert. Eine Allowlist haette genau das nicht geleistet - sie deckt N
+ * Dateien ab, nicht die Regel.
+ */
+test('Textfarbe auf vividen Fuellflaechen haelt WCAG AA in beiden Themes', () => {
+  const { light, dark } = themeTokenMaps();
+  const dir = new URL('../public/styles/', import.meta.url);
+  const violations = [];
+
+  for (const file of readdirSync(dir).filter((n) => n.endsWith('.css') && n !== 'tokens.css')) {
+    const src = read(`../public/styles/${file}`);
+    const scopedAccent = localModuleAccent(src);
+    // Flache Deklarationsbloecke; @media-Verschachtelung faellt in den aeusseren
+    // Selektor-Teil, der Block selbst bleibt korrekt.
+    for (const [, selector, body] of src.matchAll(/([^{}]*)\{([^{}]*)\}/g)) {
+      // Nur eine PURE Token-Fuellung (ggf. mit var()-Fallback). color-mix und
+      // Gradienten sind bewusst ausgenommen: dort entscheidet die Mischung,
+      // nicht das Token (`.birthday-chip--today` mischt 72% mit Schwarz und
+      // traegt weiss mit gemessenen 4,87:1).
+      const fill = body.match(
+        /(?:^|[\s;])background(?:-color)?\s*:\s*var\(\s*(--[\w-]+)\s*(?:,\s*var\(\s*(--[\w-]+)\s*\)\s*)?\)\s*(?:;|$)/,
+      );
+      const textColor = body.match(/(?:^|[\s;])color\s*:\s*var\(\s*(--[\w-]+)\s*\)\s*(?:;|$)/);
+      if (!fill || !textColor) continue;
+
+      const fillToken = fill[1];
+      const lightFills = fillColors(fillToken, light, scopedAccent);
+      const darkFills = new Map(
+        fillColors(fillToken, dark, scopedAccent).map((f) => [f.label, f.hex]),
+      );
+
+      for (const surface of lightFills) {
+        const darkHex = darkFills.get(surface.label);
+        if (!flipsTextPolarity(surface.hex, darkHex)) continue;
+
+        for (const [theme, map, surfaceHex] of [
+          ['light', light, surface.hex],
+          ['dark', dark, darkHex],
+        ]) {
+          const ink = resolveColor(textColor[1], map);
+          if (!ink || !/^#[0-9a-f]{6}$/i.test(ink)) continue;
+          const ratio = contrastRatio(ink, surfaceHex);
+          if (ratio >= 4.5) continue;
+          violations.push(
+            `${file} {${selector.trim().split('\n').pop().trim()}}: ${theme} ` +
+            `${textColor[1]} (${ink}) auf ${surface.label} (${surfaceHex}) = ${ratio.toFixed(2)}:1`,
+          );
+        }
+      }
+    }
+  }
+
+  assert.deepEqual(violations, [],
+    'Textfarbe auf vivider Fuellflaeche unter 4,5:1 - --color-ink-on-vivid kippt mit dem Theme, --color-text-on-accent nicht');
+});
+
+test('--color-ink-on-vivid traegt auf jedem Modulakzent, --color-text-on-accent nicht', () => {
+  // Die Gegenprobe zum Guard darueber: sie belegt, dass der vorgeschriebene
+  // Token die Schwelle ueberhaupt halten KANN, und dass der alte es nicht tut.
+  // Ohne diese Haelfte koennte jemand die Regel erfuellen, indem er auf ein
+  // drittes, ebenso untaugliches Token ausweicht.
+  const { light, dark } = themeTokenMaps();
+
+  for (const [theme, map] of [['light', light], ['dark', dark]]) {
+    const ink = resolveColor('--color-ink-on-vivid', map);
+    const modules = [...map.keys()].filter((name) => /^--module-[\w-]+$/.test(name));
+    assert.ok(modules.length >= 15, `expected the module palette, found ${modules.length}`);
+
+    for (const token of modules) {
+      const surface = resolveColor(token, map);
+      const ratio = contrastRatio(ink, surface);
+      assert.ok(ratio >= 4.5,
+        `${theme}: --color-ink-on-vivid (${ink}) auf ${token} (${surface}) ist ${ratio.toFixed(2)}:1`);
+    }
+  }
+
+  // Im Dark-Theme muss das statische Weiss messbar durchfallen - sonst waere
+  // der ganze Umbau unnoetig und dieser Guard wuerde eine tote Regel bewachen.
+  const staticWhite = resolveColor('--color-text-on-accent', dark);
+  assert.equal(staticWhite.toLowerCase(), '#ffffff', '--color-text-on-accent ist statisches Weiss');
+  const worst = [...dark.keys()]
+    .filter((name) => /^--module-[\w-]+$/.test(name))
+    .map((name) => contrastRatio(staticWhite, resolveColor(name, dark)));
+  assert.ok(Math.min(...worst) < 3,
+    'Dark-Modulakzente muessen weissen Text unterschreiten, sonst ist die Regel gegenstandslos');
+});
+
+/**
+ * Der Test darueber prueft die Token-WERTE pro Theme. Er sagt nichts darueber,
+ * ob die App zur Laufzeit auch den Wert des aktiven Themes benutzt - und genau
+ * da lag die Luecke: `--active-module-accent` steht als AUFGELOESTE Farbe im
+ * Inline-Style von <html> (der Router liest --module-<name> beim Seitenwechsel
+ * aus). Ein Inline-Style folgt keiner Kaskade. Wer im Hellmodus /tasks oeffnete
+ * und dann auf Dunkel schaltete, behielt #15803D statt #4ADE80: Text in
+ * Modul-Akzentfarbe kam auf 2.71:1 statt 7.81:1 - unter WCAG AA. Betroffen war
+ * die ganze Shell (.btn--primary, .btn--secondary, --focus-ring-color, FAB,
+ * aktive Nav-Pille). Nach einem Reload im Zielmodus stimmte alles wieder,
+ * deshalb faellt es beim Testen im Zielmodus nicht auf.
+ *
+ * Der Guard formuliert die Regel, nicht die Fundstelle: die Momentaufnahme darf
+ * nur an EINER Stelle entstehen, und jeder Weg, der das Theme zur Laufzeit
+ * umschaltet, muss sie neu berechnen.
+ */
+test('module accent is recomputed on every runtime theme switch', () => {
+  const router = read('../public/router.js');
+
+  // 1. Genau ein Schreiber im ganzen Frontend. Ein zweiter waere eine zweite
+  //    Momentaufnahme, die dieser Guard nicht mitzoege.
+  const writers = walkJsFiles('../public/')
+    .filter((path) => !path.includes('/vendor/'))
+    .flatMap((path) => {
+      const hits = read(path).match(/setProperty\(\s*'--active-module-accent'/g) ?? [];
+      return hits.map(() => path);
+    });
+  assert.deepEqual(
+    writers,
+    ['../public/router.js'],
+    `--active-module-accent must be written in exactly one place, found: ${writers.join(', ')}`,
+  );
+
+  const helper = router.match(/function applyModuleAccentForRoute\([\s\S]*?\n\}/);
+  assert.ok(helper, 'expected applyModuleAccentForRoute to own the write');
+  assert.match(
+    helper[0],
+    /setProperty\(\s*'--active-module-accent'/,
+    'the single write must live inside applyModuleAccentForRoute',
+  );
+
+  // 2. Der Seitenwechsel geht durch denselben Helfer (keine Inline-Kopie).
+  assert.match(router, /applyModuleAccentForRoute\(route\)/, 'navigate() must use the helper');
+
+  // 3. Expliziter Theme-Wechsel (window.yuvomi.applyTheme) berechnet neu.
+  const applyTheme = router.match(/applyTheme:\s*\(value\) => \{[\s\S]*?\n {2}\},/);
+  assert.ok(applyTheme, 'expected the applyTheme export');
+  assert.match(
+    applyTheme[0],
+    /data-theme/,
+    'sanity: applyTheme is the function that flips the theme',
+  );
+  assert.match(
+    applyTheme[0],
+    /applyModuleAccentForRoute\(currentRoute\(\)\)/,
+    'applyTheme must recompute the module accent for the current route',
+  );
+
+  // 4. Theme "Automatisch" schaltet ohne applyTheme um - rein per CSS-Media-
+  //    Query. Ohne Listener liefe derselbe Kontrast-Bruch beim Sonnenuntergang
+  //    des Systems, nur ohne Nutzeraktion.
+  //
+  //    Die MediaQueryList muss dabei in einem Modul-Binding leben. Als
+  //    Wegwerf-Ausdruck (`matchMedia(...).addEventListener(...)`) darf die
+  //    Engine sie einsammeln - der Listener verstummt dann still, und der
+  //    Fehler kaeme genau in der Sitzung zurueck, die lange genug offen war.
+  assert.match(
+    router,
+    /const darkSchemeQuery = window\.matchMedia\??\.?\(\s*'\(prefers-color-scheme: dark\)'\s*\)/,
+    'the prefers-color-scheme query must be held in a module binding, not a throwaway expression',
+  );
+  assert.doesNotMatch(
+    router,
+    /matchMedia\??\.?\(\s*'\(prefers-color-scheme: dark\)'\s*\)\s*\??\.?\s*addEventListener/,
+    'do not attach the listener to an unreferenced MediaQueryList',
+  );
+
+  const listener = router.match(
+    /darkSchemeQuery\s*\??\.?\s*addEventListener[\s\S]{0,120}?'change'[\s\S]{0,200}?;/,
+  );
+  assert.ok(listener, 'expected a prefers-color-scheme change listener for auto mode');
+  assert.match(
+    listener[0],
+    /applyModuleAccentForRoute\(currentRoute\(\)\)/,
+    'the auto-mode listener must recompute the module accent too',
+  );
+
+  // 5. Das Anwenden darf nicht hinter einem werfenden localStorage haengen:
+  //    stand die Persistenz zuerst, brach ein Quota-Fehler ab, bevor der Akzent
+  //    neu berechnet war.
+  assert.ok(
+    applyTheme[0].indexOf('applyModuleAccentForRoute')
+      < applyTheme[0].indexOf("localStorage.setItem('yuvomi-theme'"),
+    'applyTheme must apply theme and accent before persisting the choice',
+  );
+});
+
+/**
+ * Der Akzent ist nicht die einzige eingefrorene Momentaufnahme.
+ *
+ * `updateThemeColorForRoute` loest `--module-<name>` ueber denselben
+ * `getCSSToken` auf und schreibt das Ergebnis in beide
+ * `<meta name="theme-color">`. Ein Attribut nimmt an keiner Kaskade teil, also
+ * behielt die Statusbar nach hell/dunkel die Modulfarbe des alten Themes,
+ * waehrend die Shell darunter laengst umgeschaltet hatte. Sichtbar nur in der
+ * installierten PWA (`setThemeColor` steigt sonst frueh aus), weshalb es neben
+ * dem Akzent-Befund durchrutschte - die Regel ist aber dieselbe: Jeder Weg, der
+ * das Theme zur Laufzeit umschaltet, muss BEIDE neu berechnen.
+ */
+test('the standalone status bar colour is recomputed on a runtime theme switch too', () => {
+  const router = read('../public/router.js');
+
+  const helper = router.match(/function refreshThemeColorForTheme\(\)[\s\S]*?\n\}/);
+  assert.ok(helper, 'expected refreshThemeColorForTheme to own the status bar refresh');
+  assert.match(
+    helper[0],
+    /updateThemeColorForRoute\(currentRoute\(\)\)/,
+    'the helper must recompute the status bar colour for the current route',
+  );
+  // Ein offenes Modal haelt die Statusbar abgedunkelt und stellt sie beim
+  // Schliessen ueber restoreThemeColor selbst wieder her. Zoege der Auto-Modus
+  // die Routenfarbe nach, waere die Abdunklung mitten im Modal weg.
+  assert.match(
+    helper[0],
+    /shared-modal-overlay/,
+    'the helper must leave the status bar alone while a modal dims it',
+  );
+
+  // Beide Umschaltwege ziehen nach - derselbe Anspruch wie beim Modul-Akzent.
+  const applyTheme = router.match(/applyTheme:\s*\(value\) => \{[\s\S]*?\n {2}\},/);
+  assert.ok(applyTheme, 'expected the applyTheme export');
+  assert.match(
+    applyTheme[0],
+    /refreshThemeColorForTheme\(\)/,
+    'applyTheme must refresh the status bar colour',
+  );
+
+  const listener = router.match(
+    /darkSchemeQuery\s*\??\.?\s*addEventListener[\s\S]{0,120}?'change'[\s\S]{0,300}?\n {4}\}\);/,
+  );
+  assert.ok(listener, 'expected a prefers-color-scheme change listener for auto mode');
+  assert.match(
+    listener[0],
+    /refreshThemeColorForTheme\(\)/,
+    'the auto-mode listener must refresh the status bar colour too',
+  );
+});
+
 test('modal Enter submits the form instead of advancing to the next field (audit 1.4)', () => {
   const src = read('../public/components/modal.js');
   const enterBlock = src.match(/if \(e\.key === 'Enter'\) \{[\s\S]*?\n {4}\}/);
@@ -3472,6 +4755,9 @@ test('search fields keep visible labels after users enter a query', () => {
     ['../public/pages/contacts.js', 'contacts-search'],
     ['../public/pages/notes.js', 'notes-search'],
     ['../public/pages/documents.js', 'documents-search'],
+    ['../public/pages/tasks.js', 'tasks-search'],
+    ['../public/pages/pantry.js', 'pantry-search'],
+    ['../public/pages/recipes.js', 'recipes-search'],
   ];
   for (const [file, id] of viaComponent) {
     const source = read(file);
@@ -3479,6 +4765,45 @@ test('search fields keep visible labels after users enter a query', () => {
       source,
       new RegExp(`renderPageSearch\\(\\{[^}]*id:\\s*['"]${id}['"]`),
       `${file} must render #${id} via the shared page-search component`,
+    );
+  }
+
+  // Die Liste oben ist eine Allowlist und hat genau deshalb zwei Jahre lang
+  // nichts gemerkt: pantry.js und recipes.js bauten je ein eigenes
+  // `<input type="search">` nach - ohne Lupe, ohne Leeren-Knopf, ohne `<label>`,
+  // ohne Debounce und mit dem Placeholder als einziger Beschriftung. Sie standen
+  // nicht in der Liste, also gab es keinen Fehlschlag (Audit 2026-07-30).
+  //
+  // Ein Guard über eine Allowlist deckt keine Regel ab, sondern N Dateien. Diese
+  // Schleife dreht die Richtung um: sie findet JEDES Suchfeld im Seitenbestand
+  // und verlangt, dass es aus dem geteilten Baustein stammt oder als Ausnahme
+  // benannt ist. Ein neues Modul mit eigenem Nachbau fällt damit auf, ohne dass
+  // jemand daran denken muss, es hier einzutragen.
+  const documentedExceptions = new Set([
+    // Kalender: schwergewichtige Server-FTS-Ergebnisansicht mit eigener
+    // Icon-Reveal-Leiste, kein Client-Filter (siehe utils/page-search.js).
+    'calendar.js',
+    // Split-Expenses: sichtbares Label über dem Feld, Server-Reload. Der
+    // inlineLabel-Block unten prüft es separat.
+    'split-expenses.js',
+    // Abos: eigenes Markup, aber die Substanz stimmt - Lupe, `<label>` mit
+    // sr-only-Text, autocomplete="off" und eine 250ms-Debounce um einen
+    // SERVER-Filter (`?q=`), nicht um einen Client-Filter. Damit liegt es näher
+    // am Kalender als an der Küche und ist kein Fall der Defektklasse, die
+    // dieser Guard fängt. Offen bleibt allein der Leeren-Knopf; eine
+    // Konsolidierung wäre Aufräumen, keine Fehlerbehebung.
+    'subscriptions.js',
+  ]);
+  const pagesDir = new URL('../public/pages/', import.meta.url);
+  for (const entry of readdirSync(pagesDir)) {
+    if (!entry.endsWith('.js') || documentedExceptions.has(entry)) continue;
+    const source = read(`../public/pages/${entry}`);
+    if (!/type=['"]search['"]|\.type\s*=\s*['"]search['"]/.test(source)) continue;
+    assert.match(
+      source,
+      /renderPageSearch\(\{/,
+      `${entry} builds a search input by hand; use renderPageSearch() from `
+      + 'utils/page-search.js or add it to documentedExceptions with a reason',
     );
   }
 
@@ -3499,8 +4824,11 @@ test('split-expenses archive is reachable and offers a way back (#574)', () => {
   // Archivieren war eine Einbahnstraße: die API kannte ?status=archived, die
   // Oberfläche hatte weder Filter noch Wiederherstellen.
   const page = read('../public/pages/split-expenses.js');
-  assert.match(page, /data-status="active"/, 'group list needs an active filter chip');
-  assert.match(page, /data-status="archived"/, 'group list needs an archived filter chip');
+  // Die Statusleiste läuft seit der Budget-Zusammenführung über den geteilten
+  // Umschalter-Baustein (data-tab-id + wireTablist) statt über eigene Chips.
+  assert.match(page, /data-tab-id="\$\{id\}"/, 'group list needs a status switcher');
+  assert.match(page, /'active', 'splitExpenses\.statusActive'/, 'group list needs an active option');
+  assert.match(page, /'archived', 'splitExpenses\.statusArchived'/, 'group list needs an archived option');
   assert.match(
     page,
     /\/split-expenses\/groups\?status=\$\{state\.groupStatus\}/,
@@ -3649,7 +4977,10 @@ test('remaining audited mobile controls use 48px touch targets', () => {
 
   assertRuleUsesToken(tasks, '.filter-toggle-btn', 'min-height', '--target-lg', '../public/styles/tasks.css');
   assertRuleUsesToken(calendar, '.cal-toolbar__today', 'min-height', '--target-lg', '../public/styles/calendar.css');
-  assertRuleUsesToken(budget, '.budget-loans__filter', 'min-height', '--target-lg', '../public/styles/budget.css');
+  // Der Darlehens-Statusfilter ist in .budget-segmented aufgegangen. Der Baustein
+  // nimmt --target-base (44px Zeiger / 48px Finger) statt --target-lg fest: das
+  // Kriterium ist die Zeigerfähigkeit, nicht die Viewport-Breite (tokens.css).
+  assertRuleUsesToken(budget, '.budget-segmented__item', 'min-height', '--target-base', '../public/styles/budget.css');
   assertRuleUsesToken(budget, '.budget-loan-card__filter', 'width', '--target-lg', '../public/styles/budget.css');
   assertRuleUsesToken(budget, '.budget-loan-card__filter', 'height', '--target-lg', '../public/styles/budget.css');
   assert.match(
@@ -3780,6 +5111,103 @@ test('housekeeping exposes its page title as the primary heading', () => {
 // sonst auch in /* ... */ und die halbe Vertragsprüfung wäre durch eine
 // Erwähnung im Fließtext erfüllbar.
 const stripCssComments = (css) => css.replace(/\/\*[\s\S]*?\*\//g, '');
+
+// Wie cssRules(), aber jede Regel kennt zusaetzlich ihren Kontext:
+//
+//   - `conditional` sagt, ob sie nur unter einer Bedingung gilt. Fuer eine
+//     GEFORDERTE Deklaration ist das der Unterschied zwischen „gilt immer" und
+//     „gilt unterhalb von 640px". Entscheidend ist die SEMANTIK der At-Rule,
+//     nicht ihr '@': `@media`/`@supports`/`@container`/`@scope` schraenken ein,
+//     `@layer` ordnet nur die Kaskade und gilt ueberall.
+//   - Verschachtelte Regeln werden mitgelesen, mit aufgeloestem Selektor.
+//     Ein flacher Scanner nimmt die erste schliessende Klammer als Rumpfende
+//     und uebersieht `.foo { & { max-width: 20rem } }` vollstaendig - er
+//     prueft dann still weniger, als er behauptet.
+const CONDITIONAL_AT_RULE = /^@(?:media|supports|container|scope|document|starting-style)\b/i;
+
+// Deklarationen dieser Ebene, ohne die Rumpfe verschachtelter Regeln (die
+// kommen als eigene Eintraege) und ohne deren Praeludien.
+function ownDeclarations(body) {
+  let out = '';
+  let depth = 0;
+  for (let i = 0; i < body.length; i += 1) {
+    const char = body[i];
+    if (char === '{') {
+      if (depth === 0) {
+        const cut = Math.max(out.lastIndexOf(';'), out.lastIndexOf('}'));
+        out = out.slice(0, cut + 1);
+      }
+      depth += 1;
+    } else if (char === '}') {
+      depth = Math.max(0, depth - 1);
+    } else if (depth === 0) {
+      out += char;
+    }
+  }
+  return out;
+}
+
+function scopedRules(css) {
+  const live = stripCssComments(css);
+  const rules = [];
+
+  const parse = (from, to, conditional, parents) => {
+    let i = from;
+    let start = from;
+    while (i < to) {
+      const char = live[i];
+      // Statement-At-Rules (@import, @charset, @layer x;) oeffnen keinen Block;
+      // ohne diesen Zweig waechst das Praeludium ueber sie hinaus und die
+      // naechste echte Regel wird als At-Rule-Rumpf verschluckt.
+      if (char === ';' || char === '}') {
+        i += 1;
+        start = i;
+        continue;
+      }
+      if (char !== '{') {
+        i += 1;
+        continue;
+      }
+
+      const prelude = live.slice(start, i).replace(/\s+/g, ' ').trim();
+      let depth = 1;
+      let j = i + 1;
+      while (j < to && depth > 0) {
+        if (live[j] === '{') depth += 1;
+        else if (live[j] === '}') depth -= 1;
+        j += 1;
+      }
+      const close = j - 1;
+
+      if (prelude.startsWith('@')) {
+        const inner = conditional || CONDITIONAL_AT_RULE.test(prelude);
+        // Steht die Gruppe IN einer Style-Regel, gelten ihre eigenen
+        // Deklarationen dem Elternselektor: `.kitchen-list { @media … {
+        // max-width: 20rem } }`. Ohne diesen Zweig verschwindet die Kappung.
+        if (parents.length) {
+          const own = ownDeclarations(live.slice(i + 1, close));
+          if (own.trim()) rules.push({ selectors: parents, body: own, conditional: inner });
+        }
+        parse(i + 1, close, inner, parents);
+      } else {
+        const own = prelude.split(',').map((sel) => sel.trim()).filter(Boolean);
+        const selectors = parents.length
+          ? own.flatMap((sel) => parents.map((parent) => (sel.includes('&')
+            ? sel.replace(/&/g, parent)
+            : `${parent} ${sel}`)))
+          : own;
+        rules.push({ selectors, body: ownDeclarations(live.slice(i + 1, close)), conditional });
+        parse(i + 1, close, conditional, selectors);
+      }
+
+      i = close + 1;
+      start = i;
+    }
+  };
+
+  parse(0, live.length, false, []);
+  return rules;
+}
 
 // Flacher Regelblock-Scanner. At-Rule-Präludien (@media, @supports, @container)
 // fallen automatisch weg, weil [^{}]* kein '{' fressen kann und der Selektor
@@ -3951,6 +5379,60 @@ test('page-inline-pad contract holds across every stylesheet (#577)', () => {
     /@media \(min-width:\s*1024px\)\s*\{\s*:root\s*\{\s*--page-gutter:\s*var\(--space-8\)/,
     '--page-gutter muss ab 1024px auf --space-8 gehen (eine Quelle für Kopf und Body)',
   );
+});
+
+test('wer seinen Körper aufs Lesemaß kappt, kappt auch seinen Kopf', () => {
+  // REGEL, KEINE LISTE: geprüft wird jede Seite, die .kitchen-list rendert -
+  // nicht eine Aufzählung der heute drei Küchen-Listen. Genau als Aufzählung
+  // stand die Vorgängerregel da (je ein `> * { max-width }`-Block in
+  // shopping.css und pantry.css), und die Rezepte fehlten darin schlicht.
+  //
+  // Was sie außerdem nicht leistete: `max-width` kappt die BREITE eines Slots,
+  // der Slot war aber ohnehin schmaler - `.page-toolbar__actions
+  // { margin-left: auto }` schob ihn danach unverändert an die äußere Kante.
+  // Gemessen bei 1280px: Liste bis x=972, Lagerort-Knopf bis x=1248.
+  // `.page-toolbar--narrow` (layout.css) setzt die Marge am LETZTEN Slot und
+  // trifft damit das Ende der Zeile statt der Slot-Breiten.
+  const narrowBody = /class(?:Name)?\s*=\s*['"`][^'"`]*\bkitchen-list\b/;
+  const pages = walkJsFiles('../public/pages/')
+    .filter((file) => narrowBody.test(read(file)));
+  assert.ok(pages.length >= 3, 'keine Seite mit .kitchen-list gefunden - Scan ist blind geworden');
+
+  for (const file of pages) {
+    const src = read(file);
+    // Jeder Kopf dieser Seite, egal ob als Template-Literal oder über className.
+    const heads = [
+      ...src.matchAll(/class="([^"]*\bpage-toolbar\b[^"]*)"/g),
+      ...src.matchAll(/className\s*=\s*'([^']*\bpage-toolbar\b[^']*)'/g),
+    ].map(([, classList]) => classList);
+    assert.ok(heads.length > 0, `${file}: kappt den Körper auf das Lesemaß, hat aber keinen kanonischen Kopf`);
+    for (const classList of heads) {
+      assert.ok(
+        /\bpage-toolbar--narrow\b/.test(classList),
+        `${file}: "${classList}" - der Körper endet bei --content-max-width-narrow, `
+        + 'der Kopf muss dieselbe Kante halten (page-toolbar--narrow)',
+      );
+    }
+  }
+
+  // Und die Variante muss das auch tun: Marge am letzten Slot, gegen dasselbe
+  // Token, das .kitchen-list kappt.
+  const layout = stripCssComments(read('../public/styles/layout.css'));
+  assert.match(
+    layout,
+    /\.page-toolbar--narrow\s*>\s*:last-child\s*\{[^}]*margin-inline-end:\s*max\(\s*0px,\s*calc\(100% - var\(--content-max-width-narrow\)\)\s*\)/,
+    'layout.css: .page-toolbar--narrow muss den letzten Slot auf --content-max-width-narrow zurückholen',
+  );
+  // Ohne Breakpoint: .kitchen-list kappt unbedingt, der Kopf muss das auch.
+  // Der Vorgänger stand in `@media (min-width: 1024px)` und ließ den Versatz
+  // zwischen 720px und 1024px stehen (gemessen 148px bei 900px Fensterbreite).
+  for (const file of ['shopping.css', 'pantry.css', 'recipes.css', 'kitchen-row.css']) {
+    assert.doesNotMatch(
+      stripCssComments(read(`../public/styles/${file}`)),
+      /page-toolbar[^{]*>\s*\*\s*\{[^}]*max-width/,
+      `${file}: Slot-Breiten kappen holt den Kopf nicht zurück - das macht .page-toolbar--narrow`,
+    );
+  }
 });
 
 test('module-head families stay split: in-page tabs vs route clusters', () => {
@@ -4647,9 +6129,313 @@ test('Avatar-Initialen waehlen die lesbare Textfarbe', async () => {
 // loeschen?" loeschte einen Menschen, ohne eine davon zu nennen, waehrend der
 // harmlosere Budget-Dialog "Zugeordnete Buchungen bleiben erhalten" sagt
 // (Critique 2026-07-27, zweiter Lauf).
-test('destruktive Settings-Dialoge nennen ihre Folgen und sind als gefaehrlich markiert', () => {
+//
+// Der Guard war zuerst eine Allowlist aus fuenf Dateien und deckte damit nicht
+// die Regel ab, sondern fuenf Dateien: 25 weitere danger-Dialoge standen ohne
+// Folgentext da, ohne dass er anschlug. Er laeuft jetzt ueber ganz public/.
+// Acht davon waren `confirmOverModal` - ein Scan, der nur nach `confirmModal(`
+// sucht, findet die nie, weil der Name den kuerzeren nicht enthaelt.
+//
+// `readCall` liest die Argumentliste per Klammer-Balancing statt mit einem
+// Fenster fester Laenge. Das Fenster war die zweite Schwachstelle der alten
+// Fassung: ein mehrzeiliger Aufruf ragt darueber hinaus, und `detail:` faellt
+// still hinten runter - der Test bleibt gruen, der Dialog schweigt trotzdem.
+const DIALOG_FNS = ['confirmModal', 'confirmOverModal'];
+
+// Liest ab der oeffnenden Klammer bis zur passenden schliessenden. Strings,
+// Template-Literals samt `${}` und Kommentare werden uebersprungen, damit eine
+// Klammer im Anzeigetext den Aufruf nicht vorzeitig beendet.
+function readCall(src, openIdx) {
+  let depth = 0;
+  let i = openIdx;
+  let quote = null;
+  while (i < src.length) {
+    const c = src[i];
+    const prev = src[i - 1];
+    if (quote) {
+      if (c === quote && prev !== '\\') quote = null;
+      else if (quote === '`' && c === '{' && prev === '$') {
+        let d = 1;
+        i++;
+        while (i < src.length && d > 0) {
+          if (src[i] === '{') d++;
+          else if (src[i] === '}') d--;
+          i++;
+        }
+        continue;
+      }
+    } else if (c === '"' || c === "'" || c === '`') quote = c;
+    else if (c === '/' && src[i + 1] === '/') { i = src.indexOf('\n', i); if (i === -1) break; }
+    else if (c === '/' && src[i + 1] === '*') { i = src.indexOf('*/', i) + 2; continue; }
+    else if (c === '(') depth++;
+    else if (c === ')') { depth--; if (depth === 0) return src.slice(openIdx, i + 1); }
+    i++;
+  }
+  return null;
+}
+
+// Schneidet aus einer gelesenen Argumentliste das Options-Objekt heraus - das
+// letzte Argument der obersten Ebene, das mit `{` beginnt. Ohne diesen Schnitt
+// sucht der Guard im ganzen Aufruf, und ein `detail`-Platzhalter in der
+// Titel-Interpolation (`confirmModal(t('x', { detail: … }), { danger: true })`)
+// wuerde ihn zufriedenstellen, obwohl der Dialog keine Folgen nennt.
+function readOptionsArg(call) {
+  const inner = call.slice(1, -1);
+  const args = [];
+  let depth = 0;
+  let quote = null;
+  let start = 0;
+  for (let i = 0; i < inner.length; i++) {
+    const c = inner[i];
+    if (quote) {
+      if (c === quote && inner[i - 1] !== '\\') quote = null;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '`') quote = c;
+    else if ('([{'.includes(c)) depth++;
+    else if (')]}'.includes(c)) depth--;
+    else if (c === ',' && depth === 0) { args.push(inner.slice(start, i)); start = i + 1; }
+  }
+  args.push(inner.slice(start));
+  const rest = args.slice(1).map((arg) => arg.trim()).filter(Boolean);
+  // Ein Spread im Options-Literal ist genauso undurchsichtig wie eine Variable:
+  // `{ ...destructiveOptions }` sieht nach einem lesbaren Objekt aus, waehrend
+  // `danger: true` von aussen kommt und der Regex nichts findet.
+  const literal = rest.filter((arg) => arg.startsWith('{') && !arg.includes('...')).pop();
+  // `null` heisst: es gibt ein Options-Argument, aber es ist von hier aus nicht
+  // lesbar (etwa eine Variable). Das darf der Guard nicht als "keine Optionen"
+  // verbuchen - sonst faellt `const o = { danger: true }; confirmModal(t, o)`
+  // still aus der Pruefung. Der Aufrufer entscheidet, was damit geschieht.
+  if (!literal && rest.length) return null;
+  return literal ?? '';
+}
+
+// Liest den Wert einer Option aus einer gelesenen Argumentliste: ab `name:` bis
+// zum Komma, das ihn beendet - Klammern, Strings und Template-Literals werden
+// mitgezaehlt, damit ein Komma in `t('key', { count })` nicht vorzeitig trennt.
+function readOptionValue(call, name) {
+  const at = call.search(new RegExp(`\\b${name}\\s*:`));
+  if (at === -1) return '';
+  let i = call.indexOf(':', at) + 1;
+  const start = i;
+  let depth = 0;
+  let quote = null;
+  for (; i < call.length; i++) {
+    const c = call[i];
+    if (quote) {
+      if (c === quote && call[i - 1] !== '\\') quote = null;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '`') quote = c;
+    else if ('([{'.includes(c)) depth++;
+    else if (')]}'.includes(c)) { if (depth === 0) break; depth--; }
+    else if (c === ',' && depth === 0) break;
+  }
+  return call.slice(start, i);
+}
+
+function collectDialogCalls() {
+  const base = new URL('../public/', import.meta.url);
+  const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const child = new URL(`${entry.name}${entry.isDirectory() ? '/' : ''}`, dir);
+    if (entry.isDirectory()) return walk(child);
+    return entry.name.endsWith('.js') ? [child] : [];
+  });
+
+  const calls = [];
+  for (const file of walk(base)) {
+    const src = readFileSync(file, 'utf8').replace(/\r/g, '');
+    const label = decodeURIComponent(file.href.slice(base.href.length));
+    for (const fn of DIALOG_FNS) {
+      const re = new RegExp(`\\b${fn}\\s*\\(`, 'g');
+      let match;
+      while ((match = re.exec(src)) !== null) {
+        // JSDoc- und Kommentarzeilen nennen die Funktionen ebenfalls, und die
+        // Definition selbst ist kein Aufruf: `export async function
+        // confirmOverModal(message, opts = {})` sah sonst wie ein Dialog aus,
+        // dessen Optionen nicht lesbar sind.
+        const lineStart = src.lastIndexOf('\n', match.index) + 1;
+        const vorText = src.slice(lineStart, match.index);
+        if (/^\s*(\*|\/\/)/.test(vorText)) continue;
+        if (/\bfunction\s+$/.test(vorText)) continue;
+        const call = readCall(src, match.index + match[0].length - 1);
+        const line = src.slice(0, match.index).split('\n').length;
+        calls.push({ file: label, line, fn, call });
+      }
+    }
+  }
+  return calls;
+}
+
+test('jeder als gefaehrlich markierte Dialog nennt seine Folgen', () => {
+  const calls = collectDialogCalls();
+  // Reisst der Scanner, ist das ein Befund und kein Grund, still nichts zu
+  // pruefen - sonst faellt der Guard bei einem Syntaxfehler auf null Dialoge.
+  const unparsed = calls.filter((c) => c.call === null);
+  assert.deepEqual(unparsed.map((c) => `${c.file}:${c.line}`), [],
+    'Aufruf liess sich nicht bis zur schliessenden Klammer lesen');
+  assert.ok(calls.length >= 40, `Scanner findet nur ${calls.length} Dialoge - laeuft er noch ueber public/?`);
+
+  // Ab hier zaehlt nur noch das Options-Objekt, nicht der ganze Aufruf.
+  const mitOptionen = calls.map((c) => ({ ...c, options: readOptionsArg(c.call) }));
+
+  // Ein Options-Argument, das der Guard nicht lesen kann (eine Variable etwa),
+  // faellt sonst lautlos aus der Pruefung - `danger: true` waere dort
+  // unsichtbar. Ausgenommen ist die Datei, die die Dialoge selbst definiert:
+  // dort IST das Durchreichen fremder Optionen die Implementierung. Das ist
+  // eine Eigenschaft des Moduls, keine Namensliste - wer `confirmModal`
+  // exportiert, ist die Definitionsstelle.
+  const undurchsichtig = mitOptionen.filter((c) => {
+    if (c.options !== null) return false;
+    const src = readFileSync(new URL(`../public/${c.file}`, import.meta.url), 'utf8');
+    return !new RegExp(`export (async )?function ${c.fn}\\b`).test(src);
+  });
+  assert.deepEqual(
+    undurchsichtig.map((c) => `${c.file}:${c.line} (${c.fn})`),
+    [],
+    'Die Optionen des Dialogs stehen nicht als Objektliteral im Aufruf. So laesst sich '
+    + 'nicht pruefen, ob er danger: true traegt - schreib sie direkt in den Aufruf.',
+  );
+
+  const gefaehrlich = mitOptionen.filter((c) => /\bdanger\s*:\s*true\b/.test(c.options ?? ''));
+  assert.ok(gefaehrlich.length >= 30, `nur ${gefaehrlich.length} danger-Dialoge gefunden`);
+
+  const ohneFolgen = gefaehrlich.filter((c) => !/\bdetail\s*:/.test(c.options));
+  assert.deepEqual(
+    ohneFolgen.map((c) => `${c.file}:${c.line} (${c.fn})`),
+    [],
+    'danger: true ohne detail - der Dialog sagt nicht, was er zerstoert. Nennt er keine '
+    + 'unwiederbringliche Folge, gehoert danger: true weg statt ein erfundener Detailtext hin.',
+  );
+
+  // Jeder Folgentext kommt aus t(), nicht aus einem hartkodierten String. Der
+  // Wert wird bis zum trennenden Komma gelesen statt per Regex: `detail` ist
+  // nicht immer ein blankes t() - subscriptions.js setzt einen Grundtext und
+  // haengt bei belegten Kategorien die Nutzungswarnung davor. Beide Zweige
+  // muessen einen Key nennen, ein `: null` faellt damit auf.
+  // Grenze: ueber eine Variable eingeschleuste Texte sieht der Guard nicht.
+  const detailKeys = new Set();
+  for (const call of gefaehrlich) {
+    const value = readOptionValue(call.options, 'detail');
+    const keys = [...value.matchAll(/\bt\(\s*'([^']+)'/g)].map((m) => m[1]);
+    // `t(this._…Key)` ist die zulaessige zweite Form: eine geteilte Komponente,
+    // deren Folgen erst der Aufrufer kennt. Wer so delegiert, wird vom Guard
+    // darunter geprueft - dort, wo die Keys tatsaechlich gesetzt werden.
+    const delegiert = /\bt\(\s*this\._\w*[Kk]ey\b/.test(value);
+    assert.ok(keys.length || delegiert,
+      `${call.file}:${call.line}: detail muss aus t('key') kommen, ist aber \`${value.trim()}\``);
+    assert.ok(!/(^|[^\w.])null([^\w]|$)/.test(value),
+      `${call.file}:${call.line}: detail faellt in einem Zweig auf null zurueck - dann nennt der Dialog nichts`);
+    keys.forEach((key) => detailKeys.add(key));
+  }
+
+  assertKeysExistInEveryLocale([...detailKeys]);
+
+  // Der Text muss die Folgen benennen, nicht nur warnen: Mindestlaenge als
+  // grober Schutz gegen ein spaeteres "Wirklich?" als Detail. Geprueft wird pro
+  // Dialog, nicht pro Key - ein Aufruf darf ein kurzes Fragment voranstellen
+  // (subscriptions.js haengt die Nutzungswarnung an), solange mindestens ein
+  // Key die Folge ausformuliert.
+  const de = JSON.parse(read('../public/locales/de.json'));
+  const laenge = (key) => {
+    const value = key.split('.').reduce((o, k) => o?.[k], de);
+    return typeof value === 'string' ? value.length : 0;
+  };
+  const zuKnapp = gefaehrlich
+    .map((call) => ({ call, value: readOptionValue(call.options, 'detail') }))
+    .map(({ call, value }) => ({
+      call,
+      value,
+      keys: [...value.matchAll(/\bt\(\s*'([^']+)'/g)].map((m) => m[1]),
+    }))
+    // Delegierte Aufrufe kennen ihren Key hier nicht - deren Laenge prueft der
+    // Guard, der die Aufrufer der geteilten Komponente durchgeht.
+    .filter(({ value }) => !/\bt\(\s*this\._\w*[Kk]ey\b/.test(value))
+    .filter(({ keys }) => !keys.some((key) => laenge(key) >= 80))
+    .map(({ call, keys }) => `${call.file}:${call.line} (${keys.join(', ')})`);
+  assert.deepEqual(zuKnapp, [], 'kein Folgentext des Dialogs ist lang genug fuer eine Folgenbeschreibung');
+
+  // Alle genannten Keys muessen es trotzdem in jede Locale geschafft haben.
+  assert.ok(detailKeys.size >= 25, `nur ${detailKeys.size} Folgen-Keys gefunden`);
+});
+
+// Gegenstueck zur Delegation oben. Der Category-Manager bedient fuenf Module,
+// und deren Server-Semantik geht auseinander: Budget, Aufgaben und Kontakte
+// weisen eine belegte Kategorie mit 409 ab, der Einkauf schiebt die Artikel auf
+// die naechste Kategorie, der Vorrat laesst sie unzugeordnet zurueck. Ein
+// geteilter Folgentext waere fuer zwei der fuenf schlicht falsch - eine
+// Fehlerklasse, die es hier schon einmal gab (der Platzhalter „Neue Kategorie"
+// im Lagerort-Dialog). Der Guard sucht die Aufrufer im Bestand, statt sie zu
+// kennen: wer die Komponente einbindet, muss den Folgentext mitliefern.
+test('jeder Nutzer des Category-Managers liefert seinen eigenen Folgentext', () => {
+  const base = new URL('../public/', import.meta.url);
+  const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const child = new URL(`${entry.name}${entry.isDirectory() ? '/' : ''}`, dir);
+    if (entry.isDirectory()) return walk(child);
+    return entry.name.endsWith('.js') ? [child] : [];
+  });
+
+  const de = JSON.parse(read('../public/locales/de.json'));
+  const laenge = (key) => {
+    const value = key.split('.').reduce((o, k) => o?.[k], de);
+    return typeof value === 'string' ? value.length : 0;
+  };
+
+  const nutzer = [];
+  for (const file of walk(base)) {
+    const src = readFileSync(file, 'utf8').replace(/\r/g, '');
+    const label = decodeURIComponent(file.href.slice(base.href.length));
+    if (label === 'components/category-manager.js') continue;
+    if (!src.includes('yuvomi-category-manager')) continue;
+    // JEDER configure()-Aufruf der Datei, nicht der erste: eine Seite darf zwei
+    // Manager mounten, und der zweite waere sonst ungeprueft durchgelaufen.
+    // `basePath` ist die Signatur dieser Komponente und haelt fremde
+    // configure()-Aufrufe draussen.
+    const vorher = nutzer.length;
+    const re = /\.configure\s*\(/g;
+    let match;
+    while ((match = re.exec(src)) !== null) {
+      const call = readCall(src, match.index + match[0].length - 1);
+      assert.ok(call, `${label}: configure()-Aufruf liess sich nicht lesen`);
+      if (!/\bbasePath\s*:/.test(call)) continue;
+      const line = src.slice(0, match.index).split('\n').length;
+      nutzer.push({ label: `${label}:${line}`, call });
+    }
+    assert.notEqual(vorher, nutzer.length,
+      `${label}: bindet den Category-Manager ein, ruft aber configure() nicht auf`);
+  }
+
+  // Faellt die Erkennung aus, soll der Test das sagen und nicht still bestehen.
+  assert.ok(nutzer.length >= 5, `nur ${nutzer.length} Nutzer des Category-Managers gefunden`);
+
+  const keys = new Set();
+  for (const { label, call } of nutzer) {
+    const del = readOptionValue(call, 'deleteDetailKey').match(/'([^']+)'/);
+    assert.ok(del, `${label}: configure() braucht deleteDetailKey - was das Loeschen anrichtet, `
+      + 'weiss nur der Server dieses Moduls');
+    keys.add(del[1]);
+    // Unterkategorien hat nur, wer sie einschaltet - dann braucht auch der
+    // zweite Dialog seinen eigenen Text.
+    if (/\bsupportsSubcategories\s*:\s*true\b/.test(call)) {
+      const sub = readOptionValue(call, 'subDeleteDetailKey').match(/'([^']+)'/);
+      assert.ok(sub, `${label}: mit supportsSubcategories braucht configure() auch subDeleteDetailKey`);
+      keys.add(sub[1]);
+    }
+  }
+
+  assertKeysExistInEveryLocale([...keys]);
+  const zuKnapp = [...keys].filter((key) => laenge(key) < 80);
+  assert.deepEqual(zuKnapp, [], 'zu knapp fuer eine Folgenbeschreibung');
+});
+
+// Die fuenf Dialoge aus dem urspruenglichen Befund bleiben namentlich verankert:
+// die Regel oben wuerde auch gruen, wenn jemand `danger: true` entfernte, statt
+// die Folgen zu nennen. Bei einem geloeschten Menschen oder einem
+// zurueckgespielten Backup ist das keine zulaessige Antwort.
+test('die schwersten Settings-Dialoge bleiben als gefaehrlich markiert', () => {
   const dialoge = [
     ['admin-family.js', 'settings.deleteMemberConfirm', 'settings.deleteMemberConfirmDetail'],
+    ['admin-family.js', 'settings.invites.revokeConfirm', 'settings.invites.revokeConfirmDetail'],
     ['admin-api.js', 'settings.apiTokenRevokeConfirm', 'settings.apiTokenRevokeDetail'],
     ['admin-permissions.js', 'settings.permResetConfirm', 'settings.permResetConfirmDetail'],
     ['admin-backup.js', 'settings.backupRestoreConfirm', 'settings.backupRestoreDetail'],
@@ -4657,20 +6443,389 @@ test('destruktive Settings-Dialoge nennen ihre Folgen und sind als gefaehrlich m
 
   for (const [datei, confirmKey, detailKey] of dialoge) {
     const source = read(`../public/settings/pages/${datei}`);
-    // Fenster fester Laenge statt bis `})`: der Confirm-Text interpoliert
-    // selbst (`{ name }`) und wuerde den Block zu frueh abschneiden.
-    const block = source.slice(source.indexOf(confirmKey), source.indexOf(confirmKey) + 320);
-    assert.ok(block.includes('danger: true'), `${datei}: ${confirmKey} braucht danger: true`);
+    const at = source.indexOf(confirmKey);
+    assert.notEqual(at, -1, `${datei}: ${confirmKey} kommt nicht mehr vor`);
+    // Vom Schluesssel aus rueckwaerts zur oeffnenden Klammer des Aufrufs, dann
+    // balanciert lesen - der Confirm-Text interpoliert selbst (`{ name }`).
+    const open = Math.max(source.lastIndexOf('confirmModal(', at), source.lastIndexOf('confirmOverModal(', at));
+    const block = readCall(source, source.indexOf('(', open));
+    assert.ok(block?.includes('danger: true'), `${datei}: ${confirmKey} braucht danger: true`);
     assert.ok(block.includes(detailKey), `${datei}: ${confirmKey} braucht den Folgen-Text ${detailKey}`);
   }
+});
 
-  assertKeysExistInEveryLocale(dialoge.map(([, , detailKey]) => detailKey));
+// --------------------------------------------------------
+// Aufgaben-Tags (#586)
+// Drei Entscheidungen, die im Quelltext unscheinbar aussehen und deren Verlust
+// sich in der Oberflaeche erst spaet zeigt.
+// --------------------------------------------------------
 
-  // Der Text muss die Folgen benennen, nicht nur warnen: Mindestlaenge als
-  // grober Schutz gegen ein spaeteres "Wirklich?" als Detail.
-  const de = JSON.parse(read('../public/locales/de.json'));
-  for (const [, , detailKey] of dialoge) {
-    const value = detailKey.split('.').reduce((o, k) => o?.[k], de);
-    assert.ok(value.length >= 80, `${detailKey} ist zu knapp fuer eine Folgenbeschreibung`);
+test('Tag-Chips auf Karten sind Filter-Buttons, keine Beschriftungen', () => {
+  const source = read('../public/pages/tasks.js');
+  const fn = source.slice(source.indexOf('function renderTagBadges'),
+                          source.indexOf('function wireTagBadgeFilter'));
+
+  assert.match(fn, /<button type="button" class="task-tag task-tag--filter"/,
+    'Ein Tag anzuklicken und danach zu filtern ist die erwartete Geste - als <span> gibt es sie nicht');
+  assert.match(fn, /data-tag-filter="\$\{esc\(tag\)\}"/, 'Der Wert muss escaped am Chip haengen');
+  assert.match(fn, /aria-label="\$\{esc\(t\('tasks\.tagFilterBy'/,
+    'Der Button braucht eine Beschriftung, die seine Wirkung nennt');
+
+  // Die Zusammenfassung ab dem vierten Tag darf kein Button sein: sie benennt
+  // keinen einzelnen Tag, auf den ein Klick filtern koennte.
+  const more = fn.slice(fn.indexOf('task-tag--more') - 120, fn.indexOf('task-tag--more') + 200);
+  assert.match(more, /<span/, '+N ist eine Anzeige, kein Ziel');
+});
+
+test('der Tag-Klick wird in der Capture-Phase abgefangen', () => {
+  const source = read('../public/pages/tasks.js');
+  const fn = source.slice(source.indexOf('function wireTagBadgeFilter'),
+                          source.indexOf('function wireTagBadgeFilter') + 600);
+
+  assert.match(fn, /e\.stopPropagation\(\)/,
+    'Ohne stopPropagation oeffnet derselbe Klick zusaetzlich den Bearbeiten-Dialog');
+  // Das `true` am Ende ist der ganze Punkt: der Kanban-Board-Handler sitzt
+  // unterhalb des Containers und kaeme beim Bubbling zuerst dran.
+  assert.match(fn, /\}, true\);/,
+    'Der Listener muss in der Capture-Phase haengen, sonst hat das Board den Dialog schon geoeffnet');
+});
+
+test('der Tag-Filter ist ueberall eine Liste, nirgends mehr ein einzelner Wert', () => {
+  const source = read('../public/pages/tasks.js');
+
+  // `filters.tag` (Singular) war die Fassung vor der Mehrfachauswahl. Bleibt
+  // irgendwo ein Zugriff darauf stehen, ist er still wirkungslos: er liest
+  // undefined und filtert nie.
+  const singular = [...source.matchAll(/filters\.tag\b(?!s)/g)];
+  assert.equal(singular.length, 0,
+    `filters.tag (Singular) darf nicht mehr vorkommen, gefunden: ${singular.length}`);
+
+  // Mehrere Tags muessen als eigene Parameter reisen, sonst zerfaellt ein Tag
+  // mit Komma im Namen (aus CATEGORIES) am Server in zwei.
+  assert.match(source, /params\.append\('tag', tag\)/,
+    'Jeder Tag gehoert als eigener Query-Parameter in die Anfrage');
+});
+
+/**
+ * Speichern darf nicht nach dem Verwerfen fragen.
+ *
+ * Gemessen (Issue #625): der Einkaufs-Artikel-Dialog schloss nach dem PATCH mit
+ * `closeModal()`. Der Dirty-Guard vergleicht die Felder gegen den Snapshot vom
+ * Oeffnen, sah die soeben gespeicherten Werte als ungespeicherte Aenderungen und
+ * legte „Aenderungen verwerfen?" ueber den fertigen Vorgang - der Klick auf
+ * „Verwerfen" schloss dann den Dialog, waehrend die Daten laengst geschrieben
+ * waren. Die Frage war also nicht nur ueberfluessig, sie log ueber den Ausgang.
+ *
+ * Die Regel gilt fuer jeden Schreibvorgang, nicht fuer eine Allowlist von
+ * Dateien: ist eine Aenderung erst einmal beim Server, gibt es nichts mehr zu
+ * verwerfen, und das Modal gehoert mit `force: true` zu.
+ */
+// Dieselbe Handlung traegt drei Namen: `closeModal`, den Import-Alias
+// `closeSharedModal` (Kueche, Vorrat, Rezepte) und `closeDetailView`, das die
+// Detailansicht ueber closeModal legt. Faehrt die Regel nur auf dem ersten,
+// laeuft sie an zwei Dritteln der Aufrufer vorbei - und zwar still.
+// Die Detailansicht reicht ihren Fusszeilen-Aktionen zusaetzlich ein blankes
+// `close` herein; dafuer greift der Guard in test-detail-view.js, weil ein
+// ungebundenes `close(` hier auf jeden Popover- und Stream-Aufruf ansprechen
+// wuerde.
+const CLOSE_MODAL_CALL = /\b(close(Shared)?Modal|closeDetailView)\s*\(/;
+
+test('nach einem Schreibvorgang schliesst das Modal ohne Verwerfen-Frage', () => {
+  const WINDOW = 20; // Zeilen zwischen Request und Schliessen, grosszuegig gefasst
+  const violations = [];
+
+  for (const file of walkJsFiles('../public/')) {
+    const lines = read(file).split('\n');
+    lines.forEach((line, index) => {
+      if (!/await\s+api\.(post|patch|put|delete)\s*\(/.test(line)) return;
+      lines.slice(index, index + WINDOW).forEach((candidate, offset) => {
+        // Kueche/Vorrat importieren dieselbe Funktion unter `closeSharedModal`;
+        // ohne den Alias liefe die Regel an diesen Modulen vorbei.
+        if (!CLOSE_MODAL_CALL.test(candidate)) return;
+        // Definition und Import tragen denselben Namen, sind aber kein Aufruf.
+        if (/function closeModal|^\s*import|\bfrom\s+'/.test(candidate)) return;
+        if (/force/.test(candidate)) return;
+        violations.push(`${file}:${index + offset + 1}: ${candidate.trim()}`);
+      });
+    });
   }
+
+  assert.deepEqual(violations, [],
+    'closeModal() im Erfolgspfad eines Schreibvorgangs braucht { force: true }');
+});
+
+/**
+ * Loeschen fragt nicht nach dem Verwerfen.
+ *
+ * Dieselbe Regel von der anderen Seite: nicht nur ein erledigter Schreibvorgang
+ * macht die Verwerfen-Frage sinnlos, sondern auch eine Entscheidung, die die
+ * Eingaben ohnehin mitnimmt.
+ *
+ * Gemessen (Geburtstage, Schwester von #625): der Loeschen-Knopf im
+ * Bearbeiten-Dialog rief `closeModal()` ohne `force`. Hatte der Nutzer vorher
+ * ein Feld angefasst, kam erst „Aenderungen verwerfen?" und danach der
+ * Loeschvorgang - zwei Rueckfragen fuer eine Entscheidung, und die erste fragte
+ * nach Feldern, die der geloeschte Datensatz mitnimmt. Weil der Aufruf zudem
+ * nicht awaited war, lief das Loeschen bereits los, waehrend der Verwerfen-
+ * Dialog noch im selben Overlay-Slot hing (das Shared-Modal kennt kein
+ * Stacking): ein Klick auf „Abbrechen" stellte danach ein Bearbeiten-Modal zu
+ * einem bereits entfernten Eintrag wieder her.
+ *
+ * Die Regel gilt fuer jeden Loeschen-Knopf, nicht fuer eine Allowlist von
+ * Dateien: wer loescht, hat ueber die Eingaben schon entschieden.
+ */
+test('der Loeschen-Knopf im Modal schliesst ohne Verwerfen-Frage', () => {
+  // Verdrahtung eines Loeschen-Knopfes: Selektor mit „delete" plus click-Handler.
+  const DELETE_BUTTON = /querySelector(All)?\([^)]*delete[^)]*\)[^;]*addEventListener\(\s*'click'/i;
+  const WINDOW = 16; // Handler sind kurz; die Grenze faengt unerkannte Enden ab
+  const violations = [];
+
+  for (const file of walkJsFiles('../public/')) {
+    const lines = read(file).split('\n');
+    lines.forEach((line, index) => {
+      if (!DELETE_BUTTON.test(line)) return;
+      // Nur mehrzeilige Handler haben einen Rumpf zum Pruefen; einzeilige
+      // (`=> deleteMed(med));`) delegieren und schliessen selbst nichts.
+      if (!/\{\s*$/.test(line)) return;
+      const indent = line.search(/\S/);
+
+      for (let offset = 1; offset <= WINDOW; offset += 1) {
+        const candidate = lines[index + offset];
+        if (candidate === undefined) break;
+        // Handler-Ende: schliessende Klammer auf Hoehe der Verdrahtung.
+        if (/^\s*\}\)/.test(candidate) && candidate.search(/\S/) <= indent) break;
+        if (!CLOSE_MODAL_CALL.test(candidate) || /force/.test(candidate)) continue;
+        violations.push(`${file}:${index + offset + 1}: ${candidate.trim()}`);
+      }
+    });
+  }
+
+  assert.deepEqual(violations, [],
+    'closeModal() im Loeschen-Pfad braucht { force: true }');
+});
+
+/**
+ * Ein Dialog aus einem offenen Modal heraus verdraengt es nicht.
+ *
+ * `confirmModal` laeuft durch `openModal`, und das raeumt ein offenes Modal mit
+ * `force: true` weg - das Shared-Modal stapelt bewusst nicht. Aus einem
+ * Formular-Modal heraus gefragt heisst das: ausgerechnet der Abbrechen-Pfad -
+ * der einzige Grund, aus dem man ueberhaupt fragt - vernichtet die Eingaben,
+ * ohne den Dirty-Guard auch nur zu streifen.
+ *
+ * Gemessen an acht Stellen (Ausgaben-, Konto-, Belohnungs- und fuenf
+ * Gesundheits-Formulare); zwei weitere Module hatten sich den Verlust mit
+ * Behelfen erkauft (Modal danach neu oeffnen, Inline-Bestaetigung von Hand).
+ * `confirmOverModal` parkt das Formular stattdessen und gibt es unveraendert
+ * zurueck.
+ *
+ * Grenze der Regel: sie sieht nur den direkten Aufruf im Handler. Ruft der
+ * Handler eine Funktion, die ihrerseits fragt (health.js: deleteMed), faellt
+ * das hier nicht auf - eine transitive Aufloesung ueber Modulgrenzen waere
+ * raterei und wuerde bei jeder Umbenennung falsch anschlagen.
+ */
+test('ein Dialog ueber einem offenen Modal nutzt confirmOverModal', () => {
+  const violations = [];
+
+  for (const file of walkJsFiles('../public/')) {
+    if (file.endsWith('components/modal.js')) continue; // definiert beide
+    const lines = read(file).split('\n');
+
+    lines.forEach((line, index) => {
+      if (!/\bconfirmModal\s*\(/.test(line)) return;
+      if (/^\s*(import|\/\/|\*)/.test(line)) return;
+
+      // Vorfahren-Kette rein ueber Einrueckung: die jeweils naechste Zeile
+      // oberhalb mit kleinerer Einrueckung. Steht ein `onSave` darin, laeuft der
+      // Aufruf im Rumpf eines offenen Modals.
+      let level = lines[index].search(/\S/);
+      for (let i = index - 1; i >= 0 && level > 0; i -= 1) {
+        const indent = lines[i].search(/\S/);
+        if (indent === -1 || indent >= level) continue;
+        level = indent;
+        if (!/\bonSave\s*[:({]/.test(lines[i])) continue;
+        violations.push(`${file}:${index + 1}: ${line.trim().slice(0, 80)}`);
+        break;
+      }
+    });
+  }
+
+  assert.deepEqual(violations, [],
+    'confirmModal() aus einem offenen Modal heraus gehoert auf confirmOverModal() umgestellt');
+});
+
+/**
+ * Wer Lucide-Platzhalter einfuegt, materialisiert sie selbst.
+ *
+ * Ausgangsbefund (#668): in der Hauswirtschaft blieben die Bearbeiten- und
+ * Loeschen-Knoepfe einer Aufgabe leer, sobald sie ueber einen Vorschlag angelegt
+ * wurde - erst ein Reload brachte die Icons. `renderTasks()` fuegte
+ * `<i data-lucide>` ein, ohne `createIcons` zu rufen; das tat nur
+ * `renderCurrentTab()`. Beim Tabwechsel ging das gut, bei den fuenf anderen
+ * Aufrufern (Anlegen, Abhaken, Zurueckholen, Loeschen, Bearbeiten-Modal) nicht.
+ * `renderReports()` hatte dieselbe Luecke.
+ *
+ * Die Regel ist deshalb nicht "jede Render-Funktion ruft createIcons", sondern:
+ * hat eine Funktion mehr als einen Aufrufer, darf sie das Materialisieren nicht
+ * an ihn delegieren - der naechste Aufrufer erbt die Annahme nicht.
+ *
+ * Zwei Formen zaehlen als erfuellt: der direkte `createIcons`-Aufruf und ein
+ * datei-lokaler Helfer, der ihn kapselt (rewards.js: `icons(el)`).
+ *
+ * Grenzen der Regel: Element-Fabriken sind ausgenommen - sie befuellen ein
+ * losgeloestes Element und geben es zurueck, materialisieren laesst sich das
+ * erst am eingehaengten Baum (pantry.js: `rowEl`, `cartEl`, `bulkBarEl`).
+ * Funktionen mit genau einem Aufrufer ebenso: dort ist die Zustaendigkeit
+ * eindeutig und nachlesbar (calendar.js: `renderAgendaView`). Beides faellt auf,
+ * sobald ein zweiter Aufrufer dazukommt.
+ *
+ * Aufrufer werden am Namen erkannt, Kommentarzeilen zaehlen deshalb nicht mit -
+ * sonst haette der Satz "pro render() genau einmal erzeugt" (shopping.js) einen
+ * zweiten Aufrufer vorgetaeuscht.
+ */
+test('Render-Funktionen mit mehreren Aufrufern materialisieren ihre Icons selbst', () => {
+  const violations = [];
+  const withoutComments = (body) => body
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n').filter((line) => !/^\s*(\/\/|\*)/.test(line)).join('\n');
+
+  for (const file of [...walkJsFiles('../public/pages/'), ...walkJsFiles('../public/components/')]) {
+    const fns = topLevelFunctions(read(file)).map(([name, body]) => [name, withoutComments(body)]);
+
+    // Helfer, die nur `createIcons` kapseln, ohne selbst Markup einzufuegen.
+    const helpers = fns
+      .filter(([, body]) => /createIcons/.test(body) && !/data-lucide=/.test(body))
+      .map(([name]) => name);
+    const materialises = (body) => /createIcons/.test(body)
+      || helpers.some((name) => new RegExp(`\\b${name}\\s*\\(`).test(body));
+
+    for (const [name, body] of fns) {
+      if (!/\.(insertAdjacentHTML|replaceChildren)\s*\(/.test(body)) continue;
+      if (!/data-lucide=/.test(body)) continue;
+      if (materialises(body)) continue;
+      if (/document\.createElement\(/.test(body) && /\breturn\b/.test(body)) continue; // Element-Fabrik
+
+      const callers = fns.filter(([other, otherBody]) =>
+        other !== name && new RegExp(`\\b${name}\\s*\\(`).test(otherBody));
+      if (callers.length <= 1) continue;
+
+      violations.push(`${file}: ${name}() - ${callers.length} Aufrufer `
+        + `(${callers.map(([caller]) => caller).join(', ')})`);
+    }
+  }
+
+  assert.deepEqual(violations, [],
+    'Diese Funktionen fügen <i data-lucide> ein, überlassen das Materialisieren aber '
+    + `ihren Aufrufern. Ein lucide.createIcons({ el: ... }) gehört ans Ende:\n${violations.join('\n')}`);
+});
+
+test('Jeder Sortable-Nutzer hat einen tastaturbedienbaren Reorder-Pfad', () => {
+  // Die Regel steht im Kopf von public/utils/sortable.js: "Drag ist NIE der
+  // einzige Weg". Sie gilt für JEDEN Aufrufer, nicht für eine Liste bekannter
+  // Dateien - deshalb sucht der Guard die Aufrufer selbst. Ohne ihn wäre die
+  // Zusage eine wandernde Annahme: der nächste makeSortable()-Aufruf erbt sie
+  // aus einem Kommentar, den niemand liest.
+  //
+  // Als Pfad zählt eine Tastenbehandlung, die die Reihenfolge ändert: entweder
+  // Auf/Ab-Bedienelemente (Kategorie-Manager) oder Pfeiltasten an einem
+  // fokussierbaren Griff (Einkaufsliste, #678).
+  const violations = [];
+
+  for (const file of [...walkJsFiles('../public/pages/'), ...walkJsFiles('../public/components/')]) {
+    const source = read(file);
+    if (!/\bmakeSortable\s*\(/.test(source)) continue;
+
+    const hasArrowKeys   = /['"]ArrowUp['"]/.test(source) && /['"]ArrowDown['"]/.test(source);
+    const hasMoveButtons = /data-action="(up|down)"/.test(source)
+      || /'(up|down)'/.test(source) && /addEventListener\(\s*['"]click['"]/.test(source);
+    if (hasArrowKeys || hasMoveButtons) continue;
+
+    violations.push(file);
+  }
+
+  assert.deepEqual(violations, [],
+    'Diese Dateien machen Listen per Drag sortierbar, ohne einen Tastaturpfad daneben. '
+    + 'Drag allein ist für Tastatur- und Screenreader-Bedienung kein Weg (siehe den Kopf '
+    + `von public/utils/sortable.js):\n${violations.join('\n')}`);
+});
+
+test('Die Handsortierung der Einkaufsliste sichert über einen gemeinsamen Pfad', () => {
+  // Zwei Bedienwege (Ziehen, Pfeiltasten) auf EINEN Persistenz-Handler: liefe
+  // die Tastatur über eine eigene Schreibweise, driftete sie beim nächsten Fix
+  // still am Drag-Pfad vorbei - der Fehlerfall (Rollback-Render) ist der Teil,
+  // der dabei zuerst verloren geht.
+  const source = read('../public/pages/shopping.js');
+  const persistCalls = source.match(/persistItemOrder\s*\(/g) ?? [];
+
+  assert.ok(persistCalls.length >= 3,
+    `Erwartet: Definition + Drag-Ende + Tastaturpfad rufen persistItemOrder. Gefunden: ${persistCalls.length}`);
+  assert.match(source, /onEnd:\s*\([^)]*\)\s*=>\s*persistItemOrder\(/,
+    'Das Drag-Ende muss über persistItemOrder sichern.');
+  assert.match(source, /moveItemRow\([^)]*\)/,
+    'Der Tastaturpfad braucht moveItemRow, das seinerseits persistItemOrder aufruft.');
+  assert.match(source, /catch[\s\S]{0,400}updateItemsList\(container\)/,
+    'Der Fehlerfall muss die Liste aus dem unveränderten State neu aufbauen (Rollback).');
+});
+
+test('Der Sortiergriff nimmt sich die Geste aus der Wischbedienung', () => {
+  // Griff und Wischgeste teilen sich dieselbe Zeile. Ohne die Ausnahme im
+  // touchstart liefe das seitliche Wackeln beim Hochziehen als Wischweg mit und
+  // die Karte rutschte unter dem Finger auf "erledigt".
+  const source = read('../public/pages/shopping.js');
+  assert.match(source, /touchstart[\s\S]{0,600}kitchen-row__drag/,
+    'wireSwipeGestures muss den Sortiergriff im touchstart ausnehmen.');
+});
+
+test('Die Einkaufsliste sagt Umsortierungen über eine Live-Region an', () => {
+  // Wie im Kategorie-Manager: das aria-label des Griffs allein ist keine
+  // verlässliche Rückmeldung - ob ein Screenreader die Label-Änderung am
+  // fokussierten Element vorliest, unterscheidet sich von Programm zu Programm.
+  const source = read('../public/pages/shopping.js');
+  assert.match(source, /role="status" aria-live="polite" id="items-reorder-announce"/,
+    'Die Live-Region muss im Listen-Markup stehen.');
+  assert.match(source, /announceItemMove\(container, movedRow\)/,
+    'Der geteilte Persistenz-Pfad muss ansagen - dann gilt es für Drag UND Tastatur.');
+  assert.match(source, /t\('category\.reorderAnnounce'/,
+    'Wiederverwendeter Ansage-Text statt einer zweiten Fassung in 24 Sprachen.');
+});
+
+test('Die Handsortierung schickt je Kategorie nur eine Anfrage gleichzeitig', () => {
+  // Zwei schnell gedrückte Pfeiltasten schickten sonst zwei PATCHes parallel,
+  // und es entschied die Ankunftsreihenfolge beim Server statt die
+  // Bedienreihenfolge: traf der erste zuletzt ein, schrieb er den Zwischenstand
+  // fest, während das DOM den zweiten Zug zeigte. Der Nutzer sah seine
+  // Reihenfolge und bekam beim nächsten Laden eine andere.
+  const source = read('../public/pages/shopping.js');
+
+  assert.match(source, /orderRuns\s*=\s*new Map\(\)/,
+    'Es braucht eine Buchführung über laufende Sicherungen je Kategorie.');
+  assert.match(source, /const running = orderRuns\.get\(category\);\s*\n\s*if \(running\) \{ running\.again = true; return; \}/,
+    'Ein Zug während eines Laufs darf nur eine Nachfolge vormerken, keine zweite Anfrage starten.');
+  assert.match(source, /while \(run\.again/,
+    'Nach dem Lauf muss eine vorgemerkte Nachfolge abgearbeitet werden.');
+  assert.match(source, /orderRuns\.delete\(category\)/,
+    'Der Eintrag muss auch im Fehlerfall verschwinden (finally), sonst blockiert die Kategorie dauerhaft.');
+
+  // Die Reihenfolge wird IM Lauf aus dem DOM gelesen, nicht beim Einreihen
+  // eingefroren - nur so trägt eine Nachfolge den Endstand statt eines
+  // Zwischenstands, und N Züge kommen mit zwei Anfragen aus.
+  assert.match(source, /async function sendItemOrder\(groupEl, container, listId\)[\s\S]{0,600}querySelectorAll\(':scope > \.swipe-row'\)/,
+    'sendItemOrder muss die Reihenfolge beim Senden frisch aus dem DOM lesen.');
+});
+
+test('Die Handsortierung bindet ihre Anfrage an die Liste, in der gezogen wurde', () => {
+  // Wechselt der Nutzer die Liste, während eine Nachfolge aussteht, hält das
+  // Gruppen-Element noch die abgehängten Zeilen der alten Liste. Deren IDs
+  // gegen die inzwischen aktive Liste zu schicken, quittiert die Route zu Recht
+  // mit 400 - und die Antwort dürfte den State der neuen Liste nie überschreiben.
+  const source = read('../public/pages/shopping.js');
+
+  assert.match(source, /const listId = state\.activeListId;/,
+    'Die Listen-ID muss beim Einreihen feststehen, nicht beim Senden gelesen werden.');
+  assert.match(source, /api\.patch\(`\/shopping\/\$\{listId\}\/items\/reorder`/,
+    'Die Anfrage muss an die festgehaltene Liste gehen, nicht an state.activeListId.');
+  assert.match(source, /if \(listId === state\.activeListId\) state\.items =/,
+    'Der State darf nur nachziehen, solange dieselbe Liste offen ist.');
+  assert.match(source, /if \(listId !== state\.activeListId\) return false;/,
+    'Ein Fehler einer nicht mehr offenen Liste darf weder tosten noch die sichtbare Liste neu bauen.');
 });

@@ -10,7 +10,7 @@ node tools/installer/install-server.js
 # Open http://localhost:8090
 ```
 
-Requires Node.js 18+ on the host. The browser-based wizard is fully localized (23 languages, auto-detected from your browser), detects your container engine (Docker or Podman) first, then configures your `.env` — including optional reverse-proxy/HTTPS, Single Sign-On (OIDC), and automatic backups — starts the container, and creates your admin account. The engine still runs the app itself.
+Requires Node.js 18+ on the host. The browser-based wizard is fully localized (24 languages, auto-detected from your browser), detects your container engine (Docker or Podman) first, then configures your `.env` — including optional reverse-proxy/HTTPS, Single Sign-On (OIDC), and automatic backups — starts the container, and creates your admin account. The engine still runs the app itself.
 
 ### Option B — CLI Installer (Linux / macOS)
 
@@ -19,11 +19,16 @@ git clone https://github.com/ulsklyc/yuvomi.git && cd yuvomi
 bash install.sh
 ```
 
-The script checks prerequisites, generates security keys, configures optional integrations, starts the container (Docker or Podman — auto-detected), and creates your admin account. Like the web installer, it is fully localized in 23 languages and auto-detects yours from the shell environment (`LANG`/`LC_ALL`).
+The script checks prerequisites, generates security keys, asks for the base URL your household will use, configures optional integrations (weather via Open-Meteo coordinates, calendars, document storage), starts the container (Docker or Podman — auto-detected), and creates your admin account. Like the web installer, it is fully localized in 24 languages and auto-detects yours from the shell environment (`LANG`/`LC_ALL`).
 
-Running it again on an existing installation is safe: keys already present in your `.env` are kept instead of regenerated, so the database stays readable. Remove a key from `.env` if you deliberately want a new one.
+Running it again on an existing installation is safe, in two ways:
 
-Force a specific language with `--lang` (one of `de en es fr it sv el ru tr zh ja ar hi pt uk pl nl cs vi hu ko id fa`):
+- **Security keys are never regenerated.** `SESSION_SECRET` and `DB_ENCRYPTION_KEY` already present in your `.env` are kept, so the database stays readable. Remove a key from `.env` if you deliberately want a new one.
+- **Settings the script does not ask about are carried over.** Anything you added by hand or through the web installer — `EMAIL_SMTP_*`, `OIDC_*`, `WEBDAV_BACKUP_*`, `VAPID_SUBJECT`, `LOG_LEVEL` and the rest — is copied from the previous `.env` into the new one, and the script reports how many entries it kept. Only the values the dialog itself asks about are replaced by your answers. The previous file is still backed up to `.env.bak-<timestamp>` first.
+
+> **Base URL.** The script asks for the absolute origin your household will open (default `http://<host>:<port>`) and writes it as `BASE_URL`. Behind a reverse proxy, enter the public address there — for example `https://yuvomi.example.com`. Without it the server sends no password-reset or invitation emails at all, because it deliberately does not trust the request's `Host` header.
+
+Force a specific language with `--lang` (one of `de en es fr it sv el ru tr zh ja ar hi pt uk pl nl cs vi hu ko id fa fil`):
 
 ```bash
 bash install.sh --lang de
@@ -71,6 +76,7 @@ Complete setup instructions for Yuvomi - from Docker installation to your first 
 - [Step-by-Step Installation](#step-by-step-installation)
 - [Environment Variables](#environment-variables)
 - [HTTPS / Reverse Proxy (Nginx)](#https--reverse-proxy-nginx)
+- [Podman & systemd Autostart (rootless)](#podman--systemd-autostart-rootless)
 - [Updates](#updates)
 - [Backup & Restore](#backup--restore)
 - [Troubleshooting](#troubleshooting)
@@ -142,6 +148,7 @@ git --version              # git version 2.x.x
 
 - **RAM**: 256 MB minimum (the container is lightweight)
 - **Disk**: ~500 MB for the Docker image, plus space for your database
+- **CPU**: `amd64` and `arm64` images are published (x86 servers, Raspberry Pi 4/5, Apple Silicon, most NAS devices)
 
 ---
 
@@ -170,7 +177,7 @@ node tools/installer/install-server.js
 
 #### 3. Open the Wizard
 
-Open your browser and navigate to **http://localhost:8090**. The wizard detects your browser language (23 languages supported), verifies that a container engine is available (Docker with Compose v2, or Podman with `podman compose` / `podman-compose`), and reports any existing `.env` file or running container before you start. It then guides you through:
+Open your browser and navigate to **http://localhost:8090**. The wizard detects your browser language (24 languages supported), verifies that a container engine is available (Docker with Compose v2, or Podman with `podman compose` / `podman-compose`), and reports any existing `.env` file or running container before you start. It then guides you through:
 
 - Basics — timezone (`TZ`) and HTTP host port (`OIKOS_HTTP_PORT`)
 - Security key generation (`SESSION_SECRET`, `DB_ENCRYPTION_KEY`) — on a re-run, keys already present in your `.env` are kept rather than regenerated, so running the wizard again on a live installation cannot lock you out of your encrypted database
@@ -226,6 +233,12 @@ docker compose up -d
 
 Docker pulls `ghcr.io/ulsklyc/yuvomi:latest` automatically. No build step, no Node.js installation needed.
 
+> **Pinning a version.** Every release is also published under immutable tags:
+> `1.87.0` (exact version), `1.87` (latest patch of that minor), plus a moving `main`
+> tag for the current development state. To pin production to a known-good release,
+> set `image: ghcr.io/ulsklyc/yuvomi:1.87.0` in your compose file and bump it
+> deliberately; `latest` always points at the newest release.
+
 Continue with [Step 4 — Verify](#4-verify-the-container-is-running).
 
 ---
@@ -269,9 +282,9 @@ docker compose logs -f
 You should see output like:
 
 ```
-yuvomi  | [Yuvomi] Server läuft auf Port 3000
-yuvomi  | [Yuvomi] Umgebung: production
-yuvomi  | [Sync] Auto-Sync alle 15 Minuten aktiv.
+yuvomi  | [Yuvomi] Server running on port 3000 | Version 1.87.0
+yuvomi  | [Yuvomi] Environment: production
+yuvomi  | [Sync] Auto-sync active every 15 minutes.
 ```
 
 Press `Ctrl+C` to stop following the logs (the container keeps running).
@@ -302,7 +315,7 @@ Open your browser and navigate to:
 http://localhost:3000
 ```
 
-Log in with the admin credentials you just created. You can add family members from the **Settings** page.
+Log in with the admin credentials you just created. You can add family members from the **Settings** page: either invite them with a link so they choose their own password, or create the account directly and hand over the credentials yourself.
 
 ---
 
@@ -385,10 +398,10 @@ All configuration happens in the `.env` file. The container reads these values o
 | `PORT` | Port the Express server listens on **inside the container** (rarely changed) | `3000` | No |
 | `OIKOS_HTTP_PORT` | Host port that the compose file maps to the container's port 3000. Change this to expose Yuvomi on a different host port; the app inside the container always listens on 3000. | `3000` | No |
 | `OIKOS_HTTP_BIND` | Host bind address for the published port (`podman-compose.yml` only). Set to `127.0.0.1` for rootless Podman behind a reverse proxy on the same host. | `0.0.0.0` | No |
-| `TZ` | Container timezone (e.g. `Europe/Berlin`). Affects timestamps, the automated-backup schedule, and serves as the fallback zone for events pushed to Google Calendar when the target calendar reports none. | `UTC` | No |
+| `TZ` | Container timezone (e.g. `Europe/Berlin`). Affects timestamps, the automated-backup schedule, and serves as the household zone wherever a time carries none of its own: events pushed to Google Calendar when the target calendar reports no zone, and the due times of CalDAV reminders synced into Tasks. | `UTC` | No |
 | `NODE_ENV` | Runtime environment | `production` | No |
 | `LOG_LEVEL` | Lowest severity written to the container log (`debug`, `info`, `warn`, `error`). Set to `debug` to see the per-run detail of the calendar, contact and holiday sync, which stays quiet at `info` when a run has nothing to do. | `info` | No |
-| `TRUST_PROXY` | Number of reverse-proxy hops to trust, or a subnet string (e.g. `1`, `172.16.0.0/12`, `loopback`). Set to `1` when running behind a single Traefik/Nginx hop so `req.ip` returns the real client IP. Numeric values are treated as a hop count; subnet strings and named values (`loopback`, `linklocal`, `uniquelocal`) work as expected. | `false` | No |
+| `TRUST_PROXY` | Number of reverse-proxy hops to trust, or a subnet string (e.g. `1`, `172.16.0.0/12`, `loopback`). The default already trusts a single hop, so `req.ip` returns the real client IP behind one Caddy/Nginx/Traefik proxy without any configuration. Set to `loopback` for direct, proxy-less deployments, or to a subnet/higher hop count behind multiple proxy layers. Numeric values are treated as a hop count; named values (`loopback`, `linklocal`, `uniquelocal`) work as expected. | `1` | No |
 
 ### Security
 
@@ -398,7 +411,6 @@ All configuration happens in the `.env` file. The container reads these values o
 | `SESSION_SECURE` | Set to `true` when running behind an HTTPS reverse proxy (Caddy, Nginx, Traefik). Leave unset for direct HTTP access (e.g. TrueNAS, bare Docker). | `false` | No |
 | `RATE_LIMIT_WINDOW_MS` | Time window for rate limiting (ms) | `60000` | No |
 | `RATE_LIMIT_MAX_ATTEMPTS` | Max login attempts per window | `5` | No |
-| `RATE_LIMIT_BLOCK_DURATION_MS` | Block duration after exceeding limit (ms) | `900000` | No |
 | `ENABLE_API_DOCS` | API documentation (`/docs`, `/openapi.json`) is admin-only and hidden entirely in production. Set to `true` to expose it to signed-in admins in production too. | `false` (hidden) | No |
 | `MCP_INTERNAL_BASE_URL` | Base URL the built-in MCP endpoint (`/mcp`) uses when its `call_api_operation` bridge calls the REST API back over loopback. Only needed for non-standard bind addresses. | `BASE_URL` or `http://127.0.0.1:<PORT>` | No |
 
@@ -424,7 +436,7 @@ accepted for trusted internal networks such as a private LAN or container networ
 |----------|-------------|---------|----------|
 | `VAPID_PUBLIC_KEY` | VAPID public key. Auto-generated on first use and stored in the database if unset. | auto | No |
 | `VAPID_PRIVATE_KEY` | VAPID private key. Set together with the public key to pin a fixed pair across redeployments. | auto | No |
-| `VAPID_SUBJECT` | Contact URI (`mailto:` or `https:`) sent to push services. | `mailto:admin@localhost` | No |
+| `VAPID_SUBJECT` | Contact URI (`mailto:` address or `https:` origin) sent to push services. Must be routable — Apple rejects a `localhost`, `.local` or otherwise unreachable subject with `403 BadJwtToken`, which disables push on iOS while Android keeps working. Falls back to the sender address from Settings → Administration → Email, then to `BASE_URL`, then to a placeholder. | derived, see description | No |
 
 Generate a fixed key pair (optional):
 
@@ -449,11 +461,16 @@ Apple applies extra restrictions that do not exist on Android or desktop browser
   mode must not be filtering the app.
 - **The server needs outbound access to `web.push.apple.com`.** In LAN-only or egress-filtered
   deployments the send fails server-side.
+- **The VAPID subject must be routable.** Apple validates the contact URI in the signed token and
+  answers `403 BadJwtToken` when it cannot be reached, so push fails on iOS while Android continues
+  to work. Yuvomi derives a usable value from the SMTP sender address or `BASE_URL`; set
+  [`VAPID_SUBJECT`](#web-push-optional) explicitly if neither is configured.
 
 If a test notification does not arrive, the server log is the authoritative source. Successful
 sends are silent; failures are logged as `[Push] Push send failed (host=... status=... body=...)`,
 where `host` identifies the push service (`web.push.apple.com` for iOS) and `status`/`body` carry
-that service's rejection reason.
+that service's rejection reason. A rejected token additionally logs `sub=...` plus a line naming
+the subject as the likely cause.
 
 A subscription the server no longer knows about (removed after the push service reported it gone,
 or lost in a database restore) repairs itself: the app re-registers an existing subscription on
@@ -463,7 +480,9 @@ every start, and the test button re-registers and retries once before reporting 
 
 Configuring an outgoing SMTP server enables the self-service **"Forgot password"** flow on the
 login page. Without it, only an admin can reset another user's password. Can also be configured
-in Settings → Administration → Email (non-empty env values here override the database).
+in Settings → Administration → Email. Precedence is per field, like WebDAV document storage
+below: every non-empty environment value overrides only its corresponding database value and
+makes exactly that field read-only in the settings UI; empty values fall back to the database.
 
 | Variable | Description | Default | Required |
 |----------|-------------|---------|----------|
@@ -474,7 +493,7 @@ in Settings → Administration → Email (non-empty env values here override the
 | `EMAIL_SMTP_PASS` | SMTP auth password. | - | No |
 | `EMAIL_FROM_ADDRESS` | Sender email address. | - | No |
 | `EMAIL_FROM_NAME` | Sender display name. | `Yuvomi` | No |
-| `BASE_URL` | Absolute origin used to build password-reset links and calendar export-feed URLs, e.g. `https://yuvomi.example.com`. **Required for reset emails to be sent** — the request `Host` header is never trusted as a fallback, to prevent reset-link poisoning. The export feed falls back to the request's protocol/host when unset. | - | No* |
+| `BASE_URL` | Absolute origin used to build password-reset links, invitation links in emails, and calendar export-feed URLs, e.g. `https://yuvomi.example.com`. **Required for password-reset and invitation emails to be sent** — the request `Host` header is never trusted as a fallback, to prevent reset-link poisoning. The invite link shown in the admin UI works without it (it is built from the browser's origin); the export feed falls back to the request's protocol/host when unset. | - | No* |
 
 \* Not required to start Yuvomi. Without it (or without SMTP configured) the self-service reset
 cannot deliver a mail, so the login page hides the "Forgot password" link entirely rather than
@@ -492,8 +511,9 @@ optional `DB_ENCRYPTION_KEY`.
 | Variable | Description | Default | Required |
 |----------|-------------|---------|----------|
 | `DB_PATH` | Path to the SQLite database file inside the container | `/data/yuvomi.db` | No |
-| `DB_ENCRYPTION_KEY` | Encryption key for SQLCipher AES-256. **Change this!** | - | **Yes** |
+| `DB_ENCRYPTION_KEY` | SQLCipher AES-256 key for encryption at rest. Leave it empty and the database stays unencrypted. Once set there is no way back: it cannot be recovered and cannot be changed on an existing database. | - | No, but strongly recommended |
 | `DATA_DIR` | Host directory mounted at `/data` inside the container (set in `.env` or `docker-compose.yml`). | `./data` | No |
+| `MODULES_DIR` | Host directory mounted at `/app/modules` inside the container - the drop-in folder for [third-party modules](../MODULES.md). Compose-only, like `DATA_DIR`. | `./modules` | No |
 | `BACKUP_DIR` | In `.env`/`docker-compose.yml`: the **host** directory mounted at `/backups`. Inside the container the app reads the same name as the **container** path it writes to — the compose files pin it to `/backups`, and the image defaults to `/backups` as well. Only override it inside the container if you mount your backup volume somewhere else. | `./backups` (host) / `/backups` (container) | No |
 
 Generate a secure `DB_ENCRYPTION_KEY`:
@@ -518,7 +538,8 @@ Mount a host directory to the container path and enable the backend:
 ```yaml
 # docker-compose.yml
 volumes:
-  - ${DOCUMENT_STORAGE_LOCAL_DIR:-./documents}:/documents
+  # Both ends come from the .env, so changing the container path moves the mount with it
+  - ${DOCUMENT_STORAGE_LOCAL_DIR:-./documents}:${DOCUMENT_STORAGE_LOCAL_PATH:-/documents}
 environment:
   - DOCUMENT_STORAGE_LOCAL_ENABLED=true
   - DOCUMENT_STORAGE_LOCAL_PATH=/documents
@@ -528,7 +549,7 @@ environment:
 |----------|-------------|---------|----------|
 | `DOCUMENT_STORAGE_LOCAL_ENABLED` | Write new document files to the mounted folder (`true`/`false`) | `false` | No |
 | `DOCUMENT_STORAGE_LOCAL_PATH` | Container path for document files | `/documents` | No |
-| `DOCUMENT_STORAGE_LOCAL_DIR` | Compose-only: host folder mounted to `/documents` | `./documents` | No |
+| `DOCUMENT_STORAGE_LOCAL_DIR` | Compose-only: host folder mounted to `DOCUMENT_STORAGE_LOCAL_PATH` | `./documents` | No |
 
 > Ensure the mounted folder is writable by the container (adjust ownership/permissions as needed).
 > Files live on the host volume, so include that folder in your host-level backups — database
@@ -620,7 +641,7 @@ The weather widget defaults to **Open-Meteo** — free, ECMWF-backed, and requir
 | `OPENWEATHER_API_KEY` | API key from [openweathermap.org](https://openweathermap.org/api) | - | No |
 | `OPENWEATHER_CITY` | City name for weather display | `Berlin` | No |
 | `OPENWEATHER_UNITS` | Unit system (`metric` or `imperial`) | `metric` | No |
-| `OPENWEATHER_LANG` | Language for weather descriptions | `de` | No |
+| `OPENWEATHER_LANG` | Language for weather descriptions | `en` | No |
 
 ### Calendar Subscriptions — ICS Feeds (Optional)
 
@@ -693,6 +714,8 @@ Enable single sign-on via any OpenID Connect provider (Authentik, Keycloak, Goog
 
 When all four OIDC variables are set, a **"Sign in with SSO"** button appears on the login page. The flow uses Authorization Code + PKCE (S256) with a nonce. On first login, the user is matched by their OIDC `sub`. If no match exists, an existing local account is linked automatically **only when the provider reports a verified email (`email_verified: true`) and exactly one local account holds that email address**; otherwise a new account is provisioned. Unverified or ambiguous emails never take over an existing account. If your provider omits the `email_verified` claim, set `OIDC_TRUST_EMAIL_WITHOUT_VERIFIED_CLAIM=true` to enable linking.
 
+**Username of a newly provisioned account.** The name is taken from the first claim that yields something usable: `preferred_username`, then the non-standard `username` claim (Synology DSM SSO sends the plain account name there, where `sub` still carries the directory part), then `sub`. The email address is deliberately not a candidate: a household often shares one address across several members, so it identifies nobody, and its domain part only makes the name unwieldy. Whichever claim wins is reduced to the format every username in Yuvomi follows (`a-z A-Z 0-9 . _ -`, 3 to 64 characters), with accents transliterated and anything else turned into a hyphen. Admins can rename the account afterwards under **Settings → Administration → Family**; sign-in keeps working either way, because the identity hangs on `sub`, not on the name.
+
 ### Subscription Currency Conversion (Optional)
 
 Budget → Subscriptions works fully without external services. Fixer can optionally provide live
@@ -716,6 +739,7 @@ Built-in cron-based database backup (default: 2 AM daily, keep last 7 copies). S
 | `BACKUP_SCHEDULE` | Cron expression for backup schedule | `0 2 * * *` | No |
 | `BACKUP_DIR` | Directory (inside container) where backup files are written. Must be a writable, mounted path, otherwise backups fail with `EACCES`. | `/backups` (container), `./backups` (bare metal) | No |
 | `BACKUP_KEEP` | Number of most-recent backup files to retain | `7` | No |
+| `BACKUP_UPLOAD_LIMIT` | Maximum size of a backup file uploaded for restore through the admin UI (Express body-limit syntax). Raise it when restoring a database larger than the default. | `100mb` | No |
 
 **WebDAV backup target (optional):** After each local backup, Yuvomi can automatically upload the file to any WebDAV-compatible server (Nextcloud, ownCloud, Hetzner Storage Box, Infomaniak kDrive, etc.). Configure in **Settings → Administration → Backup and restore → WebDAV Backup Target**, or via environment variables (env vars take precedence over the UI):
 
@@ -725,7 +749,7 @@ Built-in cron-based database backup (default: 2 AM daily, keep last 7 copies). S
 | `WEBDAV_BACKUP_URL` | WebDAV server URL (e.g. `https://cloud.example.com/remote.php/dav/files/user/`) | — | No |
 | `WEBDAV_BACKUP_USERNAME` | WebDAV username | — | No |
 | `WEBDAV_BACKUP_PASSWORD` | WebDAV password | — | No |
-| `WEBDAV_BACKUP_PATH` | Remote directory path for backup files | `/oikos/backups/` | No |
+| `WEBDAV_BACKUP_PATH` | Remote directory path for backup files | `/yuvomi/backups/` | No |
 | `WEBDAV_BACKUP_KEEP` | Number of remote backup files to keep | `7` | No |
 
 ---
@@ -746,17 +770,14 @@ sudo apt install nginx
 
 ### Configure Nginx
 
-Yuvomi ships with an example configuration. Copy it to Nginx:
+Yuvomi ships with an example configuration. Copy it and replace `deine-domain.de` with
+your actual domain — but do **not** enable the site yet: its HTTPS block references a
+certificate that does not exist until the next step, and Nginx refuses to load an
+`ssl` listener without one.
 
 ```bash
 sudo cp nginx.conf.example /etc/nginx/sites-available/yuvomi
-sudo ln -s /etc/nginx/sites-available/yuvomi /etc/nginx/sites-enabled/
-```
-
-Edit the file and replace `deine-domain.de` with your actual domain:
-
-```bash
-sudo nano /etc/nginx/sites-available/yuvomi
+sudo nano /etc/nginx/sites-available/yuvomi   # replace deine-domain.de
 ```
 
 The configuration includes:
@@ -766,16 +787,30 @@ The configuration includes:
 - Security headers (HSTS, X-Frame-Options, etc.)
 - Static asset caching
 
+> **Using Nginx Proxy Manager instead?** Paste the file's contents into the proxy host's
+> **Advanced** tab and you are done — NPM obtains and manages the certificate itself, and
+> the commented `ssl_certificate` lines stay commented.
+
 ### Enable HTTPS with Let's Encrypt
 
-Install Certbot and obtain a free SSL certificate:
+Obtain the certificate **first**, then activate the site. The standalone method answers
+the challenge on port 80 itself, so it works before any site is configured (the hooks
+stop and restart Nginx around it, and are remembered for automatic renewals):
 
 ```bash
 sudo apt install certbot python3-certbot-nginx
-sudo certbot --nginx -d <YOUR-DOMAIN>
+sudo certbot certonly --standalone -d <YOUR-DOMAIN> \
+  --pre-hook "systemctl stop nginx" --post-hook "systemctl start nginx"
 ```
 
-Certbot automatically modifies the Nginx configuration to include your certificates.
+Now point the site at the new certificate and enable it: uncomment the two
+`ssl_certificate` lines in `/etc/nginx/sites-available/yuvomi`, then link and reload:
+
+```bash
+sudo nano /etc/nginx/sites-available/yuvomi   # uncomment ssl_certificate + ssl_certificate_key
+sudo ln -s /etc/nginx/sites-available/yuvomi /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+```
 
 Verify auto-renewal is active:
 
@@ -792,13 +827,26 @@ SESSION_SECURE=true
 TRUST_PROXY=1
 ```
 
-> The web installer's **Advanced** step and `install.sh` set both values for you when you choose a reverse-proxy deployment.
+> Both installers set these for you. The web installer's **Advanced** step asks for your deployment type; the CLI installer derives them from the scheme of the base URL you enter — `https://` means proxy (`SESSION_SECURE=true`, `TRUST_PROXY=1`), anything else means direct access (`SESSION_SECURE=false`, `TRUST_PROXY=loopback`). A value already present in your `.env` always wins, so a hand-tuned `TRUST_PROXY=2` survives a re-run.
 
 Then restart the container so the new values take effect:
 
 ```bash
 docker compose up -d
 ```
+
+### Alternative: Caddy
+
+If you prefer Caddy, certificates are obtained and renewed automatically — the whole
+reverse proxy is two lines in a `Caddyfile`:
+
+```
+yuvomi.example.com {
+    reverse_proxy 127.0.0.1:3000
+}
+```
+
+Set `SESSION_SECURE=true` and `TRUST_PROXY=1` in `.env` as above, then reload Caddy.
 
 ---
 
@@ -810,7 +858,7 @@ ships a ready-made unit at `tools/quadlet/oikos.container`.
 
 ```bash
 # 1. Create the data folders and drop your generated .env in place
-mkdir -p ~/.local/share/oikos/{data,backups,modules} ~/.config/oikos
+mkdir -p ~/.local/share/oikos/{data,backups,modules,documents} ~/.config/oikos
 cp /path/to/oikos/.env ~/.config/oikos/.env
 
 # 2. Install the Quadlet unit
@@ -1027,7 +1075,7 @@ podman compose -f podman-compose.yml up -d
 To relabel existing host folders manually:
 
 ```bash
-chcon -Rt container_file_t ./data ./backups ./modules
+chcon -Rt container_file_t ./data ./backups ./modules ./documents
 ```
 
 </details>
@@ -1060,11 +1108,14 @@ chcon -Rt container_file_t ./data ./backups ./modules
 
 If the logs show SQLCipher errors, the `DB_ENCRYPTION_KEY` in your `.env` file is either missing or does not match the key used when the database was created.
 
-If this is a fresh install, delete the volume and start over:
+If this is a fresh install, remove the database folder and start over. The compose file
+uses bind mounts, so `docker compose down -v` does **not** delete anything here — the
+encrypted database survives it and the error persists. Remove the host folder itself:
 
 ```bash
-docker compose down -v
-docker compose up -d --build
+docker compose down
+rm -rf ./data   # your DATA_DIR, if you changed it — this permanently deletes the database
+docker compose up -d
 ```
 
 If you have existing data, you need the original encryption key. There is no way to recover data without it.
@@ -1098,8 +1149,61 @@ This means Nginx cannot reach the Docker container. Check:
 
 3. Is the container listening on the expected port?
    ```bash
-   docker compose logs | grep "Server läuft"
+   docker compose logs | grep "Server running"
    ```
+
+</details>
+
+<details>
+<summary>"Something went wrong" right after updating, mentioning a module export</summary>
+
+A tab that was left open while the container was updated can end up mixing versions: the
+browser keeps one module map per page, so a freshly loaded part of the new version binds
+against parts of the old one that are still in memory. The error names the mismatch, for
+example `The requested module '/utils/empty-state.js' does not provide an export named
+'mountLoadError'`.
+
+Reloading the page clears it - the state cannot survive a reload:
+
+- Desktop: <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> (<kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> on macOS)
+- Installed PWA: close and reopen the app
+
+Since v1.64.1 the app prevents this by itself: once it learns that a new version is
+available, it stops loading further parts of the old page and reloads instead. Updating
+**to** that version can still show the error once, because the safeguard only ships with
+the version it protects. It does not indicate a damaged database - unrelated errors in
+the container log, such as SQLite messages, are worth checking separately.
+
+</details>
+
+<details>
+<summary>CalDAV tasks are not syncing</summary>
+
+Adding a CalDAV account only sets up **calendars**. Task lists live on their own page under
+**Settings → Synchronization → Reminder sync**, and each list has to be switched on there and
+mapped to Tasks or Shopping before anything is mirrored. That step is deliberate: enabling every
+list by default would pull a server's existing reminders into your task board unannounced.
+
+After switching a list on, either press "Sync reminders" or wait for the next scheduled run
+(`SYNC_INTERVAL_MINUTES`).
+
+If the page shows no lists at all, the server is not advertising any collection that accepts
+`VTODO`. Create a task list in your CalDAV server (in Radicale, Nextcloud or your client of
+choice), then press "Refresh reminder lists".
+
+Before v1.75.7 the page only looked for lists when that refresh button was pressed, so a freshly
+added account showed an empty state even when the server was serving task lists. Upgrading fixes
+this without any action on your part. A second bug, fixed in v1.68.1, made the fetch ask for
+appointments on task lists, which left the mirror empty against Radicale and Nextcloud.
+
+**iCloud is the exception: Apple Reminders is no longer a CalDAV source.** With iOS 13 and
+macOS 10.15 the upgraded Reminders app moved its lists into a private store that no CalDAV client
+can read. Over CalDAV, iCloud still serves the task collections that existed *before* that switch -
+usually none, sometimes a single orphaned list that the Reminders app itself no longer shows. So an
+iCloud account whose calendars sync perfectly can still offer no usable reminder list, and no
+setting on either side changes that. The reminders page states this on every iCloud
+account. If you want your Apple tasks in Yuvomi, keep them in a CalDAV-backed list (Nextcloud,
+Radicale, Baikal) and subscribe to it from the Reminders app's "Other" account rather than iCloud.
 
 </details>
 
@@ -1107,16 +1211,28 @@ This means Nginx cannot reach the Docker container. Check:
 
 ## Uninstall
 
-Remove the container, volumes, and all data:
+Stop and remove the container:
 
 ```bash
-docker compose down -v
+docker compose down
 ```
 
-Remove the repository:
+The compose file uses bind mounts, so `docker compose down -v` does **not** delete your
+data — the folders stay on the host. To remove all data, delete them yourself:
+
+```bash
+rm -rf ./data ./backups ./modules ./documents
+```
+
+If you cloned the repository (Options A/C), those folders live inside it, so removing the
+repository removes everything at once. If you installed with only the downloaded compose
+file (Option B), the folders sit next to that file — the `rm` above is the step that
+actually deletes your data:
 
 ```bash
 cd .. && rm -rf yuvomi
 ```
 
-> **Warning**: `docker compose down -v` permanently deletes all data including the database. Create a backup first if needed.
+> **Warning**: Deleting these folders permanently removes all data including the database.
+> Create a backup first if needed. Only the Portainer stack uses named volumes; there
+> `docker compose down -v` (or deleting the stack incl. volumes) removes the data.

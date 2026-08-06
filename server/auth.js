@@ -17,9 +17,11 @@ import * as oidcClient from 'openid-client';
 import { isOidcEnabled, getConfig as getOidcConfig } from './services/oidc.js';
 import { emailService as defaultEmailService } from './services/email.js';
 import { passwordResetService as defaultResetService } from './services/password-reset.js';
+import { inviteService as defaultInviteService } from './services/invites.js';
 import { parseScopes, serializeScopes, normalizeScopes } from './scopes.js';
 import { hashPassword, normalizePassword, verifyPassword } from './utils/password.js';
 import { resolvePermissions, buildSessionModuleAccess, clientPermissions } from './permissions.js';
+import { requireAdmin } from './middleware/require-admin.js';
 
 const log = createLogger('Auth');
 const router = express.Router();
@@ -483,12 +485,6 @@ function requireAuth(req, res, next) {
 /**
  * Prüft ob der authentifizierte User Admin-Rolle hat.
  */
-function requireAdmin(req, res, next) {
-  if (req.authRole === 'admin') {
-    return next();
-  }
-  res.status(403).json({ error: 'Permission denied.', code: 403 });
-}
 
 /**
  * Richtet eine neue Session nach erfolgter Authentifizierung ein.
@@ -518,6 +514,29 @@ function setupAuthSession(req, res, user) {
 
 // --------------------------------------------------------
 /**
+ * Bringt einen Claim-Wert auf das app-weite Username-Format
+ * `[a-zA-Z0-9._-]{3,64}` (siehe die Prüfungen in /setup, /invites und den
+ * User-Routen). Fremde Zeichen (`@` aus Synology-`sub`s, Leerzeichen, Umlaute)
+ * werden zu Bindestrichen, Diakritika vorher transliteriert. Ergibt der Wert
+ * weniger als drei verwertbare Zeichen, liefert die Funktion `null`, damit der
+ * nächste Kandidat greift.
+ *
+ * @param {unknown} raw
+ * @returns {string|null}
+ */
+function sanitizeOidcUsername(raw) {
+  if (typeof raw !== 'string') return null;
+  const cleaned = raw
+    .normalize('NFKD')
+    .replace(/\p{Diacritic}/gu, '')
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/-{2,}/g, '-')
+    .slice(0, 64)
+    .replace(/^[.-]+|[.-]+$/g, '');
+  return cleaned.length >= 3 ? cleaned : null;
+}
+
+/**
  * Findet oder erstellt einen User anhand der (validierten) OIDC-Claims.
  *
  * Identität primär über den (kryptografisch validierten) `sub`. Existiert kein
@@ -533,11 +552,15 @@ function setupAuthSession(req, res, user) {
  * Kontrolle steht und keine unverifizierten E-Mails zulässt.
  *
  * @param {import('better-sqlite3-multiple-ciphers').Database} database
- * @param {{ sub: string, email?: string, email_verified?: boolean, name?: string, preferred_username?: string }} claims
+ * @param {{ sub: string, iss?: string, email?: string, email_verified?: boolean, name?: string, preferred_username?: string, username?: string }} claims
  * @returns {{ id: number, role: string, [key: string]: any }}
  */
 export function findOrCreateOidcUser(database, claims) {
-  const { sub, email, email_verified, name, preferred_username } = claims;
+  const { sub, iss, email, email_verified, name, preferred_username, username: usernameClaim } = claims;
+
+  // Der Issuer aus dem validierten ID-Token kennt sich selbst am besten; OIDC_ISSUER
+  // ist nur der konfigurierte Einstiegspunkt und kann davon abweichen (CNAME o. Ä.).
+  const provider = iss || process.env.OIDC_ISSUER || null;
 
   // 1. Bestehenden OIDC-Nutzer über den eindeutigen sub finden
   const existing = database.prepare('SELECT * FROM users WHERE oidc_sub = ?').get(sub);
@@ -563,27 +586,34 @@ export function findOrCreateOidcUser(database, claims) {
     if (matches.length === 1) {
       database.prepare(
         'UPDATE users SET oidc_sub = ?, oidc_provider = ? WHERE id = ?',
-      ).run(sub, process.env.OIDC_ISSUER ?? null, matches[0].id);
+      ).run(sub, provider, matches[0].id);
       return database.prepare('SELECT * FROM users WHERE id = ?').get(matches[0].id);
     }
   }
 
-  // 3. Eindeutigen username ableiten (Kollision mit bestehenden Usernamen vermeiden)
-  const base = (preferred_username || email || `oidc-${sub}`).slice(0, 64);
+  // 3. Eindeutigen username ableiten (Kollision mit bestehenden Usernamen vermeiden).
+  //    Reihenfolge: preferred_username (Standard-Claim) → username (non-standard,
+  //    u. a. Synology DSM SSO) → sub. Die E-Mail ist bewusst KEIN Kandidat (#653):
+  //    sie ist bei geteilten Familien-Adressen nicht eindeutig, vermischt Kontaktdaten
+  //    mit dem Identifikator und trägt den Domain-Teil unnötig in den Namen.
+  const base = sanitizeOidcUsername(preferred_username)
+    ?? sanitizeOidcUsername(usernameClaim)
+    ?? sanitizeOidcUsername(sub)
+    ?? 'oidc-user';
   let username = base;
   for (let n = 1; database.prepare('SELECT 1 FROM users WHERE username = ?').get(username); n++) {
     const suffix = `-${n}`;
     username = base.slice(0, 64 - suffix.length) + suffix;
   }
 
-  const display_name = (name || preferred_username || email || username).slice(0, 128);
+  const display_name = (name || preferred_username || usernameClaim || email || username).slice(0, 128);
   const avatar_color = avatarColors[Math.floor(Math.random() * avatarColors.length)];
 
   // oidc_provider = Issuer-URL (zukunftssicher für mehrere Provider)
   const result = database.prepare(`
     INSERT INTO users (username, display_name, password_hash, avatar_color, role, oidc_sub, oidc_provider)
     VALUES (?, ?, '$oidc$', ?, 'member', ?, ?)
-  `).run(username, display_name, avatar_color, sub, process.env.OIDC_ISSUER ?? null);
+  `).run(username, display_name, avatar_color, sub, provider);
 
   return database.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid);
 }
@@ -772,6 +802,215 @@ export function buildResetRoutes(targetRouter, {
 buildResetRoutes(router);
 
 /**
+ * Registriert die Einladungs-Routen auf dem gegebenen Router: drei Admin-Routen
+ * (erzeugen, auflisten, widerrufen) und zwei öffentliche (Vorschau, Einlösen).
+ * Dependency-Injection für Tests wie bei buildResetRoutes.
+ *
+ * Die öffentlichen Routen tragen bewusst kein CSRF, genau wie /forgot-password
+ * und /reset-password: der Einladungstoken ist das Geheimnis.
+ *
+ * `database` und `inviteService` müssen auf derselben DB-Instanz sitzen - das
+ * Einlösen markiert die Einladung innerhalb der User-Transaktion.
+ */
+export function buildInviteRoutes(targetRouter, {
+  database = null,
+  emailService = defaultEmailService,
+  inviteService = defaultInviteService,
+  baseUrl = process.env.BASE_URL || '',
+  limiter = passwordResetLimiter,
+} = {}) {
+  const getDb = () => (database || db.get());
+
+  targetRouter.post('/invites', requireAuth, requireAdmin, csrfMiddleware, async (req, res) => {
+    try {
+      const body = req.body || {};
+      const username = String(body.username || '').trim();
+      const displayName = String(body.display_name || '').trim();
+      const email = String(body.email || '').trim();
+      const familyRole = String(body.family_role || 'other').trim();
+      const sendEmail = body.send_email === true || body.send_email === 'true';
+      const role = body.system_admin === true || body.system_admin === 'true' ? 'admin' : 'member';
+
+      if (username && !/^[a-zA-Z0-9._-]{3,64}$/.test(username)) {
+        return res.status(400).json({ error: 'Username must be 3-64 characters long and may only contain letters, numbers, dots, hyphens, and underscores.', code: 400 });
+      }
+      if (displayName.length > 128) {
+        return res.status(400).json({ error: 'Display name may be at most 128 characters long.', code: 400 });
+      }
+      if (!FAMILY_ROLES.includes(familyRole)) {
+        return res.status(400).json({ error: 'Invalid family role.', code: 400 });
+      }
+      // Bewusst grob: eine selbstgehostete Instanz verschickt auch an Adressen
+      // ohne Punkt in der Domain (user@nas). Der Versand meldet den Rest.
+      if (email && !/^[^\s@]+@[^\s@]+$/.test(email)) {
+        return res.status(400).json({ error: 'Invalid email address.', code: 400 });
+      }
+      if (sendEmail && !email) {
+        return res.status(400).json({ error: 'An email address is required to send the invitation.', code: 400 });
+      }
+      if (username && getDb().prepare('SELECT 1 FROM users WHERE username = ?').get(username)) {
+        return res.status(409).json({ error: 'Username is already taken.', code: 409 });
+      }
+
+      const { token } = inviteService.createInvite({
+        email: email || null,
+        username: username || null,
+        displayName: displayName || null,
+        role,
+        familyRole,
+        createdBy: req.authUserId,
+      });
+      // Die frisch angelegte Zeile ohne token_hash - gleiche Form wie GET /invites.
+      const invite = inviteService.verifyToken(token);
+
+      let emailSent = false;
+      if (sendEmail) {
+        // Hier formuliert der Server die Zieladresse, also gilt BASE_URL und
+        // nicht der Host-Header. Den Link fürs Weitergeben von Hand baut das
+        // Admin-UI dagegen selbst aus location.origin.
+        const origin = String(baseUrl || '').trim().replace(/\/$/, '');
+        if (!origin) {
+          log.warn('BASE_URL not configured; invite mail not sent.');
+        } else if (!emailService.isConfigured()) {
+          log.warn('Email not configured; invite mail not sent.');
+        } else {
+          const link = `${origin}/join?token=${token}`;
+          try {
+            await emailService.sendMail({
+              to: email,
+              subject: 'You have been invited to Yuvomi',
+              text: `Open this link to set up your account (valid for 7 days): ${link}`,
+              html: '<p>Open this link to set up your account (valid for 7 days):</p>'
+                + `<p><a href="${link}">${link}</a></p>`,
+            });
+            emailSent = true;
+          } catch (mailErr) {
+            // email_sent muss ehrlich bleiben: meldet das UI einen Versand, den
+            // es nie gab, gibt der Admin den Link nicht selbst weiter.
+            log.error('Invite mail failed:', mailErr.message);
+          }
+        }
+      }
+
+      // Aus der Datenbank ist der Klartext-Token danach nie wieder zu holen: dort
+      // liegt nur sein Hash. Diese Antwort ist die einzige Stelle, die ihn dem
+      // Admin zeigt (der Mailversand oben hat ihn ggf. zusätzlich verschickt).
+      res.status(201).json({ data: { invite, token, email_sent: emailSent } });
+    } catch (err) {
+      log.error('Invite creation error:', err.message);
+      res.status(500).json({ error: 'Internal server error.', code: 500 });
+    }
+  });
+
+  targetRouter.get('/invites', requireAuth, requireAdmin, (_req, res) => {
+    try {
+      res.json({ data: { invites: inviteService.listOpen() } });
+    } catch (err) {
+      log.error('Invite list error:', err.message);
+      res.status(500).json({ error: 'Internal server error.', code: 500 });
+    }
+  });
+
+  targetRouter.delete('/invites/:id', requireAuth, requireAdmin, csrfMiddleware, (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isFinite(id)) {
+        return res.status(400).json({ error: 'Invalid invite ID.', code: 400 });
+      }
+      if (inviteService.revoke(id) === 0) {
+        return res.status(404).json({ error: 'Invite not found.', code: 404 });
+      }
+      res.json({ data: { ok: true } });
+    } catch (err) {
+      log.error('Invite revocation error:', err.message);
+      res.status(500).json({ error: 'Internal server error.', code: 500 });
+    }
+  });
+
+  targetRouter.get('/invites/preview', limiter, (req, res) => {
+    try {
+      const invite = inviteService.verifyToken(String(req.query.token || ''));
+      if (!invite) return res.json({ data: { valid: false } });
+      res.json({
+        data: { valid: true, display_name: invite.display_name, username: invite.username },
+      });
+    } catch (err) {
+      log.error('Invite preview error:', err.message);
+      res.status(500).json({ error: 'Internal server error.', code: 500 });
+    }
+  });
+
+  targetRouter.post('/invites/accept', limiter, async (req, res) => {
+    try {
+      const { token, password } = req.body || {};
+      if (!token || !password) {
+        return res.status(400).json({ error: 'Token and password are required.', code: 400 });
+      }
+      if (normalizePassword(password).length < 8) {
+        return res.status(400).json({ error: 'Password must be at least 8 characters long.', code: 400 });
+      }
+      const invite = inviteService.verifyToken(token);
+      if (!invite) {
+        return res.status(400).json({ error: 'Invalid or expired token.', code: 400 });
+      }
+
+      // Benutzer- und Anzeigename darf der Eingeladene selbst setzen, solange die
+      // Einladung sie nicht vorgibt. Rolle und Familienrolle NIE: sie stammen
+      // ausschließlich aus der Einladung, sonst schreibt sich der Eingeladene
+      // über den Body selbst zum Admin.
+      const username = String(invite.username || req.body.username || '').trim();
+      const displayName = String(invite.display_name || req.body.display_name || '').trim() || username;
+
+      if (!/^[a-zA-Z0-9._-]{3,64}$/.test(username)) {
+        return res.status(400).json({ error: 'Username must be 3-64 characters long and may only contain letters, numbers, dots, hyphens, and underscores.', code: 400 });
+      }
+      if (displayName.length > 128) {
+        return res.status(400).json({ error: 'Display name may be at most 128 characters long.', code: 400 });
+      }
+
+      const hash = await hashPassword(password);
+      const avatarColor = avatarColors[crypto.randomInt(avatarColors.length)];
+
+      const ACCEPT_LOST = Symbol('accept_lost');
+      try {
+        getDb().transaction(() => {
+          const created = getDb().prepare(`
+            INSERT INTO users (username, display_name, password_hash, avatar_color, role, family_role)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `).run(username, displayName, hash, avatarColor, invite.role, invite.family_role);
+          const newUserId = Number(created.lastInsertRowid);
+          syncFamilyMemberArtifacts(getDb(), newUserId, {
+            displayName,
+            // Die eingeladene Adresse wird zur Kontaktadresse: ohne sie fände der
+            // neue Nutzer den Weg über /forgot-password nicht.
+            email: invite.email || undefined,
+            actorUserId: newUserId,
+          });
+          // In derselben Transaktion: von zwei parallelen Einlösungen desselben
+          // Tokens sieht nur eine changes === 1, die andere rollt zurück.
+          if (inviteService.markAccepted(token, newUserId) === 0) throw ACCEPT_LOST;
+        })();
+      } catch (txErr) {
+        if (txErr === ACCEPT_LOST) {
+          return res.status(400).json({ error: 'Invalid or expired token.', code: 400 });
+        }
+        throw txErr;
+      }
+
+      res.status(201).json({ data: { ok: true, username } });
+    } catch (err) {
+      if (err.message?.includes('UNIQUE constraint')) {
+        return res.status(409).json({ error: 'Username is already taken.', code: 409 });
+      }
+      log.error('Invite accept error:', err.message);
+      res.status(500).json({ error: 'Internal server error.', code: 500 });
+    }
+  });
+}
+
+buildInviteRoutes(router);
+
+/**
  * POST /api/v1/auth/logout
  * Response: { ok: true }
  */
@@ -879,11 +1118,16 @@ router.get('/oidc/callback', async (req, res) => {
 
     const user = findOrCreateOidcUser(db.get(), {
       sub:                claims.sub,
+      // iss stammt aus dem validierten ID-Token und ist gegen die Discovery-Metadaten
+      // geprüft, also verlässlicher als die konfigurierte OIDC_ISSUER-URL
+      iss:                claims.iss,
       email:              userinfo.email,
       // email_verified kann je nach Provider im UserInfo oder im ID-Token stehen
       email_verified:     userinfo.email_verified ?? claims.email_verified,
       name:               userinfo.name,
       preferred_username: userinfo.preferred_username,
+      // non-standard, u. a. Synology DSM SSO: der reine Kontoname ohne Directory-Teil
+      username:           userinfo.username ?? claims.username,
     });
     await setupAuthSession(req, res, user);
 
@@ -1432,6 +1676,9 @@ router.delete('/users/:id', requireAuth, requireAdmin, csrfMiddleware, (req, res
 
 setInterval(() => {
   try { defaultResetService.cleanupExpired(); } catch { /* best effort */ }
+  // Abgelaufene, nie eingelöste Einladungen gehören in denselben Lauf.
+  // Eingelöste bleiben liegen, sie sind die Spur "wer hat wen eingeladen".
+  try { defaultInviteService.cleanupExpired(); } catch { /* best effort */ }
 }, 60 * 60_000).unref();
 
 export { router, sessionMiddleware, requireAuth, requireAdmin, syncFamilyMemberArtifacts, normalizeAvatarData };

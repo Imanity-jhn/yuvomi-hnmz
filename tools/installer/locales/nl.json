@@ -4,7 +4,7 @@
     "continue": "Doorgaan",
     "back": "Terug",
     "generate": "Genereren",
-    "generating": "…",
+    "generating": "Bezig met genereren…",
     "optional": "Optioneel",
     "stepCounter": "Stap {{n}} van {{total}}",
     "toggleVisibility": "Waarde tonen of verbergen",
@@ -48,8 +48,8 @@
     "unitsMetric": "Metrisch (°C)",
     "unitsImperial": "Imperiaal (°F)",
     "errCoords": "Breedtegraad en lengtegraad zijn vereist.",
-    "errLat": "Ongeldige breedtegraad (–90 tot 90).",
-    "errLon": "Ongeldige lengtegraad (–180 tot 180)."
+    "errLat": "Ongeldige breedtegraad (-90 tot 90).",
+    "errLon": "Ongeldige lengtegraad (-180 tot 180)."
   },
   "calendar": {
     "title": "Kalendersynchronisatie",
@@ -125,7 +125,17 @@
     "documentGoogleDriveReuseHint": "Laat beide velden leeg om de OAuth-inloggegevens van Google Agenda te hergebruiken. Voor eigen gegevens maak je ze aan in de Google Cloud Console (zoals bij de stap Agenda).",
     "documentGoogleDriveRedirectLabel": "Redirect-URI",
     "errDocumentGoogleDrivePair": "De client-ID en het client-secret van Google Drive moeten beide zijn ingesteld of beide leeg zijn.",
-    "errDocumentGoogleDriveCredentials": "Google Drive heeft een eigen client-ID en client-secret of geconfigureerde Google Agenda-inloggegevens nodig."
+    "errDocumentGoogleDriveCredentials": "Google Drive heeft een eigen client-ID en client-secret of geconfigureerde Google Agenda-inloggegevens nodig.",
+    "dataDirLabel": "Datamap op de host",
+    "dataDirHint": "Waar de database en app-gegevens op de server staan. Laat leeg voor ./data naast het compose-bestand.",
+    "documentLocalDirLabel": "Map op de host",
+    "documentLocalDirHint": "De map op de server die in de container wordt gekoppeld. Laat leeg voor ./documents.",
+    "documentWebdavPrivateNetwork": "WebDAV-doel in je thuisnetwerk toestaan",
+    "documentWebdavPrivateNetworkHint": "Nodig voor een Nextcloud in je eigen netwerk. Heft de SSRF-bescherming voor dit doel op.",
+    "icsPrivateNetwork": "Agenda-abonnementen uit je thuisnetwerk toestaan",
+    "icsPrivateNetworkHint": "Nodig voor ICS-feeds van apparaten in je eigen netwerk. Heft de SSRF-bescherming voor agenda-abonnementen op.",
+    "oidcTrustEmail": "E-mail zonder verified-claim vertrouwen",
+    "oidcTrustEmailHint": "Schakel dit alleen in als je provider geen email_verified stuurt en je die vertrouwt."
   },
   "review": {
     "title": "Controleren",
@@ -159,19 +169,26 @@
   "docker": {
     "title": "Yuvomi wordt gestart",
     "subtitle": "Het image wordt geladen en de Docker-container wordt gestart.",
-    "starting": "Container wordt gestart …",
     "elapsed": "{{n}} s verstreken",
     "running": "Container is gezond en actief",
     "failed": "Container kon niet worden gestart",
     "unknownError": "Onbekende fout",
     "toAdmin": "Doorgaan naar beheerdersinstelling",
-    "retry": "Opnieuw proberen"
+    "retry": "Opnieuw proberen",
+    "phasePull": "Image wordt gedownload",
+    "phaseBoot": "Container start op",
+    "phaseHealth": "Health check loopt",
+    "firstRunHint": "De eerste keer kan dit enkele minuten duren.",
+    "stalled": "Dit duurt langer dan gebruikelijk. Het logboek hieronder laat zien waarom.",
+    "showLogs": "Logboek tonen",
+    "hideLogs": "Logboek verbergen",
+    "timedOut": "Geen reactie na 15 minuten. Bekijk het logboek en probeer het opnieuw."
   },
   "admin": {
     "title": "Beheerdersaccount aanmaken",
     "subtitle": "Stel je eerste login in. Dit account heeft volledige toegang tot Yuvomi.",
     "userLabel": "Gebruikersnaam",
-    "userHint": "3–64 tekens: letters, cijfers, . - _",
+    "userHint": "3-64 tekens: letters, cijfers, . - _",
     "nameLabel": "Weergavenaam",
     "passLabel": "Wachtwoord",
     "passPlaceholder": "Minimaal 8 tekens",
@@ -179,7 +196,7 @@
     "creating": "Wordt aangemaakt …",
     "create": "Account aanmaken",
     "errAll": "Alle velden zijn vereist.",
-    "errUser": "Ongeldig gebruikersnaamformaat (3–64 tekens, letters/cijfers/._-).",
+    "errUser": "Ongeldig gebruikersnaamformaat (3-64 tekens, letters/cijfers/._-).",
     "errPass": "Het wachtwoord moet minimaal 8 tekens lang zijn.",
     "errMatch": "Wachtwoorden komen niet overeen.",
     "errCreate": "Beheerdersaccount kon niet worden aangemaakt."

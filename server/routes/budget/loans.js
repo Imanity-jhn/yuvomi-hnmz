@@ -11,7 +11,7 @@ import { normalizeBudgetVisibility } from '../../services/budget-visibility.js';
 import { computeLoanSchedule, MAX_LOAN_MONTHS } from '../../services/loan-amortization.js';
 import {
   budgetFilter, mayEdit, getBudgetMode, loanSummaryRow, loadLoan, refreshLoanStatus, cents,
-  budgetCurrency, toBudgetAmount, CURRENCY_RE,
+  budgetCurrency, toBudgetAmount, CURRENCY_RE, validateAccountRef,
 } from './helpers.js';
 
 const log = createLogger('Budget');
@@ -20,6 +20,58 @@ const router = express.Router();
 // 'variable' = Darlehen ganz ohne Zinsbindung (#569-Nachtrag): rechnet einphasig
 // wie 'fixed', der Satz gilt aber nur als aktueller Wert (Prognose).
 const INTEREST_MODES = ['none', 'fixed', 'variable', 'fixed_then_variable'];
+
+// Richtung (#638): Das Modul war ursprünglich nur für verliehenes Geld gedacht -
+// die Rate wurde deshalb immer als Einnahme gebucht. Ein aufgenommener Kredit
+// zahlt aber raus, seine Rate ist eine Ausgabe.
+const LOAN_DIRECTIONS = ['lent', 'borrowed'];
+
+// Wie eine Rate ins Budget gebucht wird. Vorzeichen UND Kategorie hängen an der
+// Richtung: stats.js liest den Typ am Vorzeichen ab (amount > 0 = Einnahme), die
+// Kategorie muss dazu passen, sonst steht eine Ausgabe unter einer income-Kategorie.
+const REPAYMENT_BOOKING = {
+  lent: { sign: 1, category: 'Geschenke & Transfers', subcategory: '' },
+  borrowed: { sign: -1, category: 'financial_other', subcategory: 'loans_interest' },
+};
+
+/** Buchungsregel eines Darlehens; unbekannte/fehlende Richtung fällt auf 'lent' zurück. */
+function bookingFor(direction) {
+  return REPAYMENT_BOOKING[direction] || REPAYMENT_BOOKING.lent;
+}
+
+/**
+ * Richtung aus dem Request (#638).
+ * @param {object} body       Request-Body
+ * @param {object|null} loan  Bestehendes Darlehen (PUT) - liefert den Default
+ * @returns {{ value: string }|{ error: string }}
+ */
+function validateDirection(body, loan = null) {
+  if (body.direction === undefined) return { value: loan?.direction || 'lent' };
+  const raw = String(body.direction || '').trim();
+  if (!LOAN_DIRECTIONS.includes(raw)) return { error: 'Direction must be either lent or borrowed.' };
+  return { value: raw };
+}
+
+/**
+ * Bucht die bereits erfassten Raten eines Darlehens auf eine neue Richtung um (#638).
+ *
+ * Ein falsches Vorzeichen ist nie eine legitime Historie, sondern immer ein Fehler -
+ * wer die Richtung korrigiert, will auch die schon gebuchten Raten korrigiert haben,
+ * ohne jede einzeln zu löschen und neu zu buchen. Genau das ist der Reparaturweg für
+ * Bestandsdaten, die die Migration auf den Default 'lent' gesetzt hat.
+ *
+ * Der Betrag wird nicht neu gerechnet, nur gespiegelt: der zum Buchungszeitpunkt
+ * geltende Wechselkurs (#582) bleibt damit erhalten.
+ */
+function rebookPayments(loanId, direction) {
+  const rule = bookingFor(direction);
+  db.get().prepare(`
+    UPDATE budget_entries
+    SET amount = ? * ABS(amount), category = ?, subcategory = ?
+    WHERE id IN (SELECT budget_entry_id FROM budget_loan_payments
+                 WHERE loan_id = ? AND budget_entry_id IS NOT NULL)
+  `).run(rule.sign, rule.category, rule.subcategory, loanId);
+}
 
 // Obergrenze für den festen Umrechnungskurs (#582). Großzügig genug für
 // Weichwährungen (1 EUR ≈ 10^5 IRR ⇒ Gegenrichtung ≈ 10^-5), aber eine Bremse
@@ -225,6 +277,10 @@ router.post('/loans', (req, res) => {
     }
     const money = validateCurrencyFields(req.body);
     if (money.error) errors.push(money.error);
+    const dir = validateDirection(req.body);
+    if (dir.error) errors.push(dir.error);
+    const account = validateAccountRef(req.body.account_id);
+    if (account.error) errors.push(account.error);
     if (errors.length) return res.status(400).json({ error: errors.join(' '), code: 400 });
 
     const me = req.authUserId || req.session.userId;
@@ -236,8 +292,8 @@ router.post('/loans', (req, res) => {
       INSERT INTO budget_loans
         (title, borrower, total_amount, installment_count, start_month, notes, created_by, owner_id, visibility,
          interest_mode, principal, fixed_rate, initial_repayment_rate, fixed_period_months, followup_rate,
-         currency, exchange_rate)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         currency, exchange_rate, direction, account_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       vTitle.value,
       vBorrower.value,
@@ -248,7 +304,8 @@ router.post('/loans', (req, res) => {
       me, me, visibility,
       terms.interest_mode, terms.principal, terms.fixed_rate, terms.initial_repayment_rate,
       terms.fixed_period_months, terms.followup_rate,
-      money.currency, money.exchange_rate
+      money.currency, money.exchange_rate,
+      dir.value, account.value
     );
 
     res.status(201).json({ data: loadLoan(result.lastInsertRowid) });
@@ -304,6 +361,12 @@ router.put('/loans/:id', (req, res) => {
       }
       const iMoney = validateCurrencyFields(req.body, loan);
       if (iMoney.error) iErrors.push(iMoney.error);
+      const iDir = validateDirection(req.body, loan);
+      if (iDir.error) iErrors.push(iDir.error);
+      const iAccount = req.body.account_id === undefined
+        ? { value: loan.account_id }
+        : validateAccountRef(req.body.account_id);
+      if (iAccount.error) iErrors.push(iAccount.error);
       if (iErrors.length) return res.status(400).json({ error: iErrors.join(' '), code: 400 });
 
       db.get().prepare(`
@@ -314,7 +377,7 @@ router.put('/loans/:id', (req, res) => {
           notes = ?,
           total_amount = ?, installment_count = ?, interest_mode = ?, principal = ?,
           fixed_rate = ?, initial_repayment_rate = ?, fixed_period_months = ?, followup_rate = ?,
-          currency = ?, exchange_rate = ?
+          currency = ?, exchange_rate = ?, direction = ?, account_id = ?
         WHERE id = ?
       `).run(
         req.body.title?.trim() ?? null,
@@ -323,9 +386,10 @@ router.put('/loans/:id', (req, res) => {
         req.body.notes !== undefined ? (req.body.notes?.trim() || null) : loan.notes,
         terms.total_amount, terms.installment_count, terms.interest_mode, terms.principal,
         terms.fixed_rate, terms.initial_repayment_rate, terms.fixed_period_months, terms.followup_rate,
-        iMoney.currency, iMoney.exchange_rate,
+        iMoney.currency, iMoney.exchange_rate, iDir.value, iAccount.value,
         id
       );
+      if (iDir.value !== loan.direction) rebookPayments(id, iDir.value);
       return res.json({ data: refreshLoanStatus(id) });
     }
 
@@ -356,6 +420,12 @@ router.put('/loans/:id', (req, res) => {
     if (req.body.total_amount !== undefined && Number(req.body.total_amount) <= 0) errors.push('Amount must be greater than zero.');
     const money = validateCurrencyFields(req.body, loan);
     if (money.error) errors.push(money.error);
+    const dir = validateDirection(req.body, loan);
+    if (dir.error) errors.push(dir.error);
+    const account = req.body.account_id === undefined
+      ? { value: loan.account_id }
+      : validateAccountRef(req.body.account_id);
+    if (account.error) errors.push(account.error);
     if (errors.length) return res.status(400).json({ error: errors.join(' '), code: 400 });
 
     db.get().prepare(`
@@ -367,7 +437,9 @@ router.put('/loans/:id', (req, res) => {
           start_month = COALESCE(?, start_month),
           notes = ?,
           currency = ?,
-          exchange_rate = ?
+          exchange_rate = ?,
+          direction = ?,
+          account_id = ?
       WHERE id = ?
     `).run(
       req.body.title?.trim() ?? null,
@@ -377,8 +449,10 @@ router.put('/loans/:id', (req, res) => {
       req.body.start_month ?? null,
       req.body.notes !== undefined ? (req.body.notes?.trim() || null) : loan.notes,
       money.currency, money.exchange_rate,
+      dir.value, account.value,
       id
     );
+    if (dir.value !== loan.direction) rebookPayments(id, dir.value);
 
     res.json({ data: refreshLoanStatus(id) });
   } catch (err) {
@@ -392,7 +466,7 @@ router.post('/loans/:id/payments', (req, res) => {
     const id = parseInt(req.params.id, 10);
     const loan = loadLoan(id);
     if (!loan) return res.status(404).json({ error: 'Loan not found.', code: 404 });
-    const loanRow = db.get().prepare('SELECT owner_id, visibility, created_by FROM budget_loans WHERE id = ?').get(id);
+    const loanRow = db.get().prepare('SELECT owner_id, visibility, created_by, direction, account_id FROM budget_loans WHERE id = ?').get(id);
     if (!mayEdit(req, loanRow)) return res.status(403).json({ error: 'You cannot modify this loan.', code: 403 });
     if (loan.remaining_installments <= 0) return res.status(409).json({ error: 'Loan is already paid.', code: 409 });
 
@@ -427,20 +501,27 @@ router.post('/loans/:id/payments', (req, res) => {
     // angewandt: eine spätere Kursänderung lässt gebuchte Raten unberührt.
     const budgetAmount = toBudgetAmount(paymentAmount, loan);
     const foreign = loan.is_foreign_currency ? ` (${loan.currency})` : '';
+    // Richtung (#638): Bei einem aufgenommenen Kredit verlässt die Rate den Haushalt -
+    // negativer Betrag und eine expense-Kategorie. Beides muss zusammen wechseln,
+    // sonst steht eine Ausgabe unter „Geschenke & Transfers" (income).
+    const booking = bookingFor(loanRow.direction);
     const tx = db.get().transaction(() => {
       // Repayment-Eintrag erbt Eigentümer + Sichtbarkeit des Loans (#476/#505),
       // damit er im Budget derselben Person/desselben Topfs erscheint.
+      // account_id kommt vom Darlehen: erst damit belastet eine Rate ein Konto (#638).
       const budgetResult = db.get().prepare(`
-        INSERT INTO budget_entries (title, amount, category, subcategory, date, is_recurring, created_by, owner_id, visibility)
-        VALUES (?, ?, ?, '', ?, 0, ?, ?, ?)
+        INSERT INTO budget_entries (title, amount, category, subcategory, date, is_recurring, created_by, owner_id, visibility, account_id)
+        VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
       `).run(
         `Loan repayment: ${loan.borrower}${foreign}`,
-        budgetAmount,
-        'Geschenke & Transfers',
+        booking.sign * budgetAmount,
+        booking.category,
+        booking.subcategory,
         vDate.value,
         req.authUserId || req.session.userId,
         loanRow.owner_id,
-        loanRow.visibility || 'shared'
+        loanRow.visibility || 'shared',
+        loanRow.account_id ?? null
       );
       const paymentResult = db.get().prepare(`
         INSERT INTO budget_loan_payments

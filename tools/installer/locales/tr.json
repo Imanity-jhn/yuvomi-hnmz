@@ -4,7 +4,7 @@
     "continue": "Devam",
     "back": "Geri",
     "generate": "Oluştur",
-    "generating": "…",
+    "generating": "Oluşturuluyor…",
     "optional": "İsteğe bağlı",
     "stepCounter": "Adım {{n}} / {{total}}",
     "toggleVisibility": "Değeri göster veya gizle",
@@ -48,8 +48,8 @@
     "unitsMetric": "Metrik (°C)",
     "unitsImperial": "İngiliz birimi (°F)",
     "errCoords": "Enlem ve boylam gereklidir.",
-    "errLat": "Geçersiz enlem (–90 ile 90 arası).",
-    "errLon": "Geçersiz boylam (–180 ile 180 arası)."
+    "errLat": "Geçersiz enlem (-90 ile 90 arası).",
+    "errLon": "Geçersiz boylam (-180 ile 180 arası)."
   },
   "calendar": {
     "title": "Takvim Senkronizasyonu",
@@ -101,19 +101,26 @@
   "docker": {
     "title": "Yuvomi başlatılıyor",
     "subtitle": "İmaj indiriliyor ve Docker kapsayıcısı başlatılıyor.",
-    "starting": "Kapsayıcı başlatılıyor …",
     "elapsed": "{{n}} sn geçti",
     "running": "Kapsayıcı sağlıklı ve çalışıyor",
     "failed": "Kapsayıcı başlatılamadı",
     "unknownError": "Bilinmeyen hata",
     "toAdmin": "Yönetici Kurulumuna devam et",
-    "retry": "Yeniden dene"
+    "retry": "Yeniden dene",
+    "phasePull": "Görüntü indiriliyor",
+    "phaseBoot": "Kapsayıcı başlatılıyor",
+    "phaseHealth": "Sağlık denetimi sürüyor",
+    "firstRunHint": "İlk seferde bu birkaç dakika sürebilir.",
+    "stalled": "Bu her zamankinden uzun sürüyor. Aşağıdaki günlük nedenini gösteriyor.",
+    "showLogs": "Günlüğü göster",
+    "hideLogs": "Günlüğü gizle",
+    "timedOut": "15 dakika sonra yanıt alınamadı. Günlüğü kontrol edip yeniden deneyin."
   },
   "admin": {
     "title": "Yönetici Hesabı Oluştur",
     "subtitle": "İlk girişinizi ayarlayın. Bu hesap Yuvomi'a tam erişime sahiptir.",
     "userLabel": "Kullanıcı adı",
-    "userHint": "3–64 karakter: harfler, rakamlar, . - _",
+    "userHint": "3-64 karakter: harfler, rakamlar, . - _",
     "nameLabel": "Görünen ad",
     "passLabel": "Parola",
     "passPlaceholder": "En az 8 karakter",
@@ -121,7 +128,7 @@
     "creating": "Oluşturuluyor …",
     "create": "Hesap oluştur",
     "errAll": "Tüm alanlar gereklidir.",
-    "errUser": "Geçersiz kullanıcı adı biçimi (3–64 karakter, harf/rakam/._-).",
+    "errUser": "Geçersiz kullanıcı adı biçimi (3-64 karakter, harf/rakam/._-).",
     "errPass": "Parola en az 8 karakter olmalıdır.",
     "errMatch": "Parolalar eşleşmiyor.",
     "errCreate": "Yönetici hesabı oluşturulamadı."
@@ -190,7 +197,17 @@
     "documentGoogleDriveReuseHint": "Google Takvim OAuth kimlik bilgilerini yeniden kullanmak için iki alanı da boş bırakın. Kendi kimlik bilgilerinizi kullanmak için bunları Google Cloud Console’da oluşturun (Takvim adımındaki gibi).",
     "documentGoogleDriveRedirectLabel": "Yönlendirme URI'si",
     "errDocumentGoogleDrivePair": "Google Drive istemci kimliği ve gizli anahtarı birlikte ayarlanmalı veya ikisi de boş bırakılmalıdır.",
-    "errDocumentGoogleDriveCredentials": "Google Drive için kendi istemci kimliği ve gizli anahtarı ya da yapılandırılmış Google Takvim kimlik bilgileri gerekir."
+    "errDocumentGoogleDriveCredentials": "Google Drive için kendi istemci kimliği ve gizli anahtarı ya da yapılandırılmış Google Takvim kimlik bilgileri gerekir.",
+    "dataDirLabel": "Ana makinedeki veri klasörü",
+    "dataDirHint": "Veritabanının ve uygulama verilerinin sunucuda bulunduğu yer. Compose dosyasının yanındaki ./data için boş bırakın.",
+    "documentLocalDirLabel": "Ana makinedeki klasör",
+    "documentLocalDirHint": "Sunucuda kapsayıcıya bağlanan klasör. ./documents için boş bırakın.",
+    "documentWebdavPrivateNetwork": "Ev ağındaki bir WebDAV hedefine izin ver",
+    "documentWebdavPrivateNetworkHint": "Kendi ağınızdaki bir Nextcloud için gerekli. Bu hedef için SSRF korumasını kaldırır.",
+    "icsPrivateNetwork": "Ev ağından takvim aboneliklerine izin ver",
+    "icsPrivateNetworkHint": "Kendi ağınızdaki cihazların ICS akışları için gerekli. Takvim abonelikleri için SSRF korumasını kaldırır.",
+    "oidcTrustEmail": "verified claim olmadan e-postaya güven",
+    "oidcTrustEmailHint": "Yalnızca sağlayıcınız email_verified göndermiyorsa ve ona güveniyorsanız etkinleştirin."
   },
   "welcome": {
     "title": "Yuvomi’ye hoş geldiniz",

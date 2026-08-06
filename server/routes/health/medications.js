@@ -10,22 +10,30 @@ import * as db from '../../db.js';
 import * as v from '../../middleware/validate.js';
 import {
   log, VISIBILITIES, LOG_STATUS, MAX_UNIT,
-  viewerId, visibilityClause, toBit, applyUpdate, badRequest,
+  viewerId, careAwareClause, toBit, applyUpdate, badRequest,
+  resolveOwner, writableClause,
 } from './helpers.js';
 
 const router = express.Router();
 
+// Diese beiden Helfer sind der einzige Zugang zu einem Medikament: Plaene und
+// Einnahmeprotokolle haengen daran und erben ihr Scoping von hier. Die Betreuung
+// (#584) greift deshalb an genau zwei Stellen statt in jeder der neun
+// Schreibrouten.
+
 /** Lädt ein Medikament, wenn der Betrachter es lesen darf; sonst null. */
 function medicationForRead(medId, viewer) {
+  const w = writableClause('', viewer);
   return db.get().prepare(
-    `SELECT * FROM medications WHERE id = ? AND (user_id = ? OR visibility = 'family')`
-  ).get(medId, viewer) || null;
+    `SELECT * FROM medications WHERE id = ? AND (visibility = 'family' OR ${w.sql})`
+  ).get(medId, ...w.params) || null;
 }
 
-/** Lädt ein dem Betrachter gehörendes Medikament; sonst null. */
-function medicationOwned(medId, viewer) {
-  return db.get().prepare('SELECT * FROM medications WHERE id = ? AND user_id = ?')
-    .get(medId, viewer) || null;
+/** Lädt ein Medikament, das der Betrachter ändern darf (eigenes oder betreutes). */
+function medicationWritable(medId, viewer) {
+  const w = writableClause('', viewer);
+  return db.get().prepare(`SELECT * FROM medications WHERE id = ? AND ${w.sql}`)
+    .get(medId, ...w.params) || null;
 }
 
 // GET /medications?user_id=&active=
@@ -33,7 +41,7 @@ router.get('/medications', (req, res) => {
   try {
     const viewer   = viewerId(req);
     const personId = req.query.user_id ? parseInt(req.query.user_id, 10) : null;
-    const clause   = visibilityClause('m', viewer, personId);
+    const clause   = careAwareClause('m', viewer, personId);
     const params   = [...clause.params];
     let sql = `SELECT m.* FROM medications m WHERE ${clause.sql}`;
 
@@ -68,10 +76,15 @@ router.post('/medications', (req, res) => {
     const active = toBit(b.active); // undefined → default 1
     const prn    = toBit(b.prn);    // undefined → default 0
 
+    // Optionales user_id: eine betreuende Person legt das Medikament fuer die
+    // betreute an (#584) - der Alltagsfall aus der Meldung.
+    const owner = resolveOwner(req, viewer);
+    if (owner.error) return res.status(owner.status).json({ error: owner.error, code: owner.status });
+
     const result = db.get().prepare(`
       INSERT INTO medications (user_id, name, dosage_text, form, active, prn, stock_qty, stock_unit, refill_threshold, note, visibility)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(viewer, name.value, dosageText.value, form.value,
+    `).run(owner.ownerId, name.value, dosageText.value, form.value,
            active === undefined ? 1 : active, prn === undefined ? 0 : prn,
            stockQty.value, stockUnit.value, refill.value, note.value, visibility.value || 'private');
 
@@ -90,7 +103,7 @@ router.patch('/medications/:id', (req, res) => {
     const id = parseInt(req.params.id, 10);
     if (!id) return res.status(400).json({ error: 'Ungültige ID.', code: 400 });
 
-    const existing = medicationOwned(id, viewer);
+    const existing = medicationWritable(id, viewer);
     if (!existing) return res.status(404).json({ error: 'Medikament nicht gefunden.', code: 404 });
 
     const b = req.body || {};
@@ -126,7 +139,7 @@ router.delete('/medications/:id', (req, res) => {
     const id = parseInt(req.params.id, 10);
     if (!id) return res.status(400).json({ error: 'Ungültige ID.', code: 400 });
 
-    const existing = medicationOwned(id, viewer);
+    const existing = medicationWritable(id, viewer);
     if (!existing) return res.status(404).json({ error: 'Medikament nicht gefunden.', code: 404 });
 
     db.get().prepare('DELETE FROM medications WHERE id = ?').run(id);
@@ -163,7 +176,7 @@ router.post('/medications/:id/schedules', (req, res) => {
     const viewer = viewerId(req);
     const medId = parseInt(req.params.id, 10);
     if (!medId) return res.status(400).json({ error: 'Ungültige ID.', code: 400 });
-    if (!medicationOwned(medId, viewer)) return res.status(404).json({ error: 'Medikament nicht gefunden.', code: 404 });
+    if (!medicationWritable(medId, viewer)) return res.status(404).json({ error: 'Medikament nicht gefunden.', code: 404 });
 
     const b = req.body || {};
     const timeOfDay = v.time(b.time_of_day, 'time_of_day');
@@ -293,7 +306,7 @@ router.post('/medications/:id/logs', (req, res) => {
     const viewer = viewerId(req);
     const medId = parseInt(req.params.id, 10);
     if (!medId) return res.status(400).json({ error: 'Ungültige ID.', code: 400 });
-    if (!medicationOwned(medId, viewer)) return res.status(404).json({ error: 'Medikament nicht gefunden.', code: 404 });
+    if (!medicationWritable(medId, viewer)) return res.status(404).json({ error: 'Medikament nicht gefunden.', code: 404 });
 
     const b = req.body || {};
     const scheduledAt = v.datetime(b.scheduled_at, 'scheduled_at');

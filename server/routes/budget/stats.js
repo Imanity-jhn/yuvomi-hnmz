@@ -6,7 +6,7 @@
 import express from 'express';
 import { createLogger } from '../../logger.js';
 import * as db from '../../db.js';
-import { computeStatsRange, cents, budgetFilter, todayLocalDateKey, STATS_RANGES, DATE_RE } from './helpers.js';
+import { bookedOnly, computeStatsRange, cents, budgetFilter, todayLocalDateKey, STATS_RANGES, DATE_RE } from './helpers.js';
 import { BUDGET_SAVINGS_KEY } from './plans.js';
 
 const log = createLogger('Budget');
@@ -25,7 +25,7 @@ export function computeStats(database, { range, anchor }, filter = { clause: '',
       COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) AS income,
       COALESCE(SUM(CASE WHEN amount < 0 THEN amount ELSE 0 END), 0) AS expenses,
       COALESCE(SUM(amount), 0) AS balance
-    FROM budget_entries WHERE date BETWEEN ? AND ?${f.clause}
+    FROM budget_entries WHERE date BETWEEN ? AND ?${f.clause}${bookedOnly()}
   `).get(r.from, r.to, ...f.params);
 
   const prevRow = database.prepare(`
@@ -33,7 +33,7 @@ export function computeStats(database, { range, anchor }, filter = { clause: '',
       COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) AS income,
       COALESCE(SUM(CASE WHEN amount < 0 THEN amount ELSE 0 END), 0) AS expenses,
       COALESCE(SUM(amount), 0) AS balance
-    FROM budget_entries WHERE date BETWEEN ? AND ?${f.clause}
+    FROM budget_entries WHERE date BETWEEN ? AND ?${f.clause}${bookedOnly()}
   `).get(r.prevFrom, r.prevTo, ...f.params);
 
   const byCategory = database.prepare(`
@@ -41,7 +41,7 @@ export function computeStats(database, { range, anchor }, filter = { clause: '',
            COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) AS income,
            COALESCE(SUM(CASE WHEN amount < 0 THEN amount ELSE 0 END), 0) AS expenses,
            COALESCE(SUM(amount), 0) AS total
-    FROM budget_entries WHERE date BETWEEN ? AND ?${f.clause}
+    FROM budget_entries WHERE date BETWEEN ? AND ?${f.clause}${bookedOnly()}
     GROUP BY category ORDER BY ABS(SUM(amount)) DESC
   `).all(r.from, r.to, ...f.params);
 
@@ -52,7 +52,7 @@ export function computeStats(database, { range, anchor }, filter = { clause: '',
            COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) AS income,
            COALESCE(SUM(CASE WHEN amount < 0 THEN amount ELSE 0 END), 0) AS expenses,
            COALESCE(SUM(amount), 0) AS balance
-    FROM budget_entries WHERE date BETWEEN ? AND ?${f.clause}
+    FROM budget_entries WHERE date BETWEEN ? AND ?${f.clause}${bookedOnly()}
     GROUP BY period
   `).all(r.from, r.to, ...f.params);
 

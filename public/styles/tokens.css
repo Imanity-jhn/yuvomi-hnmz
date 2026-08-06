@@ -92,7 +92,7 @@
    * die Kanten der BEDIENELEMENTE erreichen den von WCAG 1.4.11 geforderten
    * 3:1-Kontrast nicht. Selbst gemessen auf /shopping und /pantry, beide Themes:
    *
-   *   Eingabefelder (.form-input, .quick-add__*, .pantry-search__input)
+   *   Eingabefelder (.form-input, .quick-add__*, .page-search__input)
    *                        #E8E7E2 auf #F5F4F1 = 1.13:1   dark #4A4A46 auf #1A1A18 = 1.96:1
    *   Checkbox (.item-check::before)  1.24:1                dark 1.75:1
    *   Stepper (.pantry-stepper__btn)  1.24:1                dark 1.75:1
@@ -364,6 +364,14 @@
    * Wer sie doch auflöst, braucht vier Töne, die untereinander UND gegen
    * warning/danger/accent unterscheidbar sind - auch bei Rot-Grün-Schwäche. */
 
+  /* Badge für aus Mealie gespiegelte Rezepte (source: 'mealie') - eigener Teal-
+   * Ton statt einer der vier Mahlzeit-Farben, damit "gespiegelt" nicht wie ein
+   * fünfter Mahlzeit-Typ aussieht. */
+  --_source-mealie:        #0F766E;
+  --source-mealie:         var(--_source-mealie);
+  --_source-mealie-light:  #D9F5EE;
+  --source-mealie-light:   var(--_source-mealie-light);
+
   /* --------------------------------------------------------
    * 6. Farben - Prioritäten
    * -------------------------------------------------------- */
@@ -414,6 +422,43 @@
   --color-soon: var(--color-warning);
 
   /* --------------------------------------------------------
+   * 7b. Fokusring
+   *
+   * Der Fokusring ist das einzige Bauteil, das ein Tastaturnutzer
+   * ununterbrochen sieht. Er hatte sechs Spezifikationen: zwei konkurrierende
+   * Basisregeln (reset.css 2px/offset 2px, glass.css überschrieb den Offset
+   * global auf 3px) und rund 45 lokale Regeln darüber. Auf /shopping
+   * alternierte er beim Durchtabben violett → orange → violett → orange, sechs
+   * Farbwechsel in 15 Tabstops (Critique P1, 2026-07-30). Ein Farbwechsel liest
+   * sich als Kontextwechsel, wo keiner ist - und er entwertet die Akzent-Arbeit:
+   * das Modul HAT einen Akzent, die Tastatur sah ihn zur Hälfte.
+   *
+   * WARUM DREI TOKENS UND KEIN SHORTHAND. Ein `--focus-ring: 2px solid
+   * var(--focus-ring-color)` wäre bequemer, aber unbrauchbar: custom properties
+   * werden dort aufgelöst, wo sie DEKLARIERT sind. Ein Shorthand auf `:root`
+   * bäckt die Farbe von `:root` ein, und eine lokale Überschreibung von
+   * `--focus-ring-color` weiter unten im Baum bliebe wirkungslos. Genau die
+   * lokale Überschreibung brauchen aber die begründeten Ausnahmen (Konto-Farbe
+   * im Budget, Slot-Farbe im Dashboard, Kontrastring auf dem FAB). Deshalb
+   * schreiben Komponenten die zwei Zeilen aus, und die Ausnahme setzt
+   * `--focus-ring-color` statt eine eigene `outline` zu erfinden.
+   *
+   * FARBE: `--active-module-accent` setzt der Router auf `<html>`, also genau
+   * dort, wo `--focus-ring-color` deklariert ist - die Auflösung greift. Auf
+   * modullosen Seiten (Login, Setup) ist es undefiniert und der App-Akzent
+   * übernimmt.
+   *
+   * OFFSET: 2px ist der Ring außen. `--focus-ring-offset-inset` ist für
+   * Elemente an einer geclippten Kante (`overflow: hidden` am Elternteil) -
+   * dort schneidet ein positiver Offset den Ring an, ein negativer bleibt
+   * vollständig sichtbar. Das ist der einzige legitime Grund abzuweichen.
+   * -------------------------------------------------------- */
+  --focus-ring-width:        2px;
+  --focus-ring-color:        var(--active-module-accent, var(--color-accent));
+  --focus-ring-offset:       2px;
+  --focus-ring-offset-inset: -2px;
+
+  /* --------------------------------------------------------
    * 8. Schatten
    *    3 Stufen: subtle (Karten), medium (Dropdowns, Hover),
    *    elevated (Modals, FAB).
@@ -460,6 +505,12 @@
   --text-2xl:  1.5rem;     /* 24px - Page-Title (Mobile) */
   --text-3xl:  1.875rem;   /* 30px - Page-Title (Desktop) */
   --text-4xl:  2.25rem;    /* 36px - Hero/Greeting */
+  /* Display-Stufen. Kein Fließtext mehr, sondern Anzeigewerte, die aus mehreren
+     Metern Abstand lesbar sein müssen - eingeführt für die Uhr auf dem
+     Wandtablet (#651). Nicht für Überschriften verwenden: dort endet die Skala
+     bewusst bei --text-4xl. */
+  --text-5xl:  3rem;       /* 48px - Display auf einzeiliger Kachel */
+  --text-6xl:  4.5rem;     /* 72px - Display auf hoher Kachel */
 
   /* Semantische Rollen. Produktoberflächen nutzen feste rem-Werte; responsive
      Unterschiede werden ausschließlich an den kanonischen Breakpoints gesetzt. */
@@ -646,12 +697,25 @@
    * Position tatsächlich bestimmen. Wer den FAB verschiebt, verschiebt den
    * Freiraum automatisch mit.
    *
-   * Deckt NUR das Listenende ab. Mitten in einer scrollenden Liste liegt ein
-   * fixierter FAB über der Zeile, die zufällig unter ihm steht - das löst kein
-   * Freiraum-Token, sondern utils/fab-scroll.js: der FAB fährt beim
-   * Abwärtsscrollen weg und kommt beim Hochscrollen, am Listenanfang und am
-   * Listenende zurück. Genau an diesen drei Stellen liegt keine Zeile unter ihm,
-   * am Ende dank dieses Tokens hier.
+   * WAR NUR DAS LISTENENDE, IST JETZT IMMER. `--fab-clearance` lag als
+   * `padding-block-end` auf dem scrollenden Element - und Padding am Inhaltsende
+   * scrollt mit. Es wirkte deshalb nur, wenn der Nutzer schon unten war. Bei
+   * `scrollTop = 0` lag auf 5 von 6 geprüften Route/Viewport-Kombinationen eine
+   * Zeilenaktion unter dem FAB, bis zu 80,6% verdeckt (phoneSm /pantry, Critique
+   * P1 2026-07-30). Ein fixiertes Element über einem Scrollport überdeckt
+   * zwangsläufig, was gerade dort steht.
+   *
+   * `--fab-safe-zone` verkürzt statt dessen den SCROLLPORT (Marge an
+   * .app-content, layout.css). Der Streifen unter ihm gehört dem FAB allein,
+   * bei jedem Scrollstand. Der Platz ist derselbe, den das Padding vorher am
+   * Listenende reserviert hat - er wandert nur vom Inhalt in den Container.
+   *
+   * --fab-gap ist die gemeinsame Quelle: er bestimmt, wie weit der FAB über der
+   * Scrollport-Unterkante schwebt, und daraus folgen BEIDE anderen Werte. Wer
+   * den FAB verschiebt, verschiebt die Zone automatisch mit. Mobil sitzt die
+   * Bottom-Nav (position: relative, ein Flex-Kind) unter dem Scrollport, deshalb
+   * zählt --fab-offset-bottom sie mit und --fab-safe-zone nicht: die Zone misst
+   * ab Scrollport-Unterkante, der Offset ab Viewport-Unterkante.
    *
    * ENTFALLEN: --fab-lane, eine reservierte rechte Spur von
    * `--fab-size + --space-4 + --space-2` = 76px. Sie war die zweite, gegenteilige
@@ -660,8 +724,9 @@
    * Artikelnamen fielen auf rund vier lesbare Zeichen (Critique 2026-07-30, P0).
    * Ein Guard in test-frontend-audit.js verbietet ihre Rückkehr. */
   --fab-size: 52px;
-  --fab-offset-bottom: calc(var(--nav-bottom-height) + var(--space-6));
-  --fab-clearance: calc(var(--fab-offset-bottom) + var(--fab-size) + var(--space-4));
+  --fab-gap: var(--space-6);
+  --fab-offset-bottom: calc(var(--nav-bottom-height) + var(--fab-gap));
+  --fab-safe-zone: calc(var(--fab-gap) + var(--fab-size) + var(--space-4));
 
   /* --------------------------------------------------------
    * 13. Sidebar
@@ -839,9 +904,14 @@
     --page-gutter: var(--space-8);
     /* Desktop hat keine Bottom-Nav: der FAB rückt näher an die Ecke und wird
      * kleiner. Spiegelt den Media-Query auf `.page-fab` in layout.css;
-     * --fab-clearance rechnet beides automatisch mit. */
+     * --fab-safe-zone rechnet beides automatisch mit.
+     *
+     * Ohne Bottom-Nav fallen Scrollport- und Viewport-Unterkante zusammen, der
+     * Offset ist also der Gap selbst - deshalb hier nur --fab-gap gesetzt und
+     * --fab-offset-bottom darauf zurückgeführt. */
     --fab-size: var(--target-lg);
-    --fab-offset-bottom: var(--space-8);
+    --fab-gap: var(--space-8);
+    --fab-offset-bottom: var(--fab-gap);
   }
 }
 
@@ -996,6 +1066,9 @@
     --_meal-dinner-light:    #1e1040;
     --_meal-snack:           #FB923C;
     --_meal-snack-light:     #3D2010;
+
+    --_source-mealie:        #2DD4BF;
+    --_source-mealie-light:  #0F2E2A;
 
     --_color-priority-low:       #C8C7C3;
     --_color-priority-medium:    #FBBF24;
@@ -1158,6 +1231,9 @@
     --_meal-dinner-light:    #1e1040;
     --_meal-snack:           #FB923C;
     --_meal-snack-light:     #3D2010;
+
+    --_source-mealie:        #2DD4BF;
+    --_source-mealie-light:  #0F2E2A;
 
     /* Priority-Badge Hintergründe */
     --_color-priority-low:       #C8C7C3;

@@ -12,9 +12,11 @@ import { promptModal, openModal, closeModal, confirmModal, reportFieldError } fr
 import { DEFAULT_CATEGORY_NAME, categoryLabel } from '/utils/shopping-categories.js';
 import { addLocalDays, toLocalDateKey } from '/utils/date.js';
 import { renderKitchenTabsBar, refreshKitchenBadges } from '/utils/kitchen-tabs.js';
-import { mountEmptyState } from '/utils/empty-state.js';
+import { mountEmptyState, mountLoadError } from '/utils/empty-state.js';
 import { popoverMenuHtml, installPopoverMenus } from '/utils/popover-menu.js';
 import '/components/category-manager.js';
+import { findPageFab } from '/utils/fab.js';
+import { makeSortable } from '/utils/sortable.js';
 
 // --------------------------------------------------------
 // Konstanten
@@ -45,6 +47,12 @@ const state = {
   items:         [],
   activeList:    null,
   categories:    [],   // { id, name, icon, sort_order }[]
+  /** Zwei getrennte Ladewege, zwei getrennte Fehler - sie haben verschiedene
+   *  Wiederholungen: die Listen holt die ganze Seite neu, die Artikel nur die
+   *  aktive Liste. Ein gemeinsames Feld hätte den einen Fehler mit der
+   *  Wiederholung des anderen bedient. */
+  listsError:    null,
+  itemsError:    null,
 };
 
 // --------------------------------------------------------
@@ -133,6 +141,26 @@ function renderListContent(container) {
   const head = container.querySelector('#list-head');
   if (!content) return;
   content.removeAttribute('aria-busy');
+
+  // Listen nicht ladbar: Fehlerzustand statt Leerzustand. Muss VOR der
+  // `!state.activeList`-Prüfung stehen - ohne geladene Listen ist auch keine
+  // aktiv, und der Leerzustand darunter hätte „Keine Listen" behauptet und mit
+  // „Neue Liste erstellen" ausgerechnet eine schreibende Handlung als einzigen
+  // Ausweg angeboten (Critique P0, 2026-07-30).
+  if (state.listsError) {
+    if (head) {
+      head.replaceChildren();
+      head.hidden = true;
+    }
+    mountLoadError(content, {
+      title: t('shopping.listsLoadError'),
+      description: t('common.loadErrorDescription'),
+      error: state.listsError,
+      retryLabel: t('common.retry'),
+      onRetry: () => render(container, {}),
+    });
+    return;
+  }
 
   if (!state.activeList) {
     // Ohne aktive Liste gibt es nichts zu benennen: der Kopf entfällt ganz,
@@ -253,12 +281,19 @@ function renderListContent(container) {
     <!-- Artikel-Liste; Inhalt via mountItems(), damit der Leerzustand über den
          geteilten Renderer läuft statt als HTML-String hier drin. -->
     <div class="kitchen-list items-list" id="items-list"></div>
+
+    <!-- Ansage für Umsortierungen (#678), wie im Kategorie-Manager: das
+         aria-label des Griffs allein ist zu leise - ob ein Screenreader die
+         Label-Änderung am fokussierten Element vorliest, ist von Programm zu
+         Programm verschieden. Eine Live-Region ist die verlässliche Zusage. -->
+    <div class="sr-only" role="status" aria-live="polite" id="items-reorder-announce"></div>
   `);
 
-  mountItems(content.querySelector('#items-list'));
+  mountItems(content.querySelector('#items-list'), container);
 
   if (window.lucide) window.lucide.createIcons({ el: content });
   stagger(content.querySelectorAll('.shopping-item'));
+  wireItemReorder(container);
   wireAutocomplete(container);
   wireQuickAdd(container);
   syncQuickAddDisclosure(container, false);
@@ -276,8 +311,24 @@ function renderListContent(container) {
  * einziger im Modul ein handgezeichnetes Inline-SVG statt eines Lucide-Icons -
  * dieselbe Warenkorb-Form, nur mit eigener Strichstärke (Critique 2026-07-29).
  */
-function mountItems(listEl) {
+function mountItems(listEl, container) {
   if (!listEl) return;
+
+  // Artikel nicht ladbar: eigener Fehler mit eigener Wiederholung. Die Liste
+  // existiert und ist im Kopf benannt - nur ihr Inhalt fehlt, also lädt der
+  // Retry auch nur diese eine Liste nach.
+  if (state.itemsError) {
+    mountLoadError(listEl, {
+      title: t('shopping.itemsLoadError'),
+      description: t('common.loadErrorDescription'),
+      error: state.itemsError,
+      retryLabel: t('common.retry'),
+      onRetry: container
+        ? () => switchList(state.activeListId, container)
+        : undefined,
+    });
+    return;
+  }
 
   if (!state.items.length) {
     mountEmptyState(listEl, {
@@ -305,7 +356,7 @@ function renderItems() {
   // sind flächenlos - vorher war Einkaufen eine Trennlinien-Liste und der Vorrat
   // eine Kartenliste, dieselbe Sache in zwei Paradigmen (Critique 2026-07-30).
   return groups.map(([cat, items]) => `
-    <div class="kitchen-group item-category">
+    <div class="kitchen-group item-category" data-category="${esc(cat)}">
       <div class="kitchen-group__title">
         <i data-lucide="${catIcon(cat)}" class="icon-sm" aria-hidden="true"></i>
         ${esc(categoryLabel(cat))}
@@ -327,6 +378,29 @@ function renderItemMeta(item) {
   if (item.url)   bits.push('<i data-lucide="link" class="item-meta__icon" aria-hidden="true"></i>');
   if (item.notes) bits.push('<i data-lucide="sticky-note" class="item-meta__icon" aria-hidden="true"></i>');
   return bits.length ? `<span class="item-meta">${bits.join('')}</span>` : '';
+}
+
+// Wie viele Tags eine Zeile zeigt, bevor sie zusammenfasst - wie auf den
+// Aufgabenkarten.
+const ITEM_TAGS_VISIBLE = 3;
+
+/**
+ * Gespiegelte VTODO-CATEGORIES eines Einkaufspostens (#586).
+ *
+ * Anzeige, keine Bedienung: die Etiketten gehören der CalDAV-Quellliste, Yuvomi
+ * verwaltet sie hier nicht und schreibt sie auch nicht zurück. Deshalb <span>
+ * statt Button - anders als in den Aufgaben, wo ein Klick danach filtert.
+ */
+function renderItemTags(tags) {
+  if (!tags?.length) return '';
+  const shown = tags.slice(0, ITEM_TAGS_VISIBLE);
+  const rest  = tags.length - shown.length;
+  const chips = shown.map((tag) => `<span class="item-tag">${esc(tag)}</span>`);
+  if (rest > 0) {
+    chips.push(`<span class="item-tag item-tag--more"
+                      title="${esc(tags.slice(ITEM_TAGS_VISIBLE).join(', '))}">+${rest}</span>`);
+  }
+  return `<div class="kitchen-row__tags">${chips.join('')}</div>`;
 }
 
 function renderItem(item) {
@@ -351,12 +425,24 @@ function renderItem(item) {
         <div class="kitchen-row__main">
           <div class="kitchen-row__name">${esc(item.name)}${renderItemMeta(item)}</div>
           ${item.quantity ? `<div class="kitchen-row__meta">${esc(item.quantity)}</div>` : ''}
+          ${renderItemTags(item.tags)}
         </div>
         <!-- Geteilte .row-action-Grammatik aus layout.css (app-weit von sieben
              Modulen genutzt), gruppiert in der geteilten .kitchen-row__actions -
              vorher hingen die zwei Buttons als direkte Flex-Kinder in der Zeile,
              wodurch die Bedienzone in jedem Tab anders zusammengesetzt war. -->
         <div class="kitchen-row__actions">
+          <!-- Griff für die Handsortierung (#678). Ein BUTTON, kein role="img"
+               wie im Kategorie-Manager: dort steht daneben ein Auf/Ab-Paar als
+               Tastaturpfad, hier trägt der Griff ihn selbst (Pfeiltasten bei
+               Fokus). Die Einkaufszeile hat schon Abhaken, Details, Löschen und
+               zwei Wischgesten - zwei weitere Knöpfe hätten die Bedienzone auf
+               dem Handy zugestellt. -->
+          <button class="row-action kitchen-row__drag" data-action="reorder-handle" data-id="${item.id}"
+                  aria-label="${t('shopping.reorderHandle', { name: esc(item.name) })}"
+                  title="${t('shopping.reorderHandleHint')}">
+            <i data-lucide="grip-vertical" class="icon-md" aria-hidden="true"></i>
+          </button>
           <button class="row-action" data-action="item-details" data-id="${item.id}"
                   aria-label="${t('shopping.detailsLabel', { name: esc(item.name) })}">
             <i data-lucide="pencil" class="icon-md" aria-hidden="true"></i>
@@ -505,7 +591,7 @@ function _flashAddBtn(btn) {
  */
 function syncQuickAddDisclosure(container, open) {
   const page = container.querySelector('.shopping-page');
-  const fab = container.querySelector('#fab-new-item');
+  const fab = findPageFab('fab-new-item');
   if (!page || !fab) return;
 
   const collapsible = window.matchMedia('(hover: none)').matches && Boolean(state.activeList);
@@ -535,7 +621,7 @@ function wireQuickAdd(container) {
     if (!page?.classList.contains('shopping-page--adding')) return;
     e.stopPropagation();
     syncQuickAddDisclosure(container, false);
-    container.querySelector('#fab-new-item')?.focus();
+    findPageFab('fab-new-item')?.focus();
   });
 
   form.addEventListener('submit', async (e) => {
@@ -595,6 +681,222 @@ function maybeShowSwipeHint(container) {
 }
 
 // --------------------------------------------------------
+// Handsortierung innerhalb einer Kategorie (#678)
+// --------------------------------------------------------
+
+/** Laufende Sortable-Instanzen, damit ein Neuaufbau der Liste sie abräumt. */
+let itemSortables = [];
+
+function destroyItemSortables() {
+  itemSortables.forEach((inst) => { try { inst.destroy(); } catch { /* schon abgeräumt */ } });
+  itemSortables = [];
+}
+
+/** Ziehbare (= nicht abgehakte) Zeilen einer Gruppe in DOM-Reihenfolge. */
+function movableRows(rowsEl) {
+  return Array.from(rowsEl.querySelectorAll(':scope > .swipe-row:not([data-swipe-checked="1"])'));
+}
+
+/**
+ * Schreibt Position und Gesamtzahl in die Griff-Beschriftungen einer Gruppe.
+ *
+ * Nach jedem Zug erneut: der Griff ist bei der Tastaturbedienung das fokussierte
+ * Element, und seine Beschriftung ist die einzige Rückmeldung darüber, wo der
+ * Artikel jetzt steht. Ein statisches „Reihenfolge ändern" ließe Screenreader-
+ * Nutzer nach dem Tastendruck ohne Bestätigung zurück.
+ */
+function refreshHandleLabels(rowsEl) {
+  if (!rowsEl) return;
+  const rows = movableRows(rowsEl);
+  rows.forEach((row, idx) => {
+    const handle = row.querySelector('.kitchen-row__drag');
+    const name   = row.querySelector('.kitchen-row__name')?.textContent?.trim() ?? '';
+    if (!handle) return;
+    handle.removeAttribute('disabled');
+    handle.setAttribute('aria-label', `${t('shopping.reorderHandle', { name })}, ${
+      t('shopping.reorderPosition', { index: idx + 1, total: rows.length })}`);
+  });
+  // Abgehakte Artikel sortieren sich nicht: sie stehen ohnehin am Ende ihrer
+  // Kategorie (ORDER BY is_checked vor sort_order), ein Zug an ihnen wäre
+  // folgenlos. Der Griff bleibt sichtbar, damit die Zeile ihre Form behält.
+  //
+  // Beide Richtungen in EINER Funktion: das Zurückholen eines Artikels ist so
+  // alltäglich wie das Abhaken, und ein nur gesetztes `disabled` hätte den Griff
+  // bis zum nächsten Voll-Render tot gelassen.
+  rowsEl.querySelectorAll(':scope > [data-swipe-checked="1"] .kitchen-row__drag')
+    .forEach((handle) => handle.setAttribute('disabled', ''));
+}
+
+/**
+ * Sagt die neue Position einer bewegten Zeile über die Live-Region an.
+ * Nutzt bewusst `category.reorderAnnounce` mit: der Satz ist wortgleich, und
+ * eine zweite Fassung derselben Aussage wäre 24 Übersetzungen, die
+ * auseinanderlaufen können.
+ */
+function announceItemMove(container, row) {
+  const el = container?.querySelector('#items-reorder-announce');
+  if (!el || !row) return;
+  const rows = movableRows(row.parentElement);
+  const idx  = rows.indexOf(row);
+  if (idx === -1) return;
+  el.textContent = t('category.reorderAnnounce', {
+    name:     row.querySelector('.kitchen-row__name')?.textContent?.trim() ?? '',
+    position: idx + 1,
+    total:    rows.length,
+  });
+}
+
+/** Kategorien mit laufender Sicherung: Name -> { again: boolean }. */
+const orderRuns = new Map();
+
+/**
+ * Einen Sicherungslauf ausführen: liest die Reihenfolge JETZT aus dem DOM.
+ *
+ * `listId` kommt vom Einreihen und nicht aus `state.activeListId`: wechselt der
+ * Nutzer die Liste, während eine Nachfolge aussteht, hält `groupEl` noch die
+ * abgehängten Zeilen der alten Liste. Deren IDs gegen die inzwischen aktive
+ * Liste zu schicken, quittiert die Route zu Recht mit 400 - gemeint war der Zug
+ * in der alten Liste, und dorthin gehört er auch gesichert.
+ */
+async function sendItemOrder(groupEl, container, listId) {
+  const rowsEl   = groupEl.querySelector('.kitchen-rows');
+  const category = groupEl.dataset.category;
+  if (!rowsEl) return true;
+
+  // Alle Artikel der Kategorie, auch die abgehakten: die Route verlangt die
+  // vollständige Gruppe, sonst kollidieren die neuen Ränge mit den alten.
+  const order = Array.from(rowsEl.querySelectorAll(':scope > .swipe-row'))
+    .map((row) => Number(row.dataset.swipeId));
+  if (!order.length) return true;
+
+  try {
+    const data = await api.patch(`/shopping/${listId}/items/reorder`, { category, order });
+    // Nur den State nachziehen, nicht neu zeichnen: das DOM steht bereits
+    // richtig, und ein Re-Render würde den Fokus vom Griff nehmen - mitten in
+    // einer Tastaturbedienung wäre das das Ende der Bedienkette.
+    //
+    // Und nur, solange dieselbe Liste offen ist: die Antwort trägt die Artikel
+    // VON `listId`, ein zwischenzeitlicher Listenwechsel bekäme sonst den
+    // Bestand der alten Liste in seinen State geschrieben.
+    if (listId === state.activeListId) state.items = data.data ?? state.items;
+    return true;
+  } catch (err) {
+    // Fehler einer Liste, die gar nicht mehr offen ist, nicht dem Nutzer
+    // vorlegen und erst recht nicht die sichtbare Liste dafür neu bauen.
+    if (listId !== state.activeListId) return false;
+    window.yuvomi.showToast(err.data?.error ?? t('common.errorGeneric'), 'danger');
+    updateItemsList(container);
+    return false;
+  }
+}
+
+/**
+ * Neue Reihenfolge einer Gruppe sichern. Geteilter Persistenz-Pfad von Drag und
+ * Pfeiltasten - beide haben das DOM vorher schon umgestellt, deshalb baut der
+ * Fehlerfall die Liste aus dem unveränderten State neu auf.
+ *
+ * JE KATEGORIE IMMER NUR EINE LAUFENDE ANFRAGE. Zwei schnell nacheinander
+ * gedrückte Pfeiltasten schickten sonst zwei PATCHes parallel los, und es
+ * entschied die Ankunftsreihenfolge beim Server statt die Bedienreihenfolge:
+ * traf der erste zuletzt ein, schrieb er den Zwischenstand fest, das DOM zeigte
+ * aber den zweiten Zug. Der Nutzer sah seine Reihenfolge und bekam beim
+ * nächsten Laden eine andere. Bewusst als Warteschlange und nicht als Entprellung:
+ * die Sicherung bleibt sofort, nur eben der Reihe nach.
+ *
+ * Weitere Züge während eines Laufs werden zu EINER Nachfolge zusammengefasst -
+ * die liest die dann aktuelle Reihenfolge, also genügt sie für beliebig viele.
+ *
+ * @param {HTMLElement} [movedRow] - die bewegte Zeile, für die Ansage
+ */
+function persistItemOrder(groupEl, container, movedRow) {
+  const category = groupEl?.dataset.category;
+  if (!groupEl || !category) return;
+
+  refreshHandleLabels(groupEl.querySelector('.kitchen-rows'));
+  announceItemMove(container, movedRow);
+
+  const running = orderRuns.get(category);
+  if (running) { running.again = true; return; }
+
+  const run    = { again: false };
+  const listId = state.activeListId;
+  orderRuns.set(category, run);
+  (async () => {
+    try {
+      let ok = true;
+      do {
+        run.again = false;
+        ok = await sendItemOrder(groupEl, container, listId);
+      } while (run.again && ok);   // nach einem Fehler hat updateItemsList das DOM zurückgesetzt
+    } finally {
+      orderRuns.delete(category);
+    }
+  })();
+}
+
+/**
+ * Verschiebt eine Zeile um einen Platz und hält den Fokus auf ihrem Griff.
+ * @param {HTMLElement} row
+ * @param {-1|1} delta
+ */
+function moveItemRow(row, delta, container) {
+  const rowsEl = row.parentElement;
+  const rows   = movableRows(rowsEl);
+  const idx    = rows.indexOf(row);
+  const target = idx + delta;
+  if (idx === -1 || target < 0 || target >= rows.length) return;
+
+  if (delta < 0) rowsEl.insertBefore(row, rows[target]);
+  else           rowsEl.insertBefore(row, rows[target].nextSibling);
+
+  vibrate(15);
+  row.querySelector('.kitchen-row__drag')?.focus();
+  persistItemOrder(rowsEl.closest('.kitchen-group'), container, row);
+}
+
+/**
+ * Verdrahtet je Kategorie-Gruppe das Ziehen und die Pfeiltasten am Griff.
+ *
+ * Je Gruppe eine eigene Instanz und kein `group`-Verbund: ein Zug von „Obst"
+ * nach „Backwaren" wäre ein Kategoriewechsel, keine Umsortierung - dafür gibt es
+ * den Detail-Dialog, und die Ränge gelten ohnehin je Kategorie.
+ */
+function wireItemReorder(container) {
+  const listEl = container.querySelector('#items-list');
+  if (!listEl) return;
+  destroyItemSortables();
+
+  listEl.querySelectorAll('.kitchen-group').forEach((groupEl) => {
+    const rowsEl = groupEl.querySelector('.kitchen-rows');
+    if (!rowsEl) return;
+    refreshHandleLabels(rowsEl);
+
+    makeSortable(rowsEl, {
+      handle: '.kitchen-row__drag',
+      draggable: '.swipe-row',
+      // Abgehaktes bleibt liegen: es steht am Ende der Kategorie, und ein Zug
+      // daran würde beim nächsten Laden zurückspringen.
+      filter: '[data-swipe-checked="1"]',
+      onEnd: (evt) => persistItemOrder(groupEl, container, evt?.item),
+    }).then((inst) => { if (inst) itemSortables.push(inst); })
+      .catch(() => { /* ohne SortableJS bleibt der Tastaturpfad */ });
+  });
+
+  // Tastaturpfad, delegiert: derselbe Persistenz-Handler wie das Drag-Ende.
+  // Einmal pro #items-list-Element - mountItems() tauscht nur dessen Inhalt aus,
+  // ein Listener pro Aufruf hätte sich mit jedem Nachladen gestapelt.
+  if (listEl.dataset.reorderWired) return;
+  listEl.dataset.reorderWired = '1';
+  listEl.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+    const handle = e.target.closest?.('.kitchen-row__drag');
+    if (!handle || handle.disabled) return;
+    e.preventDefault();
+    moveItemRow(handle.closest('.swipe-row'), e.key === 'ArrowUp' ? -1 : 1, container);
+  });
+}
+
+// --------------------------------------------------------
 // Swipe-Gesten
 // --------------------------------------------------------
 
@@ -620,6 +922,10 @@ function wireSwipeGestures(container) {
 
     row.addEventListener('touchstart', (e) => {
       if (document.getElementById('shared-modal-overlay')) return;
+      // Am Sortiergriff gehört die Geste dem Ziehen (#678). Ohne diese Ausnahme
+      // liefe beim Hochziehen einer Zeile das seitliche Wackeln als Wischweg mit
+      // und die Karte würde unter dem Finger nach „erledigt" rutschen.
+      if (e.target.closest?.('.kitchen-row__drag')) { locked = 'scroll'; return; }
       startX = e.touches[0].clientX;
       startY = e.touches[0].clientY;
       dx     = 0;
@@ -764,6 +1070,10 @@ function updateItemRow(container, item) {
       ? t('shopping.markUndoneLabel', { name: item.name })
       : t('shopping.markDoneLabel', { name: item.name }));
   }
+
+  // Der Sortiergriff hängt am Erledigt-Zustand (#678): abgehaktes sortiert sich
+  // nicht, und die Positionsangaben der Gruppe verschieben sich mit.
+  refreshHandleLabels(row.closest('.kitchen-rows'));
 
   // Swipe-Affordance (links) spiegelt den neuen Status
   const reveal = row.querySelector('.swipe-reveal--done');
@@ -922,7 +1232,10 @@ function openItemDetails(itemId, container) {
           const data = await api.patch(`/shopping/items/${item.id}`, payload);
           const categoryChanged = data.data.category !== item.category;
           Object.assign(item, data.data);
-          closeModal();
+          // force: der Dirty-Guard vergleicht gegen den Snapshot vom Öffnen und
+          // sähe die gerade gespeicherten Felder als ungespeicherte Änderungen.
+          // Ohne das fragte Speichern „Änderungen verwerfen?" (Issue #625).
+          closeModal({ force: true });
           // Ein Kategoriewechsel verschiebt die Zeile in eine andere Gruppe - das
           // kann keine Zeilen-Auffrischung leisten, dafür muss die Liste neu
           // gruppiert werden. Sonst genügt der schonende Weg, der die
@@ -946,10 +1259,11 @@ function updateItemsList(container) {
   if (listEl) {
     // mountItems() verdrahtet den CTA des Leerzustands selbst; der frühere
     // nachgelagerte #empty-cta-shopping-Listener entfällt damit.
-    mountItems(listEl);
+    mountItems(listEl, container);
     if (window.lucide) window.lucide.createIcons({ el: listEl });
     stagger(listEl.querySelectorAll('.shopping-item'));
     wireSwipeGestures(container);
+    wireItemReorder(container);
     maybeShowSwipeHint(container);
   }
   updateCheckedActions(container);
@@ -1246,7 +1560,9 @@ function openMealPlanImport(container) {
           renderTabs(container);
           renderListContent(container);
           wireListContentEvents(container);
-          closeModal();
+          // force: siehe openItemDetails - ein geänderter Zeitraum ist nach dem
+          // Import nichts, was noch zu verwerfen wäre.
+          closeModal({ force: true });
           const count = Number(data.data.transferred) || 0;
           window.yuvomi.showToast(t('meals.transferSuccess', { count }), 'success');
         } catch (err) {
@@ -1265,10 +1581,14 @@ async function loadLists() {
   try {
     const data   = await api.get('/shopping');
     state.lists  = data.data ?? [];
+    state.listsError = null;
   } catch (err) {
     console.error('[Shopping] loadLists Fehler:', err);
     state.lists = [];
-    window.yuvomi?.showToast(t('shopping.listsLoadError'), 'danger');
+    // Fehler statt Toast: der Toast verging, während darunter „Keine Listen ·
+    // [Neue Liste erstellen]" stehen blieb - bei 31 vorhandenen Artikeln
+    // (Critique P0, 2026-07-30).
+    state.listsError = err;
   }
 }
 
@@ -1297,11 +1617,12 @@ async function switchList(listId, container) {
   container.querySelector('#list-content')?.setAttribute('aria-busy', 'true');
   try {
     await loadItems(listId);
+    state.itemsError = null;
   } catch (err) {
     console.error('[Shopping] loadItems Fehler:', err);
     state.items = [];
     state.activeList = state.lists.find((l) => l.id === listId) ?? null;
-    window.yuvomi?.showToast(t('shopping.itemsLoadError'), 'danger');
+    state.itemsError = err;
   }
   renderListContent(container);
   wireListContentEvents(container);
@@ -1496,7 +1817,7 @@ function wireListContentEvents(container) {
         state.items.length
           ? t('shopping.deleteListConfirm', { name: state.activeList?.name ?? '', count: state.items.length })
           : t('shopping.deleteListConfirmEmpty', { name: state.activeList?.name ?? '' }),
-        { danger: true, confirmLabel: t('common.delete') },
+        { danger: true, confirmLabel: t('common.delete'), detail: t('shopping.deleteListConfirmDetail') },
       );
       if (!confirmed) return;
 
@@ -1584,6 +1905,9 @@ async function openCategoryManager(container, { fromDeepLink = false } = {}) {
         labelResolver: (item) => categoryLabel(item.name),
         titleKey: 'shopping.manageCategories',
         hintKey: 'settings.shoppingCategoriesHint',
+        // Anders als Budget/Tasks/Kontakte loescht der Einkauf auch belegte
+        // Kategorien und schiebt die Artikel auf die naechste Kategorie.
+        deleteDetailKey: 'shopping.categoryDeleteConfirmDetail',
       });
     },
     onClose: () => {
@@ -1624,17 +1948,28 @@ export async function render(container, { user }) {
       </div>
     </div>
   `);
+  state.itemsError = null;
   try {
+    // loadCategories() und loadLists() fangen selbst; der äußere catch ist das
+    // Netz für alles Unerwartete und bildet es auf denselben Fehlerzustand ab,
+    // statt die Ausnahme in den globalen Fehlerbildschirm laufen zu lassen.
     await Promise.all([loadCategories(), loadLists()]);
-    if (state.lists.length) {
+    if (!state.listsError && state.lists.length) {
       const listParam = parseInt(new URLSearchParams(window.location.search).get('list'), 10) || null;
       const target = listParam && state.lists.find((l) => l.id === listParam);
       state.activeListId = target ? target.id : state.lists[0].id;
-      await loadItems(state.activeListId);
+      try {
+        await loadItems(state.activeListId);
+      } catch (err) {
+        console.error('[Shopping] loadItems Fehler:', err);
+        state.items = [];
+        state.activeList = state.lists.find((l) => l.id === state.activeListId) ?? null;
+        state.itemsError = err;
+      }
     }
   } catch (err) {
-    console.error('[Shopping] Ladefehler:', err.message);
-    window.yuvomi.showToast(t('shopping.listsLoadError'), 'danger');
+    console.error('[Shopping] Ladefehler:', err);
+    state.listsError = err;
   }
 
   container.replaceChildren();
@@ -1648,7 +1983,9 @@ export async function render(container, { user }) {
            „genau einmal pro Ahnenkette"-Bedingung aus tokens.css, an der auch
            der 16px-Versatz im Budget-Modul hing. Draußen fluchtet er mit der
            Listen-Chip-Leiste darüber und trägt sein Chrome full-bleed. -->
-      <div class="page-toolbar page-toolbar--in-group" id="list-head" hidden></div>
+      <!-- --narrow: der Kopf endet beim Lesemaß des Körpers (.kitchen-list),
+           nicht an der Content-Spalte. Siehe layout.css. -->
+      <div class="page-toolbar page-toolbar--in-group page-toolbar--narrow" id="list-head" hidden></div>
       <div id="list-content" style="flex:1;display:flex;flex-direction:column;overflow:hidden"></div>
       <button class="page-fab" id="fab-new-item" aria-label="${t('shopping.addItemLabel')}">
         <i data-lucide="plus" class="icon-xl" aria-hidden="true"></i>
@@ -1662,7 +1999,7 @@ export async function render(container, { user }) {
   renderListContent(container);
   wireListContentEvents(container);
 
-  container.querySelector('#fab-new-item')?.addEventListener('click', (e) => {
+  findPageFab('fab-new-item')?.addEventListener('click', (e) => {
     const input = container.querySelector('#item-name-input');
     if (!input) {
       // Keine Liste aktiv → neue Liste erstellen

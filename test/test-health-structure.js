@@ -2,8 +2,8 @@
  * Health structure guard.
  *
  * Sichert die modulare Aufteilung von server/routes/health.js: der Orchestrator
- * muss dieselbe {Methode, Pfad}-Routentabelle wie vor dem Split ergeben (42
- * Routen), und die Tab-Cluster-Router müssen zusammen exakt diese Routen ergeben
+ * muss dieselbe {Methode, Pfad}-Routentabelle wie vor dem Split ergeben (45
+ * Routen: 42 aus dem Split, dazu die drei Betreuungs-Routen aus #584), und die Tab-Cluster-Router müssen zusammen exakt diese Routen ergeben
  * (keine verlorene/doppelte Route). Fängt ab, dass ein Cluster-Router still nicht
  * gemountet wird oder eine Route beim Umbau verloren geht/umbenannt wird.
  *
@@ -23,6 +23,7 @@ import labsRouter from '../server/routes/health/labs.js';
 import activitiesRouter from '../server/routes/health/activities.js';
 import exportRouter from '../server/routes/health/export.js';
 import cycleRouter from '../server/routes/health/cycle.js';
+import caregiversRouter from '../server/routes/health/caregivers.js';
 
 /** Sammelt rekursiv alle {METHOD path}-Paare eines Express-Routers (inkl. gemounteter Sub-Router). */
 function collectRoutes(router) {
@@ -94,17 +95,22 @@ const EXPECTED = [
   'PUT /cycle/settings',
   'PATCH /cycle/visibility',
   'GET /export/cycle',
+  // Betreuung (#584): wer darf fuer wen eintragen
+  'GET /caregivers/me',
+  'GET /caregivers',
+  'PUT /caregivers/:subjectId',
 ];
 
-test('Orchestrator ergibt exakt die erwartete Routentabelle (42 Routen)', () => {
+test('Orchestrator ergibt exakt die erwartete Routentabelle (45 Routen)', () => {
   const actual = collectRoutes(healthRouter).sort();
   assert.deepEqual(actual, [...EXPECTED].sort());
-  assert.equal(actual.length, 42);
+  assert.equal(actual.length, 45);
 });
 
 test('die Cluster-Router zusammen ergeben genau die Orchestrator-Routen (keine verlorene/doppelte Route)', () => {
   const perModule = [
     vitalsRouter, medicationsRouter, labsRouter, activitiesRouter, exportRouter, cycleRouter,
+    caregiversRouter,
   ].flatMap(collectRoutes);
   // keine Route kommt in mehr als einem Cluster-Router vor
   const seen = new Set();

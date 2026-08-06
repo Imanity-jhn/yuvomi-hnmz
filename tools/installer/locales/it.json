@@ -4,7 +4,7 @@
     "continue": "Continua",
     "back": "Indietro",
     "generate": "Genera",
-    "generating": "…",
+    "generating": "Generazione…",
     "optional": "Facoltativo",
     "stepCounter": "Passo {{n}} di {{total}}",
     "toggleVisibility": "Mostra o nascondi il valore",
@@ -48,8 +48,8 @@
     "unitsMetric": "Metrico (°C)",
     "unitsImperial": "Imperiale (°F)",
     "errCoords": "Latitudine e longitudine sono obbligatorie.",
-    "errLat": "Latitudine non valida (–90 a 90).",
-    "errLon": "Longitudine non valida (–180 a 180)."
+    "errLat": "Latitudine non valida (-90 a 90).",
+    "errLon": "Longitudine non valida (-180 a 180)."
   },
   "calendar": {
     "title": "Sincronizzazione calendario",
@@ -101,19 +101,26 @@
   "docker": {
     "title": "Avvio di Yuvomi",
     "subtitle": "Download dell'immagine e avvio del container Docker.",
-    "starting": "Avvio del container …",
     "elapsed": "{{n}} s trascorsi",
     "running": "Il container è integro e in esecuzione",
     "failed": "Impossibile avviare il container",
     "unknownError": "Errore sconosciuto",
     "toAdmin": "Continua con la configurazione dell'amministratore",
-    "retry": "Riprova"
+    "retry": "Riprova",
+    "phasePull": "Download dell’immagine",
+    "phaseBoot": "Avvio del container",
+    "phaseHealth": "Controllo di integrità in corso",
+    "firstRunHint": "La prima volta può richiedere diversi minuti.",
+    "stalled": "Sta richiedendo più tempo del solito. Il registro qui sotto mostra il motivo.",
+    "showLogs": "Mostra registro",
+    "hideLogs": "Nascondi registro",
+    "timedOut": "Nessuna risposta dopo 15 minuti. Controlla il registro e riprova."
   },
   "admin": {
     "title": "Crea account amministratore",
     "subtitle": "Configura il tuo primo accesso. Questo account ha accesso completo a Yuvomi.",
     "userLabel": "Nome utente",
-    "userHint": "3–64 caratteri: lettere, numeri, . - _",
+    "userHint": "3-64 caratteri: lettere, numeri, . - _",
     "nameLabel": "Nome visualizzato",
     "passLabel": "Password",
     "passPlaceholder": "Almeno 8 caratteri",
@@ -121,7 +128,7 @@
     "creating": "Creazione …",
     "create": "Crea account",
     "errAll": "Tutti i campi sono obbligatori.",
-    "errUser": "Formato del nome utente non valido (3–64 caratteri, lettere/numeri/._-).",
+    "errUser": "Formato del nome utente non valido (3-64 caratteri, lettere/numeri/._-).",
     "errPass": "La password deve contenere almeno 8 caratteri.",
     "errMatch": "Le password non coincidono.",
     "errCreate": "Impossibile creare l'account amministratore."
@@ -190,7 +197,17 @@
     "documentGoogleDriveReuseHint": "Lascia entrambi i campi vuoti per riutilizzare le credenziali OAuth di Google Calendar. Per usarne di dedicate, creale nella console Google Cloud (come nel passaggio Calendar).",
     "documentGoogleDriveRedirectLabel": "URI di reindirizzamento",
     "errDocumentGoogleDrivePair": "L’ID client e il client secret di Google Drive devono essere entrambi impostati o entrambi vuoti.",
-    "errDocumentGoogleDriveCredentials": "Google Drive richiede un proprio ID client e client secret oppure credenziali di Google Calendar configurate."
+    "errDocumentGoogleDriveCredentials": "Google Drive richiede un proprio ID client e client secret oppure credenziali di Google Calendar configurate.",
+    "dataDirLabel": "Cartella dati sull’host",
+    "dataDirHint": "Dove risiedono il database e i dati dell’app sul server. Lascia vuoto per usare ./data accanto al file compose.",
+    "documentLocalDirLabel": "Cartella sull’host",
+    "documentLocalDirHint": "La cartella del server montata nel container. Lascia vuoto per usare ./documents.",
+    "documentWebdavPrivateNetwork": "Consenti una destinazione WebDAV nella rete locale",
+    "documentWebdavPrivateNetworkHint": "Necessario per un Nextcloud nella tua rete. Rimuove la protezione SSRF per questa destinazione.",
+    "icsPrivateNetwork": "Consenti abbonamenti calendario dalla rete locale",
+    "icsPrivateNetworkHint": "Necessario per feed ICS da dispositivi nella tua rete. Rimuove la protezione SSRF per gli abbonamenti calendario.",
+    "oidcTrustEmail": "Fidati dell’email senza claim verified",
+    "oidcTrustEmailHint": "Attivalo solo se il tuo provider non invia email_verified e ti fidi di esso."
   },
   "welcome": {
     "title": "Ti diamo il benvenuto in Yuvomi",

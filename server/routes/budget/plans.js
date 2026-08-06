@@ -7,7 +7,7 @@ import express from 'express';
 import { createLogger } from '../../logger.js';
 import * as db from '../../db.js';
 import { num, collectErrors, MONTH_RE } from '../../middleware/validate.js';
-import { cents, thisMonthLocalKey, validExpenseCategoryKeys } from './helpers.js';
+import { bookedOnly, cents, thisMonthLocalKey, validExpenseCategoryKeys } from './helpers.js';
 
 const log = createLogger('Budget');
 const router = express.Router();
@@ -35,7 +35,7 @@ export function computePlanProgress(database, month) {
   // Ist-Ausgaben je Kategorie (als positive Beträge) für den Monat.
   const spentRows = database.prepare(`
     SELECT category, SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END) AS spent
-    FROM budget_entries WHERE date BETWEEN ? AND ? GROUP BY category
+    FROM budget_entries WHERE date BETWEEN ? AND ?${bookedOnly()} GROUP BY category
   `).all(from, to);
   const spentMap = new Map(spentRows.map((r) => [r.category, cents(r.spent || 0)]));
 
@@ -61,7 +61,7 @@ export function computePlanProgress(database, month) {
   const totals = database.prepare(`
     SELECT SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) AS income,
            SUM(amount) AS balance
-    FROM budget_entries WHERE date BETWEEN ? AND ?
+    FROM budget_entries WHERE date BETWEEN ? AND ?${bookedOnly()}
   `).get(from, to);
   const income  = cents(totals.income || 0);
   const balance = cents(totals.balance || 0); // Netto-Ersparnis des Monats

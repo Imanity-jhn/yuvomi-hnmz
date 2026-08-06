@@ -896,8 +896,8 @@
 .settings-avatar-button:focus-visible {
   transform: translateY(-1px);
   box-shadow: var(--glass-shadow-md);
-  outline: 2px solid var(--active-module-accent, var(--color-accent));
-  outline-offset: 2px;
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
 }
 
 .settings-avatar-actions {
@@ -1489,8 +1489,8 @@
 }
 
 .theme-toggle__btn:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 2px;
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
 }
 
 /* --------------------------------------------------------
@@ -1550,8 +1550,8 @@
 }
 
 .toggle-row:focus-within {
-  outline: 2px solid var(--active-module-accent, var(--color-accent));
-  outline-offset: 2px;
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
 }
 
 .toggle-row input[type="checkbox"] {
@@ -1601,8 +1601,8 @@
 }
 
 .reminder-preset:focus-within {
-  outline: 2px solid var(--active-module-accent, var(--color-accent));
-  outline-offset: 2px;
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
 }
 
 /* Aktiver Zustand über :has(); die native Checkbox (accent-color) bleibt als
@@ -1920,6 +1920,13 @@
   gap: var(--space-2);
 }
 
+/* Serverseitige Einschränkung, keine Fehlermeldung: der Hinweis steht als Text
+   unter der Kontozeile, nicht als Warnton auf der Karte - die Verbindung ist ja
+   in Ordnung (#677). */
+.caldav-reminder-note {
+  margin-top: var(--space-3);
+}
+
 .caldav-calendar-item,
 .caldav-reminder-item {
   display: flex;
@@ -2049,8 +2056,8 @@
 }
 
 .caldav-calendar-assignee:focus-visible {
-  outline: 2px solid var(--active-module-accent, var(--color-accent));
-  outline-offset: 2px;
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
 }
 
 .caldav-account-actions {
@@ -2660,8 +2667,8 @@
 .perm-seg__label { display: none; }
 
 .perm-seg__opt:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 1px;
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
 }
 
 .perm-actions {

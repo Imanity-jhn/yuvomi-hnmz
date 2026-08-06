@@ -99,6 +99,8 @@
 .budget-chart-section__title,
 .loan-report__section-title,
 .budget-list-header__title,
+.budget-panel-head__title,
+.budget-page .split-title,
 .contact-group__header,
 .day-header__name,
 .meal-slot__type-label,
@@ -140,7 +142,7 @@
  * ------------------------------------------------------------------------ */
 .u-card-title,
 .agenda-event__title,
-.event-popup__title,
+.detail-popover__title,
 .budget-loan-card__title,
 .budget-entry__title,
 .contact-item__name,

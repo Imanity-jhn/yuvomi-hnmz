@@ -9,8 +9,26 @@
 // getauscht, jede andere Zeile bleibt Zeichen für Zeichen stehen.
 // --------------------------------------------------------
 
-// Properties, die Yuvomi verwaltet und daher ersetzen darf.
-const MANAGED = new Set(['SUMMARY', 'DESCRIPTION', 'LOCATION', 'DTSTART', 'DTEND', 'RRULE']);
+// Properties, die Yuvomi verwaltet und daher ersetzen darf - je Komponente.
+const MANAGED_VEVENT = new Set(['SUMMARY', 'DESCRIPTION', 'LOCATION', 'DTSTART', 'DTEND', 'RRULE']);
+// VTODO (#617): STATUS, COMPLETED und PERCENT-COMPLETE gehören zusammen - Clients
+// lesen den Erledigt-Zustand mal am einen, mal am anderen ab.
+//
+// CATEGORIES kam mit den Tags dazu (#586). Verwaltet werden darf es erst,
+// seit Yuvomi die vollständige Liste hält: solange nur ein einzelner Wert
+// gespiegelt worden wäre, hätte jeder Push die übrigen Tags des Servers
+// gelöscht.
+const MANAGED_VTODO = new Set([
+  'SUMMARY', 'DESCRIPTION', 'DUE', 'PRIORITY', 'STATUS', 'COMPLETED', 'PERCENT-COMPLETE',
+  'CATEGORIES',
+]);
+
+// Properties, deren Wert eine kommaseparierte Liste ist.
+const LIST_VALUED = new Set(['CATEGORIES']);
+
+// Properties, deren Parameter sich mit dem Wert ändern (VALUE=DATE, TZID) und die
+// ihre Parameter deshalb selbst mitbringen: { value, params }.
+const PARAMETRIC = new Set(['DTSTART', 'DTEND', 'DUE']);
 
 /** RFC 5545 §3.1: Fortsetzungszeilen beginnen mit Space oder Tab. */
 export function unfoldICS(text) {
@@ -50,15 +68,25 @@ function escapeText(value) {
 
 /**
  * Baut die Ersatzzeilen für ein Feld. `null`/`undefined` heißt "Property entfernen".
- * DTSTART/DTEND tragen ihre Parameter selbst (VALUE=DATE bzw. TZID), weil sich
+ * DTSTART/DTEND/DUE tragen ihre Parameter selbst (VALUE=DATE bzw. TZID), weil sich
  * Ganztägigkeit und Zone mit dem Wert ändern können.
  */
 function buildLines(name, value) {
   if (value === null || value === undefined || value === '') return [];
-  if (name === 'DTSTART' || name === 'DTEND') {
+  if (PARAMETRIC.has(name)) {
     const { value: v, params = '' } = value;
     if (!v) return [];
     return [`${name}${params}:${v}`];
+  }
+  // Listen-Properties: das Komma trennt hier die Werte, escapeText würde es zum
+  // Bestandteil eines einzigen Wertes machen. Also jedes Element für sich
+  // escapen (ein Komma **im** Wert bleibt dabei escaped) und dann verbinden.
+  if (LIST_VALUED.has(name)) {
+    const items = (Array.isArray(value) ? value : [value])
+      .map((item) => String(item ?? '').trim())
+      .filter(Boolean);
+    if (!items.length) return [];   // leere Liste = Property entfernen
+    return [`${name}:${items.map(escapeText).join(',')}`];
   }
   if (name === 'RRULE') {
     const rule = String(value).replace(/^RRULE:/i, '');
@@ -68,31 +96,34 @@ function buildLines(name, value) {
 }
 
 /**
- * Ersetzt die verwalteten Properties eines VEVENT in einem iCalendar-Objekt.
+ * Ersetzt die verwalteten Properties einer Komponente in einem iCalendar-Objekt.
  *
- * Angefasst wird ausschließlich das VEVENT mit der passenden UID **ohne**
- * RECURRENCE-ID, also der Serien-Master bzw. der Einzeltermin. Ausnahme-Vorkommen
+ * Angefasst wird ausschließlich die Komponente mit der passenden UID **ohne**
+ * RECURRENCE-ID, also der Serien-Master bzw. der Einzeleintrag. Ausnahme-Vorkommen
  * derselben UID (RECURRENCE-ID-Overrides) liegen in derselben Datei und bleiben
  * unberührt - sie tragen eigene Werte, die kein Master-Update überschreiben darf.
  *
- * @param {string} icsText  Originales Kalenderobjekt vom Server
- * @param {string} uid      UID des zu ändernden VEVENT
- * @param {object} fields   { SUMMARY, DESCRIPTION, LOCATION, DTSTART, DTEND, RRULE }
- *                          DTSTART/DTEND als { value, params }, Rest als String.
- *                          null entfernt die Property.
- * @returns {string|null}   Neues Objekt, oder null wenn kein passendes VEVENT existiert.
+ * @param {string} icsText    Originales Kalenderobjekt vom Server
+ * @param {string} uid        UID der zu ändernden Komponente
+ * @param {object} fields     Property-Name → Wert; { value, params } für DTSTART/DTEND/DUE,
+ *                            sonst String. null entfernt die Property.
+ * @param {string} component  'VEVENT' | 'VTODO'
+ * @param {Set}    managed    Properties, die ersetzt werden dürfen
+ * @returns {string|null}     Neues Objekt, oder null wenn keine passende Komponente existiert.
  */
-export function patchICSEvent(icsText, uid, fields = {}) {
+function patchICSComponent(icsText, uid, fields, component, managed) {
   const lines = unfoldICS(icsText).split('\n');
+  const begin = `BEGIN:${component}`;
+  const end   = `END:${component}`;
 
-  // VEVENT-Blöcke abgrenzen
+  // Komponenten-Blöcke abgrenzen
   const blocks = [];
   let current = null;
   lines.forEach((line, index) => {
-    const trimmed = line.trim();
-    if (trimmed.toUpperCase() === 'BEGIN:VEVENT') {
+    const trimmed = line.trim().toUpperCase();
+    if (trimmed === begin) {
       current = { start: index, end: -1 };
-    } else if (trimmed.toUpperCase() === 'END:VEVENT' && current) {
+    } else if (trimmed === end && current) {
       current.end = index;
       blocks.push(current);
       current = null;
@@ -114,11 +145,11 @@ export function patchICSEvent(icsText, uid, fields = {}) {
   const replacements = new Map();
   for (const [name, value] of Object.entries(fields)) {
     const upper = name.toUpperCase();
-    if (MANAGED.has(upper)) replacements.set(upper, buildLines(upper, value));
+    if (managed.has(upper)) replacements.set(upper, buildLines(upper, value));
   }
 
   // Neue Properties müssen VOR die erste Subkomponente (typischerweise VALARM):
-  // RFC 5545 ordnet einem VEVENT erst seine Properties, dann seine Alarme zu, und
+  // RFC 5545 ordnet einer Komponente erst ihre Properties, dann ihre Alarme zu, und
   // strenge Parser weisen ein DESCRIPTION hinter END:VALARM zurück.
   let insertAt = target.end;
   for (let i = target.start + 1; i < target.end; i++) {
@@ -176,6 +207,22 @@ export function patchICSEvent(icsText, uid, fields = {}) {
   }
 
   return out.map(foldICSLine).join('\r\n');
+}
+
+/**
+ * Ersetzt die verwalteten Properties eines VEVENT (#593).
+ * @param {object} fields { SUMMARY, DESCRIPTION, LOCATION, DTSTART, DTEND, RRULE }
+ */
+export function patchICSEvent(icsText, uid, fields = {}) {
+  return patchICSComponent(icsText, uid, fields, 'VEVENT', MANAGED_VEVENT);
+}
+
+/**
+ * Ersetzt die verwalteten Properties eines VTODO (#617).
+ * @param {object} fields { SUMMARY, DESCRIPTION, DUE, PRIORITY, STATUS, COMPLETED, PERCENT-COMPLETE }
+ */
+export function patchICSTodo(icsText, uid, fields = {}) {
+  return patchICSComponent(icsText, uid, fields, 'VTODO', MANAGED_VTODO);
 }
 
 /** Zählt die VEVENT-Blöcke eines Objekts (Master + Overrides). */

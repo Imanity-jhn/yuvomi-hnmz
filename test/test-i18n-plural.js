@@ -146,3 +146,47 @@ test('jede Pluralvariante hat einen zählenden Basisschlüssel in allen Locales'
     }
   }
 });
+
+// ---------------------------------------------------------------------------
+// Platzhalter-Ersetzung
+//
+// Die Werte kommen aus Nutzereingaben (Namen, Titel, Notizen). Sie werden
+// eingesetzt, nicht interpretiert - weder als Regex-Rückverweis noch als
+// weiterer Platzhalter.
+// ---------------------------------------------------------------------------
+
+test('Werte mit Ersetzungssyntax werden wörtlich eingesetzt', async () => {
+  await setLocale('de');
+  // `$&` steht in einem String-Ersatz für den Treffer, `` $` `` für den Text
+  // davor. Vorher wurde aus "A $& B" ein "A {{name}} B" und `` $` `` zog den
+  // halben Satz in den Namen.
+  assert.equal(t('birthdays.calendarEventTitle', { name: 'A $& B' }), 'Geburtstag: A $& B');
+  assert.equal(t('birthdays.calendarEventTitle', { name: 'X $` Y' }), 'Geburtstag: X $` Y');
+  assert.equal(t('birthdays.calendarEventTitle', { name: "Z $' W" }), "Geburtstag: Z $' W");
+  assert.equal(t('birthdays.calendarEventTitle', { name: 'P $$ Q' }), 'Geburtstag: P $$ Q');
+});
+
+test('ein Wert, der wie ein Platzhalter aussieht, wird nicht erneut ersetzt', async () => {
+  await setLocale('de');
+  // Nacheinander ersetzt, hätte der date-Durchgang den eingesetzten Namen
+  // nochmals durchsucht und das Datum zweimal geschrieben.
+  assert.equal(
+    t('birthdays.calendarEventDescription', { name: '{{date}}', date: '01.01.2000' }),
+    'Geburtstagserinnerung für {{date}} (01.01.2000).',
+  );
+});
+
+test('unbekannte Platzhalter bleiben sichtbar stehen', async () => {
+  await setLocale('de');
+  // Ein vergessener Parameter soll auffallen, nicht still ein Loch hinterlassen.
+  assert.equal(
+    t('birthdays.calendarEventDescription', { name: 'Emma' }),
+    'Geburtstagserinnerung für Emma ({{date}}).',
+  );
+});
+
+test('Zahlen und Pluralformen ersetzen weiterhin normal', async () => {
+  await setLocale('de');
+  assert.equal(t('settings.enabledReminderListCount', { count: 1 }), '1 Erinnerungsliste aktiviert');
+  assert.equal(t('settings.enabledReminderListCount', { count: 7 }), '7 Erinnerungslisten aktiviert');
+});

@@ -1,4 +1,8 @@
 <?xml version="1.0"?>
+<!-- Unraid Community Applications REPOSITORY profile. Not an app template
+     (that is templates/yuvomi.xml): CA reads this file from the repo root to
+     render the repository entry (description, icon, link) in its store.
+     Referenced by the CA registration of this GitHub repository. -->
 <CommunityApplications>
   <!-- Repository overview shown in Community Apps. Markdown supported. -->
   <Profile>

@@ -466,11 +466,15 @@ html.navigating .app-content *::after {
 /* ================================================================
  * 21. Focus-Ring — Scale-In Animation
  * ================================================================ */
+/* Nur die Animation. Der `outline-offset: 3px`, der hier stand, war die zweite
+ * globale Fokus-Spezifikation neben reset.css und überschrieb dessen 2px überall
+ * dort, wo keine Komponente lokal etwas sagte - der 3px-Ring am Filter-Chip war
+ * genau dieser Durchgriff (Critique P1, 2026-07-30). Der Offset kommt jetzt aus
+ * `--focus-ring-offset`; hier bleibt, was hierher gehört: das Timing. */
 :focus-visible {
   transition:
     box-shadow var(--transition-fast),
     outline-offset var(--transition-fast);
-  outline-offset: 3px;
 }
 
 /* ================================================================

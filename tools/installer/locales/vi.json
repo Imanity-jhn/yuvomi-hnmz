@@ -4,7 +4,7 @@
     "continue": "Tiếp tục",
     "back": "Quay lại",
     "generate": "Tạo",
-    "generating": "…",
+    "generating": "Đang tạo…",
     "optional": "Tùy chọn",
     "stepCounter": "Bước {{n}} / {{total}}",
     "toggleVisibility": "Hiện hoặc ẩn giá trị",
@@ -48,8 +48,8 @@
     "unitsMetric": "Hệ mét (°C)",
     "unitsImperial": "Hệ Anh (°F)",
     "errCoords": "Vĩ độ và kinh độ là bắt buộc.",
-    "errLat": "Vĩ độ không hợp lệ (–90 đến 90).",
-    "errLon": "Kinh độ không hợp lệ (–180 đến 180)."
+    "errLat": "Vĩ độ không hợp lệ (-90 đến 90).",
+    "errLon": "Kinh độ không hợp lệ (-180 đến 180)."
   },
   "calendar": {
     "title": "Đồng bộ lịch",
@@ -101,19 +101,26 @@
   "docker": {
     "title": "Đang khởi động Yuvomi",
     "subtitle": "Đang tải image và khởi động container Docker.",
-    "starting": "Đang khởi động container …",
     "elapsed": "Đã qua {{n}}s",
     "running": "Container hoạt động bình thường",
     "failed": "Container không khởi động được",
     "unknownError": "Lỗi không xác định",
     "toAdmin": "Tiếp tục đến Cài đặt Admin",
-    "retry": "Thử lại"
+    "retry": "Thử lại",
+    "phasePull": "Đang tải image",
+    "phaseBoot": "Container đang khởi động",
+    "phaseHealth": "Đang kiểm tra tình trạng",
+    "firstRunHint": "Lần đầu có thể mất vài phút.",
+    "stalled": "Việc này lâu hơn thường lệ. Nhật ký bên dưới cho biết lý do.",
+    "showLogs": "Hiện nhật ký",
+    "hideLogs": "Ẩn nhật ký",
+    "timedOut": "Không có phản hồi sau 15 phút. Hãy kiểm tra nhật ký và thử lại."
   },
   "admin": {
     "title": "Tạo tài khoản Admin",
     "subtitle": "Thiết lập lần đăng nhập đầu tiên. Tài khoản này có toàn quyền truy cập vào Yuvomi.",
     "userLabel": "Tên người dùng",
-    "userHint": "3–64 ký tự: chữ cái, số, . - _",
+    "userHint": "3-64 ký tự: chữ cái, số, . - _",
     "nameLabel": "Tên hiển thị",
     "passLabel": "Mật khẩu",
     "passPlaceholder": "Ít nhất 8 ký tự",
@@ -121,7 +128,7 @@
     "creating": "Đang tạo …",
     "create": "Tạo tài khoản",
     "errAll": "Tất cả các trường là bắt buộc.",
-    "errUser": "Định dạng tên người dùng không hợp lệ (3–64 ký tự, chữ cái/số/._-).",
+    "errUser": "Định dạng tên người dùng không hợp lệ (3-64 ký tự, chữ cái/số/._-).",
     "errPass": "Mật khẩu phải có ít nhất 8 ký tự.",
     "errMatch": "Mật khẩu không khớp.",
     "errCreate": "Không thể tạo tài khoản admin."
@@ -190,7 +197,17 @@
     "documentGoogleDriveReuseHint": "Để trống cả hai trường để dùng lại thông tin xác thực OAuth của Google Calendar. Để dùng thông tin riêng, hãy tạo trong Google Cloud Console (như ở bước Calendar).",
     "documentGoogleDriveRedirectLabel": "URI chuyển hướng",
     "errDocumentGoogleDrivePair": "ID ứng dụng khách và mã bí mật Google Drive phải được đặt cùng nhau hoặc đều để trống.",
-    "errDocumentGoogleDriveCredentials": "Google Drive cần ID ứng dụng khách và mã bí mật riêng hoặc thông tin xác thực Google Calendar đã được cấu hình."
+    "errDocumentGoogleDriveCredentials": "Google Drive cần ID ứng dụng khách và mã bí mật riêng hoặc thông tin xác thực Google Calendar đã được cấu hình.",
+    "dataDirLabel": "Thư mục dữ liệu trên máy chủ",
+    "dataDirHint": "Nơi cơ sở dữ liệu và dữ liệu ứng dụng nằm trên máy chủ. Để trống để dùng ./data bên cạnh tệp compose.",
+    "documentLocalDirLabel": "Thư mục trên máy chủ",
+    "documentLocalDirHint": "Thư mục trên máy chủ được gắn vào container. Để trống để dùng ./documents.",
+    "documentWebdavPrivateNetwork": "Cho phép đích WebDAV trong mạng nội bộ",
+    "documentWebdavPrivateNetworkHint": "Cần cho Nextcloud trong mạng của bạn. Gỡ bảo vệ SSRF cho đích này.",
+    "icsPrivateNetwork": "Cho phép đăng ký lịch từ mạng nội bộ",
+    "icsPrivateNetworkHint": "Cần cho nguồn ICS từ thiết bị trong mạng của bạn. Gỡ bảo vệ SSRF cho đăng ký lịch.",
+    "oidcTrustEmail": "Tin cậy email khi không có claim verified",
+    "oidcTrustEmailHint": "Chỉ bật nếu nhà cung cấp không gửi email_verified và bạn tin tưởng họ."
   },
   "welcome": {
     "title": "Chào mừng đến với Yuvomi",

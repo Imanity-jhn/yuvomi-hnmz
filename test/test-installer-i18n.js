@@ -122,3 +122,75 @@ test('GET /locales/* lehnt Path-Traversal und Nicht-JSON mit 404 ab', async () =
     }
   });
 });
+
+// ── Regel-Guard: kein Locale-Wert besteht nur aus Zeichensetzung ─────────────
+//
+// `common.generating` stand in allen 23 Sprachen woertlich auf "…". Der
+// Generieren-Button setzt diesen Wert als textContent, verlor damit fuer die
+// Dauer der Operation seinen zugaenglichen Namen und wurde als
+// "Auslassungspunkte, Schaltflaeche, deaktiviert" vorgelesen.
+//
+// Der Keyset-Guard darueber konnte das nicht sehen: der Schluessel WAR in jeder
+// Sprache vorhanden, nur ohne Inhalt. Ein Wert ohne einen einzigen Buchstaben
+// oder eine Ziffer ist keine Uebersetzung, sondern ein Platzhalter, der es in
+// den Bestand geschafft hat.
+test('kein Locale-Wert besteht ausschliesslich aus Zeichensetzung', () => {
+  // \p{L} deckt jedes Alphabet ab (kyrillisch, arabisch, CJK), \p{N} Ziffern.
+  // Emoji und Haken duerfen begleiten, aber nicht die ganze Aussage tragen.
+  const hasContent = (value) => /[\p{L}\p{N}]/u.test(value);
+  const offenders = [];
+
+  for (const locale of SUPPORTED_LOCALES) {
+    const walk = (obj, prefix = '') => {
+      for (const [k, v] of Object.entries(obj)) {
+        const key = prefix ? `${prefix}.${k}` : k;
+        if (v && typeof v === 'object' && !Array.isArray(v)) walk(v, key);
+        else if (typeof v === 'string' && v.length > 0 && !hasContent(v)) {
+          offenders.push(`${locale}: ${key} = ${JSON.stringify(v)}`);
+        }
+      }
+    };
+    walk(loadLocale(locale));
+  }
+
+  assert.deepEqual(offenders, [],
+    'Diese Werte enthalten keinen einzigen Buchstaben und keine Ziffer. Steht so '
+    + 'einer auf einem Button, hat das Element keinen Namen mehr:\n' + offenders.join('\n'));
+});
+
+test('der Generieren-Button traegt waehrend der Operation einen Namen und haengt nicht', () => {
+  const html = readFileSync(HTML_PATH, 'utf8');
+  // Der Zustand muss angesagt werden, nicht nur bebildert.
+  assert.match(html, /btn\.setAttribute\('aria-busy', 'true'\)/,
+    'der Generieren-Button meldet seinen Betriebszustand nicht');
+  // Ohne finally blieb der Button nach einem Fehlschlag dauerhaft deaktiviert
+  // und im Ersatztext stehen: der Schritt war nur per Reload verlassbar.
+  assert.match(html, /\} finally \{[\s\S]*?btn\.disabled = false;[\s\S]*?btn\.textContent = t\('common\.generate'\);/,
+    'der Generieren-Button wird nicht in jedem Fall zurueckgesetzt');
+});
+
+test('Zahlenbereiche in Fehlermeldungen sind mit ASCII-Minus geschrieben', () => {
+  // "Ungültiger Breitengrad (–90 bis 90)" nannte in 19 Sprachen einen Wert, den
+  // das Feld gar nicht annimmt: <input type="number"> kennt nur ASCII-Minus.
+  // Wer die Zahl aus der Meldung kopierte, bekam dieselbe Meldung erneut.
+  //
+  // Die Regel trifft nur Striche, die unmittelbar an einer Ziffer kleben -
+  // Vorzeichen und Bis-Striche. Der Gedankenstrich als Satzzeichen ist davon
+  // unberührt: er trägt in ru, uk, fr, ja und zh die Satzstruktur und bleibt.
+  const offenders = [];
+  for (const locale of SUPPORTED_LOCALES) {
+    const walk = (obj, prefix = '') => {
+      for (const [k, v] of Object.entries(obj)) {
+        const key = prefix ? `${prefix}.${k}` : k;
+        if (v && typeof v === 'object' && !Array.isArray(v)) walk(v, key);
+        else if (typeof v === 'string' && /[–—](?=[0-9])/u.test(v)) {
+          offenders.push(`${locale}: ${key} = ${JSON.stringify(v)}`);
+        }
+      }
+    };
+    walk(loadLocale(locale));
+  }
+  assert.deepEqual(offenders, [],
+    'En-/Em-Dash direkt vor einer Ziffer ist ein Vorzeichen oder Bis-Strich und '
+    + 'gehört als ASCII "-" geschrieben:\n' + offenders.join('\n'));
+});

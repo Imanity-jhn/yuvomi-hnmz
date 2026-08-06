@@ -5,16 +5,20 @@
  */
 
 import { api } from '/api.js';
-import { renderRRuleFields, bindRRuleEvents, getRRuleValues } from '/rrule-ui.js';
-import { openModal as openSharedModal, closeModal, wireBlurValidation, validateAll, btnSuccess, btnError, promptModal, advancedSection } from '/components/modal.js';
+import { renderRRuleFields, bindRRuleEvents, getRRuleValues, recurrenceRow } from '/rrule-ui.js';
+import { openModal as openSharedModal, closeModal, wireBlurValidation, validateAll, btnSuccess, btnError, btnLoading, promptModal, advancedSection } from '/components/modal.js';
+import { openDetailView, closeDetailView, visibilityRow, assignedRow } from '/components/detail-view.js';
 import { stagger, vibrate, scheduleUndoableDelete } from '/utils/ux.js';
-import { t, formatDate, formatTime, formatDateInput, parseDateInput, isDateInputValid, formatTimeInput, parseTimeInput } from '/i18n.js';
+import { t, getLocale, formatDate, formatTime, formatDateInput, parseDateInput, isDateInputValid, formatTimeInput, parseTimeInput } from '/i18n.js';
 import { esc } from '/utils/html.js';
 import { refresh as refreshReminders } from '/reminders.js';
 import { renderUserMultiSelect, getSelectedUserIds, bindUserMultiSelect, renderAvatarStack } from '/components/user-multi-select.js';
-import { resolveReminderPreset } from '/utils/reminder-offset.js';
+import { resolveReminderPreset, parseRemindAtAsUtc } from '/utils/reminder-offset.js';
 import { renderPageSearch, wirePageSearch } from '/utils/page-search.js';
+import { isPreviewable } from '/utils/document-preview.js';
 import '/components/category-manager.js';
+import '/components/tag-manager.js';
+import { findPageFab } from '/utils/fab.js';
 
 // --------------------------------------------------------
 // Konstanten
@@ -30,12 +34,24 @@ const PRIORITIES = () => [
 
 const PRIO_ORDER = { urgent: 0, high: 1, medium: 2, low: 3, none: 4 };
 
+// Die Zustände, die eine Aufgabe im Lauf durchläuft. Das Archiv steht seit #688
+// NICHT mehr darunter: Ablegen und Erledigen sind zwei Aussagen, und solange sie
+// sich ein Feld teilten, löschte das Ablegen das Erledigt-Sein.
 const STATUSES = () => [
   { value: 'open',        label: t('tasks.statusOpen')       },
   { value: 'in_progress', label: t('tasks.statusInProgress') },
   { value: 'done',        label: t('tasks.statusDone')       },
-  { value: 'archived',    label: t('tasks.statusArchived')   },
 ];
+
+// In der Filterleiste bleibt das Archiv ein Wert neben den Status - dort ist es
+// eine Frage („was zeige ich?"), keine Eigenschaft. Der Server nimmt
+// `status=archived` genau dafür entgegen.
+const FILTER_STATUSES = () => [...STATUSES(), { value: 'archived', label: t('tasks.statusArchived') }];
+
+/** Liegt die Aufgabe in der Ablage? Einzige Stelle, die das entscheidet. */
+function isArchived(task) {
+  return !!task?.archived_at;
+}
 
 // Fallback-Kategorie (kanonischer Key). Kategorien sind seit #494 benutzer-
 // verwaltbar und werden aus /tasks/meta/options in state.categories geladen.
@@ -51,7 +67,7 @@ function catLabel(key) {
 }
 
 const PRIORITY_LABELS = () => Object.fromEntries(PRIORITIES().map((p) => [p.value, p.label]));
-const STATUS_LABELS   = () => Object.fromEntries(STATUSES().map((s)  => [s.value, s.label]));
+const STATUS_LABELS   = () => Object.fromEntries(FILTER_STATUSES().map((s) => [s.value, s.label]));
 
 // --------------------------------------------------------
 // Verknüpfte Dokumente (#503)
@@ -61,18 +77,14 @@ const STATUS_LABELS   = () => Object.fromEntries(STATUSES().map((s)  => [s.value
 // (handleFormSubmit) per PUT /tasks/:id/documents als Replace-Set übernommen.
 let modalDocuments = { index: new Map(), selected: [] };
 
-// MIME-Typen, die inline vorschaubar sind (spiegelt PREVIEWABLE_MIME im Server);
-// alles andere wird als Download verlinkt.
-const TASK_DOC_VIEWABLE = new Set([
-  'application/pdf', 'image/png', 'image/jpeg', 'image/webp', 'text/plain', 'text/csv',
-]);
-
 function docMime(doc) {
   return String(doc.mime_type || '').split(';')[0].trim().toLowerCase();
 }
 
+// Vorschaubar -> /preview (inline), sonst /download. Welche Typen das sind, steht
+// einmal in utils/document-preview.js, nicht hier.
 function docHref(doc) {
-  return TASK_DOC_VIEWABLE.has(docMime(doc))
+  return isPreviewable(doc.mime_type)
     ? `/api/v1/documents/${doc.id}/preview`
     : `/api/v1/documents/${doc.id}/download`;
 }
@@ -212,8 +224,8 @@ function renderSwipeRow(task, innerHtml) {
         <span>${isDone ? t('tasks.swipeOpen') : t('tasks.swipeDone')}</span>
       </div>
       <div class="swipe-reveal swipe-reveal--edit" aria-hidden="true">
-        <i data-lucide="pencil" class="icon-xl" aria-hidden="true"></i>
-        <span>${t('tasks.swipeEdit')}</span>
+        <i data-lucide="eye" class="icon-xl" aria-hidden="true"></i>
+        <span>${t('tasks.swipeView')}</span>
       </div>
       ${innerHtml}
     </div>`;
@@ -222,6 +234,7 @@ function renderSwipeRow(task, innerHtml) {
 function renderTaskCard(task, opts = {}) {
   const { expandedSubtasks = false, showCheckbox = false, isChecked = false } = opts;
   const isDone = task.status === 'done';
+  const archived = isArchived(task);
   const progress = task.subtask_total > 0
     ? Math.round((task.subtask_done / task.subtask_total) * 100)
     : null;
@@ -240,7 +253,7 @@ function renderTaskCard(task, opts = {}) {
     : '';
 
   return `
-    <div class="task-card ${isDone ? 'task-card--done' : ''}" data-task-id="${task.id}">
+    <div class="task-card ${isDone ? 'task-card--done' : ''} ${archived ? 'task-card--archived' : ''}" data-task-id="${task.id}">
       <div class="task-card__main">
         ${showCheckbox ? `
         <input type="checkbox" class="task-bulk-checkbox" data-task-id="${task.id}"
@@ -257,19 +270,21 @@ function renderTaskCard(task, opts = {}) {
             ${esc(task.title)}
           </button>
           <div class="task-card__meta">
+            ${archived ? `<span class="due-date task-card__archived"><i data-lucide="archive" class="icon-sm" aria-hidden="true"></i>${t('tasks.statusArchived')}</span>` : ''}
             ${renderPriorityBadge(task.priority)}
             ${renderStartDateBadge(task.start_date)}
-            ${renderDueDate(task.due_date, task.due_time, task.status === 'done' || task.status === 'archived')}
+            ${renderDueDate(task.due_date, task.due_time, isDone || archived)}
             ${task.is_recurring ? `<span class="due-date" aria-label="${t('tasks.recurring')}"><i data-lucide="repeat" class="icon-sm" aria-hidden="true"></i></span>` : ''}
             ${task.document_count > 0 ? `<span class="due-date task-card__docs" aria-label="${t('tasks.documentsCount', { count: task.document_count })}"><i data-lucide="paperclip" class="icon-sm" aria-hidden="true"></i>${task.document_count}</span>` : ''}
             ${renderVisibilityBadge(task.visibility)}
             ${task.category !== FALLBACK_CATEGORY ? `<span class="due-date task-card__category">${esc(catLabel(task.category))}</span>` : ''}
+            ${renderTagBadges(task.tags)}
           </div>
         </div>
 
         ${renderAvatarStack(task.assigned_users ?? [], { size: 28 })}
 
-        ${!(task.subtask_total > 0) && task.status !== 'archived' && !task.parent_task_id ? `
+        ${!(task.subtask_total > 0) && !archived && !task.parent_task_id ? `
         <button class="btn btn--ghost btn--icon btn--icon-sm task-card__inline-action" data-action="add-subtask" data-parent="${task.id}"
                 aria-label="${t('tasks.subtaskAdd')}" title="${t('tasks.subtaskAdd')}">
           <i data-lucide="list-plus" class="icon-md" aria-hidden="true"></i>
@@ -278,11 +293,12 @@ function renderTaskCard(task, opts = {}) {
                 aria-label="${t('tasks.editButton')}">
           <i data-lucide="pencil" class="icon-md" aria-hidden="true"></i>
         </button>
-        ${task.status !== 'archived' ? `
-        <button class="btn btn--ghost btn--icon btn--icon-sm task-card__inline-action" data-action="archive-task" data-id="${task.id}"
-                aria-label="${t('tasks.archiveButton')}">
-          <i data-lucide="archive" class="icon-md" aria-hidden="true"></i>
-        </button>` : ''}
+        <button class="btn btn--ghost btn--icon btn--icon-sm task-card__inline-action"
+                data-action="${archived ? 'unarchive-task' : 'archive-task'}" data-id="${task.id}"
+                aria-label="${archived ? t('tasks.unarchiveButton') : t('tasks.archiveButton')}"
+                title="${archived ? t('tasks.unarchiveButton') : t('tasks.archiveButton')}">
+          <i data-lucide="${archived ? 'archive-restore' : 'archive'}" class="icon-md" aria-hidden="true"></i>
+        </button>
       </div>
 
       ${progress !== null ? `
@@ -363,6 +379,7 @@ function renderTaskGroups(tasks, groupMode) {
       ${sorted.map((t) => renderSwipeRow(t, renderTaskCard(t, {
         showCheckbox: state.bulkSelectMode,
         isChecked: state.selectedTaskIds.has(t.id),
+        expandedSubtasks: state.subtasksExpandedByDefault,
       }))).join('')}
     </div>`;
   }).join('');
@@ -371,6 +388,156 @@ function renderTaskGroups(tasks, groupMode) {
 // --------------------------------------------------------
 // Task-Modal (Erstellen / Bearbeiten)
 // --------------------------------------------------------
+
+// --------------------------------------------------------
+// Tags (#586)
+// Freie Etiketten, gespiegelt aus VTODO CATEGORIES. Bewusst getrennt von der
+// Kategorie: eine Aufgabe liegt in einer Schublade, trägt aber beliebig viele
+// Etiketten.
+// --------------------------------------------------------
+
+// Grenzen identisch zu server/utils/task-tags.js — die Oberfläche soll gar nicht
+// erst anbieten, was der Server anschließend kürzt.
+const MAX_TAGS = 32;
+const MAX_TAG_LEN = 64;
+
+// Working-Set des offenen Bearbeiten-Dialogs, analog zu den verknüpften
+// Dokumenten. Wird beim Öffnen aus der Aufgabe gefüllt und beim Speichern gelesen.
+let modalTags = [];
+
+/** Tag-Liste säubern; Groß-/Kleinschreibung eint (erste Schreibweise gewinnt). */
+function normalizeTagList(list) {
+  const out = [];
+  const seen = new Set();
+  for (const item of list ?? []) {
+    const tag = String(item ?? '').trim().slice(0, MAX_TAG_LEN).trim();
+    if (!tag) continue;
+    const key = tag.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(tag);
+    if (out.length >= MAX_TAGS) break;
+  }
+  return out;
+}
+
+/** Zeichnet die Chips des Tag-Editors neu. */
+function renderTagChips(container) {
+  const wrap = container.querySelector('#task-tags-chips');
+  if (!wrap) return;
+  wrap.replaceChildren();
+
+  modalTags.forEach((tag, index) => {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'task-tag task-tag--editable';
+    chip.dataset.tagIndex = String(index);
+    chip.setAttribute('aria-label', t('tasks.tagRemove', { tag }));
+    chip.appendChild(document.createTextNode(tag));
+
+    const icon = document.createElement('i');
+    icon.setAttribute('data-lucide', 'x');
+    icon.className = 'icon-sm';
+    icon.setAttribute('aria-hidden', 'true');
+    chip.appendChild(icon);
+
+    wrap.appendChild(chip);
+  });
+
+  if (window.lucide) window.lucide.createIcons({ el: wrap });
+}
+
+/**
+ * Verdrahtet den Tag-Editor: Enter oder Komma übernimmt, Klick auf ein Chip
+ * entfernt, Backspace im leeren Feld nimmt das letzte zurück.
+ */
+function wireTagEditor(panel) {
+  const input = panel.querySelector('#task-tag-input');
+  const chips = panel.querySelector('#task-tags-chips');
+  if (!input || !chips) return;
+
+  const commit = () => {
+    // Eine eingefügte Liste („Garten, Haus") in einem Rutsch übernehmen.
+    const added = input.value.split(',');
+    if (!added.some((v) => v.trim())) return;
+    modalTags = normalizeTagList([...modalTags, ...added]);
+    input.value = '';
+    renderTagChips(panel);
+  };
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ',') {
+      // Enter darf im Tag-Feld nicht das Formular abschicken.
+      e.preventDefault();
+      commit();
+      return;
+    }
+    if (e.key === 'Backspace' && !input.value && modalTags.length) {
+      modalTags = modalTags.slice(0, -1);
+      renderTagChips(panel);
+    }
+  });
+
+  // Verlassen des Feldes übernimmt ebenfalls: sonst geht ein getippter Tag beim
+  // Speichern still verloren.
+  input.addEventListener('blur', commit);
+  // Auswahl aus der Vorschlagsliste löst kein keydown aus.
+  input.addEventListener('change', commit);
+
+  chips.addEventListener('click', (e) => {
+    const chip = e.target.closest('[data-tag-index]');
+    if (!chip) return;
+    modalTags.splice(Number(chip.dataset.tagIndex), 1);
+    renderTagChips(panel);
+  });
+}
+
+// Wie viele Tags eine Karte zeigt, bevor sie zusammenfasst. Analog zum
+// Avatar-Stack: eine Karte, die 32 Etiketten ausrollt, ist keine Karte mehr.
+const TAG_BADGES_VISIBLE = 3;
+
+/**
+ * Tag-Chips einer Aufgabe für Karten und Kanban.
+ *
+ * Die Chips sind Buttons, keine Beschriftungen: ein Tag anzuklicken und die
+ * Liste darauf zu filtern ist die Geste, die man von einem Etikett erwartet.
+ * Den Klick fängt die Delegation in wireTagBadgeFilter ab, die ihn auch vom
+ * Karten-Klick (Aufgabe öffnen) trennt.
+ */
+function renderTagBadges(tags) {
+  if (!tags?.length) return '';
+  const shown = tags.slice(0, TAG_BADGES_VISIBLE);
+  const rest  = tags.length - shown.length;
+  const chips = shown.map((tag) => `
+    <button type="button" class="task-tag task-tag--filter" data-tag-filter="${esc(tag)}"
+            aria-label="${esc(t('tasks.tagFilterBy', { tag }))}">${esc(tag)}</button>`);
+  // Der Rest bleibt lesbar statt anklickbar: er benennt keinen einzelnen Tag,
+  // also gäbe es auch nichts, worauf ein Klick filtern könnte.
+  if (rest > 0) {
+    chips.push(`<span class="task-tag task-tag--more"
+                      title="${esc(tags.slice(TAG_BADGES_VISIBLE).join(', '))}">+${rest}</span>`);
+  }
+  return chips.join('');
+}
+
+/**
+ * Klick auf ein Tag-Chip filtert die Liste danach (#586).
+ *
+ * Delegiert, weil Karten laufend neu gezeichnet werden - und in der
+ * Capture-Phase, nicht beim Bubbling. Im Kanban öffnet ein Klick irgendwo auf
+ * der Karte den Bearbeiten-Dialog, und dieser Handler sitzt am Board, also
+ * unterhalb des Containers: beim Bubbling käme er zuerst dran und hätte den
+ * Dialog längst geöffnet, bevor ein stopPropagation hier noch etwas ausrichtet.
+ */
+function wireTagBadgeFilter(container) {
+  container.addEventListener('click', async (e) => {
+    const chip = e.target.closest('[data-tag-filter]');
+    if (!chip || !container.contains(chip)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    await toggleTagFilter(chip.dataset.tagFilter, container);
+  }, true);
+}
 
 function renderModalContent({ task = null, users = [], reminder = null } = {}) {
   const isEdit = !!task;
@@ -395,6 +562,7 @@ function renderModalContent({ task = null, users = [], reminder = null } = {}) {
     || (!!task.category && task.category !== FALLBACK_CATEGORY)
     || !!task.start_date
     || (Number(task.points) > 0)
+    || !!task.tags?.length
   );
 
   // Punkte neuer Aufgaben mit dem Haushalt-Standard vorbelegen (#578). Der Wert
@@ -446,6 +614,20 @@ function renderModalContent({ task = null, users = [], reminder = null } = {}) {
             ? t('tasks.pointsDefaultHint', { count: prefillPoints })
             : t('tasks.pointsHint')}</p>
         </div>
+      </div>
+
+      <div class="form-group task-tags-field" style="margin-top:var(--space-4)">
+        <label class="label" for="task-tag-input">${t('tasks.tagsLabel')}</label>
+        <div class="task-tags-editor" id="task-tags-editor">
+          <div class="task-tags-editor__chips" id="task-tags-chips"></div>
+          <input class="input task-tags-editor__input" type="text" id="task-tag-input"
+                 list="task-tag-suggestions" autocomplete="off"
+                 placeholder="${t('tasks.tagsPlaceholder')}">
+          <datalist id="task-tag-suggestions">
+            ${state.allTags.map((entry) => `<option value="${esc(entry.tag)}"></option>`).join('')}
+          </datalist>
+        </div>
+        <p class="task-field-hint">${t('tasks.tagsHint')}</p>
       </div>`;
 
   return `
@@ -509,7 +691,10 @@ function renderModalContent({ task = null, users = [], reminder = null } = {}) {
           </select>
         </div>` : ''}
 
-      ${renderRRuleFields('task', task?.recurrence_rule)}
+      ${renderRRuleFields('task', task?.recurrence_rule, {
+        allowFromCompletion: true,
+        fromCompletion: !!task?.recurrence_from_completion,
+      })}
 
       ${renderReminderSection(task, reminder)}
 
@@ -547,12 +732,18 @@ let state = {
   tasks:           [],
   users:           [],
   categories:      [],
+  allTags:         [],       // [{ tag, count }] für Filterleiste und Vorschläge (#586)
   defaultPoints:   0,        // Haushalt-Standard für neue Aufgaben (#578), 0 = aus
   currentUserId:   null,
-  filters:         { status: 'open', priority: '', assigned_to: '' },
+  // `tags` ist eine Liste, keine Auswahl: mehrere Tags engen UND-verknüpft ein,
+  // wie jeder andere Filter in dieser Leiste auch (#586).
+  // Status, Priorität und Person halten mehrere Werte (#671); innerhalb einer
+  // Achse wirken sie ODER, zwischen den Achsen UND. Tags bleiben UND-verknüpft.
+  filters:         { status: ['open'], priority: [], assigned_to: [], tags: [] },
   groupMode:       'category',   // 'category' | 'due'
   viewMode:        'list',       // 'list' | 'kanban' (resolved at render time)
   showFuture:      false,
+  subtasksExpandedByDefault: false,
   expandedTasks:   new Set(),
   dragTaskId:      null,
   filterPanelOpen: false,
@@ -572,7 +763,8 @@ function filteredTasks() {
   if (!q) return state.tasks;
   return state.tasks.filter((task) =>
     (task.title       || '').toLowerCase().includes(q) ||
-    (task.description || '').toLowerCase().includes(q)
+    (task.description || '').toLowerCase().includes(q) ||
+    (task.tags ?? []).some((tag) => tag.toLowerCase().includes(q))
   );
 }
 
@@ -580,27 +772,61 @@ function filteredTasks() {
 // API-Aktionen
 // --------------------------------------------------------
 
-async function loadTasks(container) {
-  persistAssignedToMe();
+/**
+ * Query-String für /tasks aus dem aktuellen Filterzustand.
+ *
+ * Geteilt zwischen dem ersten Aufbau der Seite und jedem Nachladen: die Liste
+ * stand zweimal da und ist beim Hinzukommen des Tag-Filters prompt
+ * auseinandergelaufen.
+ */
+function taskQuery() {
   const params = new URLSearchParams();
   // Kanban-Spalten SIND der Status: den Statusfilter dort nicht an den Server
   // senden, sonst blieben "In Bearbeitung"/"Erledigt" trotz vorhandener Aufgaben
   // leer (Audit A1-07/P3). In der Liste wirkt er normal; state bleibt erhalten,
   // sodass der Filter beim Zurückwechseln wieder greift.
-  if (state.filters.status && state.viewMode !== 'kanban') params.set('status', state.filters.status);
-  if (state.filters.priority)    params.set('priority',    state.filters.priority);
-  if (state.filters.assigned_to) params.set('assigned_to', state.filters.assigned_to);
+  // append statt set: jeder Wert ist ein eigener Parameter. Bei den Tags, damit
+  // ein Tag mit Komma im Namen am Server nicht in zwei zerfällt; bei den übrigen
+  // Achsen, weil sie seit #671 mehrere Werte tragen (ODER-verknüpft).
+  if (state.viewMode !== 'kanban') state.filters.status.forEach((v) => params.append('status', v));
+  // Im Kanban ist die Ablage eine Spalte — sie muss also mitkommen, obwohl der
+  // Server sie sonst ausblendet (#688).
+  else params.set('archived', '1');
+  state.filters.priority.forEach((v) => params.append('priority', v));
+  state.filters.assigned_to.forEach((v) => params.append('assigned_to', v));
+  state.filters.tags.forEach((tag) => params.append('tag', tag));
   if (state.showFuture)          params.set('include_future', '1');
+  return params.toString() ? `?${params}` : '';
+}
 
-  const query = params.toString() ? `?${params}` : '';
-  const data  = await api.get(`/tasks${query}`);
+async function loadTasks(container) {
+  persistAssignedToMe();
+  const data  = await api.get(`/tasks${taskQuery()}`);
   state.tasks = data.data ?? [];
   renderTaskList(container);
+}
+
+/**
+ * Vergebene Tags nachladen (#586). Nur nach dem Speichern nötig, nicht bei jedem
+ * Filterwechsel - die Liste ändert sich ausschließlich durch Bearbeiten.
+ * Scheitert der Aufruf, bleibt die alte Liste stehen: veraltete Vorschläge sind
+ * harmloser als eine plötzlich verschwundene Filtergruppe.
+ */
+async function refreshTags() {
+  try {
+    const res = await api.get('/tasks/tags');
+    state.allTags = res.data ?? [];
+  } catch { /* alte Liste behalten */ }
 }
 
 async function toggleTaskStatus(id, currentStatus) {
   const next = currentStatus === 'done' ? 'open' : 'done';
   await api.patch(`/tasks/${id}/status`, { status: next });
+}
+
+/** Ablegen bzw. zurückholen (#688) - der Status bleibt dabei, wie er war. */
+async function setTaskArchived(id, archived) {
+  await api.patch(`/tasks/${id}/archive`, { archived });
 }
 
 async function toggleSubtaskStatus(id, currentStatus) {
@@ -776,41 +1002,409 @@ async function wireDocumentSection(panel, task) {
 
 function openTaskModal({ task = null, users = [], reminder = null } = {}, container) {
   const isEdit = !!task;
+  // Working-Set VOR dem Rendern setzen: renderTagChips liest ihn direkt danach.
+  modalTags = normalizeTagList(task?.tags);
   openSharedModal({
     title: isEdit ? t('tasks.editTask') : t('tasks.newTask'),
     content: renderModalContent({ task, users, reminder }),
     size: 'lg',
-    onSave(panel) {
-      panel.querySelector('.modal-panel__body')?.classList.add('modal-panel__body--tasks-fit');
-      // RRULE-Events binden
-      bindRRuleEvents(document, 'task');
-      bindUserMultiSelect(panel, 'task_assigned');
-      wireVisibilityWarning(panel, '#task-visibility', 'task_assigned', '#task-visibility-warning');
+    // Eine neue Aufgabe startet weiterhin mit dem Fokus im Titelfeld - hier ist
+    // Tippen die Absicht.
+    onSave(panel) { wireTaskForm(panel, { task, container }); },
+  });
+}
 
-      // Verknüpfte Dokumente laden + Add/Remove binden (#503)
-      wireDocumentSection(panel, task);
+/**
+ * Verdrahtet das Aufgaben-Formular. Eigene Funktion, weil das Formular an zwei
+ * Orten entsteht: als eigenes Modal (neue Aufgabe) und als zweites Pane der
+ * Detailansicht, das erst beim Wechsel gemountet wird.
+ */
+function wireTaskForm(panel, { task = null, container }) {
+  panel.querySelector('.modal-panel__body')?.classList.add('modal-panel__body--tasks-fit');
+  // RRULE-Events binden
+  bindRRuleEvents(document, 'task');
+  bindUserMultiSelect(panel, 'task_assigned');
+  wireVisibilityWarning(panel, '#task-visibility', 'task_assigned', '#task-visibility-warning');
 
-      // Blur-Validierung für required-Felder aktivieren
-      wireBlurValidation(panel);
+  // Tag-Editor (#586)
+  renderTagChips(panel);
+  wireTagEditor(panel);
 
-      // Reminder-Toggle: Felder ein-/ausblenden
-      const toggle = panel.querySelector('#reminder-toggle');
-      const fields = panel.querySelector('#reminder-fields');
-      const offset = panel.querySelector('#reminder-offset');
-      const customFields = panel.querySelector('#reminder-custom-fields');
-      toggle?.addEventListener('change', () => {
-        fields.style.display = toggle.checked ? '' : 'none';
+  // Verknüpfte Dokumente laden + Add/Remove binden (#503)
+  wireDocumentSection(panel, task);
+
+  // Blur-Validierung für required-Felder aktivieren
+  wireBlurValidation(panel);
+
+  // Reminder-Toggle: Felder ein-/ausblenden
+  const toggle = panel.querySelector('#reminder-toggle');
+  const fields = panel.querySelector('#reminder-fields');
+  const offset = panel.querySelector('#reminder-offset');
+  const customFields = panel.querySelector('#reminder-custom-fields');
+  toggle?.addEventListener('change', () => {
+    fields.style.display = toggle.checked ? '' : 'none';
+  });
+  offset?.addEventListener('change', () => {
+    if (!customFields) return;
+    customFields.style.display = offset.value === 'offset_custom' ? '' : 'none';
+  });
+  // Form-Events
+  panel.querySelector('#task-form')
+    ?.addEventListener('submit', (e) => handleFormSubmit(e, container));
+
+  panel.querySelector('[data-action="delete-task"]')
+    ?.addEventListener('click', (e) => handleDeleteTask(e.currentTarget.dataset.id, container));
+}
+
+// --------------------------------------------------------
+// Aufgaben-Detailansicht
+// --------------------------------------------------------
+
+// Was aus dem aktuellen Status als Nächstes kommt. Abgelegte Aufgaben führen
+// keine Weiterschaltung: sie sind aus dem Lauf genommen, nicht angehalten - ihr
+// Knopf holt zurück (siehe openTaskDetail).
+const NEXT_STATUS = {
+  open:        { status: 'in_progress', labelKey: 'tasks.detailStart',  icon: 'circle-dot' },
+  in_progress: { status: 'done',        labelKey: 'tasks.detailFinish', icon: 'check' },
+  done:        { status: 'open',        labelKey: 'tasks.detailReopen', icon: 'rotate-ccw' },
+};
+
+/** Prioritätsbadge als DOM - dieselbe Optik wie auf der Karte. */
+function priorityNode(priority) {
+  if (!priority || priority === 'none') return null;
+  const badge = document.createElement('span');
+  badge.className = `priority-badge priority-badge--${priority}`;
+  const dot = document.createElement('span');
+  dot.className = `priority-dot priority-dot--${priority}`;
+  badge.append(dot, document.createTextNode(PRIORITY_LABELS()[priority] ?? priority));
+  return badge;
+}
+
+/** Eine Chip-Reihe aus einer Liste. Beschriftung liefert der Aufrufer. */
+function chipListNode(items, toLabel) {
+  if (!items.length) return null;
+  const wrap = document.createElement('div');
+  wrap.className = 'detail-chips';
+  items.forEach((item) => {
+    const chip = document.createElement('span');
+    chip.className = 'task-tag';
+    chip.textContent = toLabel(item);
+    wrap.appendChild(chip);
+  });
+  return wrap;
+}
+
+/** Tags als Chips. In der Leseansicht benennen sie, sie filtern nicht. */
+function tagChipsNode(tags) {
+  return chipListNode(normalizeTagList(tags), (tag) => tag);
+}
+
+/** Teilaufgaben mit ihrem Stand - die Liste führt sie, also führt die Ansicht sie auch. */
+/**
+ * Teilaufgaben in der Detailansicht - abhakbar, nicht nur lesbar (#671).
+ *
+ * Bis v1.78.0 waren die Zeilen hier reine Anzeige, während dieselbe Teilaufgabe
+ * in der Listenkarte einen Schalter hatte. Wer eine Teilaufgabe anlegte und
+ * danach die Aufgabe öffnete, sah sie also, kam aber nicht mehr an sie heran -
+ * genau die Beobachtung aus der Meldung.
+ *
+ * Der Klick-Handler des Seiten-Containers greift hier nicht: Die Detailansicht
+ * rendert in den Top-Layer, außerhalb von `container`. Deshalb hängt die
+ * Delegation am Wrapper selbst.
+ */
+function subtaskListNode(task, container) {
+  if (!task.subtasks?.length) return null;
+  const wrap = document.createElement('div');
+  wrap.className = 'detail-subtasks';
+
+  const paint = (row, status, title) => {
+    row.className = status === 'done' ? 'detail-subtask detail-subtask--done' : 'detail-subtask';
+    row.dataset.status = status;
+    row.setAttribute('aria-pressed', String(status === 'done'));
+    row.setAttribute('aria-label', t('tasks.subtaskMarkDone', { title }));
+    const icon = document.createElement('i');
+    icon.dataset.lucide = status === 'done' ? 'check-circle-2' : 'circle';
+    icon.className = 'icon-sm';
+    icon.setAttribute('aria-hidden', 'true');
+    const label = document.createElement('span');
+    label.textContent = title;
+    row.replaceChildren(icon, label);
+    if (window.lucide) window.lucide.createIcons({ el: row });
+  };
+
+  task.subtasks.forEach((s) => {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.dataset.subtaskId = String(s.id);
+    paint(row, s.status, s.title);
+
+    row.addEventListener('click', async () => {
+      const previous = row.dataset.status;
+      row.disabled = true;
+      // Optimistisch umschalten: ein Abhaken, das erst nach der Antwort
+      // reagiert, fühlt sich wie ein verschluckter Klick an.
+      paint(row, previous === 'done' ? 'open' : 'done', s.title);
+      try {
+        await toggleSubtaskStatus(s.id, previous);
+        // Die Liste im Hintergrund trägt den Fortschrittsbalken der Elternkarte.
+        if (container) await loadTasks(container);
+      } catch (err) {
+        paint(row, previous, s.title);
+        window.yuvomi.showToast(err.message, 'danger');
+      } finally {
+        row.disabled = false;
+      }
+    });
+
+    wrap.appendChild(row);
+  });
+  return wrap;
+}
+
+/** Verknüpfte Dokumente beim Namen nennen, nicht nur zählen. */
+function documentListNode(docs) {
+  return chipListNode(
+    Array.isArray(docs) ? docs : [],
+    (doc) => doc.title || doc.filename || String(doc.id),
+  );
+}
+
+/** Erinnerung im Klartext, aus dem gespeicherten Zeitpunkt. */
+function taskReminderSummary(reminders) {
+  const list = Array.isArray(reminders) ? reminders : (reminders ? [reminders] : []);
+  return list
+    .map((r) => {
+      if (!r?.remind_at) return '';
+      const at = parseRemindAtAsUtc(r.remind_at);
+      return `${formatDate(at)} ${formatTime(at)}`.trim();
+    })
+    .filter(Boolean)
+    .join(', ');
+}
+
+function renderTaskDetail(task, reminders = [], container = null) {
+  const due = formatDueDate(task.due_date, task.due_time, task.status === 'done' || isArchived(task));
+
+  return [
+    { icon: 'circle-dot', label: t('tasks.statusLabel'), value: STATUS_LABELS()[task.status] ?? task.status },
+    // Eigene Zeile statt eines Ersatzes für den Status: die Ablage sagt etwas
+    // ANDERES als „offen/erledigt", nicht dasselbe anders (#688).
+    { icon: 'archive', label: t('tasks.archivedLabel'), value: isArchived(task) ? formatDate(task.archived_at) : '' },
+    { icon: 'flag', label: t('tasks.priorityLabel'), node: priorityNode(task.priority) },
+    { icon: 'clock', label: t('tasks.dueDateLabel'), value: due?.label ?? '' },
+    { icon: 'calendar-clock', label: t('tasks.startDateLabel'), value: task.start_date ? formatDate(task.start_date) : '' },
+    recurrenceRow(task.recurrence_rule, { fromCompletion: !!task.recurrence_from_completion }),
+    { icon: 'folder', label: t('tasks.categoryLabel'), value: task.category && task.category !== FALLBACK_CATEGORY ? catLabel(task.category) : '' },
+    assignedRow(task.assigned_users, t('tasks.assignedLabel')),
+    { icon: 'award', label: t('tasks.pointsLabel'), value: task.points ? String(task.points) : '' },
+    { icon: 'tag', label: t('tasks.tagsLabel'), node: tagChipsNode(task.tags) },
+    { icon: 'list-checks', label: t('tasks.subtasksLabel'), node: subtaskListNode(task, container) },
+    { icon: 'paperclip', label: t('tasks.documentsLabel'), node: documentListNode(task.documents) },
+    { icon: 'bell', label: t('reminders.sectionTitle'), value: taskReminderSummary(reminders) },
+    visibilityRow(task.visibility),
+    { icon: 'align-left', label: t('tasks.descriptionLabel'), value: task.description ?? '', multiline: true },
+  ];
+}
+
+/**
+ * Der einzige Einstieg in eine bestehende Aufgabe.
+ *
+ * Anders als beim Kalender wird hier bewusst kein Anker übergeben: Eine Aufgabe
+ * trägt deutlich mehr Inhalt als ein Termin, und ein 320px-Popover neben der
+ * Zeile wäre für Teilaufgaben, Tags und Dokumente zu eng.
+ */
+function openTaskDetail({ task, users = [], reminder = null }, container) {
+  const archived = isArchived(task);
+  const next = archived ? null : NEXT_STATUS[task.status];
+
+  const actions = [{
+    id: 'task-detail-delete',
+    label: t('common.delete'),
+    variant: 'danger-ghost',
+    icon: 'trash-2',
+    align: 'start',
+    // Siehe closeDetailView: nach dem Löschen gibt es nichts mehr zu verwerfen,
+    // und der await hält die optimistische Löschung zurück, bis der
+    // Overlay-Slot frei ist.
+    onClick: async ({ close }) => {
+      await close({ force: true });
+      handleDeleteTask(String(task.id), container);
+    },
+  }];
+
+  // Der häufigste Grund, eine Aufgabe zu öffnen, ist sie abzuhaken. Bisher
+  // führte dieser Weg durch ein Formular mit sieben Auswahlfeldern.
+  if (next) {
+    actions.push({
+      id: 'task-detail-advance',
+      label: t(next.labelKey),
+      variant: 'secondary',
+      icon: next.icon,
+      onClick: ({ button }) => advanceTaskStatus(task, next.status, button, container),
+    });
+  }
+
+  // Ablegen und Zurückholen sind derselbe Schalter - was er tut, hängt daran, wo
+  // die Aufgabe gerade liegt.
+  actions.push({
+    id: 'task-detail-archive',
+    label: archived ? t('tasks.unarchiveButton') : t('tasks.archiveButton'),
+    variant: 'ghost',
+    icon: archived ? 'archive-restore' : 'archive',
+    onClick: ({ button }) => toggleTaskArchive(task, button, container),
+  });
+
+  openDetailView({
+    title: task.title,
+    size: 'lg',
+    sections: renderTaskDetail(task, reminder, container),
+    actions,
+    edit: {
+      label: t('common.edit'),
+      title: t('tasks.editTask'),
+      mount: (panel, pane) => {
+        // Working-Set VOR dem Rendern setzen: renderTagChips in wireTaskForm
+        // liest ihn direkt danach.
+        modalTags = normalizeTagList(task.tags);
+        pane.insertAdjacentHTML('beforeend', renderModalContent({ task, users, reminder }));
+        wireTaskForm(panel, { task, container });
+      },
+    },
+  });
+}
+
+/**
+ * Status aus der Detailansicht weiterschalten. Optimistisch: Der Knopf zeigt
+ * den neuen Stand sofort, weil das Abhaken sonst wie ein verschluckter Klick
+ * wirkt. Scheitert der Aufruf, kommt die alte Beschriftung zurück.
+ */
+async function advanceTaskStatus(task, status, button, container) {
+  const previous = task.status;
+  const stop = btnLoading(button);
+  try {
+    await api.patch(`/tasks/${task.id}/status`, { status });
+    task.status = status;
+    // Der Status steht bereits beim Server - eine Verwerfen-Frage danach böte
+    // an, etwas rückgängig zu machen, was gar nicht mehr aussteht (#625).
+    await closeDetailView({ force: true });
+    await loadTasks(container);
+  } catch (err) {
+    task.status = previous;
+    stop();
+    // Gescheitert ist ein Schreibvorgang, kein Laden - tasks.loadError („Aufgabe
+    // konnte nicht geladen werden") beschriebe den falschen Vorgang.
+    window.yuvomi.showToast(err.message ?? t('common.errorGeneric'), 'danger');
+  }
+}
+
+/**
+ * Ablegen bzw. Zurückholen aus der Detailansicht. Wie advanceTaskStatus schließt
+ * die Ansicht danach: die Aufgabe wechselt die Liste, und ein Panel, das über
+ * einem verschwundenen Eintrag stehen bleibt, hat nichts mehr zu zeigen.
+ */
+async function toggleTaskArchive(task, button, container) {
+  const stop = btnLoading(button);
+  const archived = isArchived(task);
+  try {
+    await setTaskArchived(task.id, !archived);
+    task.archived_at = archived ? null : new Date().toISOString();
+    await closeDetailView({ force: true });
+    window.yuvomi.showToast(archived ? t('tasks.unarchivedToast') : t('tasks.archivedToast'), 'success');
+    await loadTasks(container);
+  } catch (err) {
+    stop();
+    window.yuvomi.showToast(err.message ?? t('common.errorGeneric'), 'danger');
+  }
+}
+
+// --------------------------------------------------------
+// Tag-Verwaltung und Bulk-Vergabe (#586)
+// --------------------------------------------------------
+
+/**
+ * Tags haushaltsweit umbenennen, zusammenführen und entfernen.
+ * Nach jeder Änderung wandert die frische Liste direkt in den State - der
+ * Server liefert sie in derselben Antwort mit, ein Nachladen entfällt.
+ */
+function openTagManager(container) {
+  let manager = null;
+  const onChanged = async (e) => {
+    state.allTags = e.detail?.tags ?? state.allTags;
+    // Ein Tag, der gerade umbenannt oder gelöscht wurde, kann noch im Filter
+    // stehen. Bliebe er dort, filterte die Liste auf einen Namen, den es nicht
+    // mehr gibt, und zeigte dauerhaft nichts an.
+    const known = new Set(state.allTags.map((entry) => entry.tag.toLowerCase()));
+    state.filters.tags = state.filters.tags.filter((tag) => known.has(tag.toLowerCase()));
+    renderFilters(container);
+    await loadTasks(container);
+  };
+  openSharedModal({
+    title: t('tasks.manageTags'),
+    content: '<yuvomi-tag-manager></yuvomi-tag-manager>',
+    size: 'lg',
+    onSave: (panel) => {
+      manager = panel.querySelector('yuvomi-tag-manager');
+      manager.addEventListener('tag-manager-changed', onChanged);
+    },
+    onClose: () => manager?.removeEventListener('tag-manager-changed', onChanged),
+  });
+}
+
+/**
+ * Tag an die ausgewählten Aufgaben hängen oder von ihnen nehmen.
+ *
+ * Beim Entfernen kommen die Vorschläge aus den ausgewählten Aufgaben selbst,
+ * nicht aus dem Gesamtbestand: einen Tag anzubieten, den keine der markierten
+ * Aufgaben trägt, wäre eine Aktion, die garantiert nichts tut.
+ */
+function openBulkTagDialog(taskIds, mode, container) {
+  const selected = state.tasks.filter((task) => taskIds.includes(task.id));
+  const pool = mode === 'remove'
+    ? [...new Map(selected.flatMap((task) => task.tags ?? [])
+        .map((tag) => [tag.toLowerCase(), tag])).values()].sort((a, b) =>
+          a.localeCompare(b, getLocale(), { sensitivity: 'base' }))
+    : state.allTags.map((entry) => entry.tag);
+
+  openSharedModal({
+    title: mode === 'add' ? t('tasks.bulkTagAdd') : t('tasks.bulkTagRemove'),
+    size: 'sm',
+    content: `
+      <form id="bulk-tag-form">
+        <div class="form-group">
+          <label class="label" for="bulk-tag-input">${t('tasks.tagsLabel')}</label>
+          <input class="input" type="text" id="bulk-tag-input" name="tag" autocomplete="off"
+                 list="bulk-tag-suggestions" maxlength="64"
+                 placeholder="${t('tasks.tagsPlaceholder')}">
+          <datalist id="bulk-tag-suggestions">
+            ${pool.map((tag) => `<option value="${esc(tag)}"></option>`).join('')}
+          </datalist>
+          <p class="task-field-hint">${t('tasks.bulkTagHint', { count: taskIds.length })}</p>
+        </div>
+        <div class="modal-actions">
+          <button type="submit" class="btn btn--primary">${t('common.apply')}</button>
+        </div>
+      </form>`,
+    onSave: (panel) => {
+      const form = panel.querySelector('#bulk-tag-form');
+      panel.querySelector('#bulk-tag-input')?.focus();
+      form?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const tag = form.elements.tag.value.trim();
+        if (!tag) return;
+        try {
+          const body = mode === 'add' ? { ids: taskIds, add: [tag] } : { ids: taskIds, remove: [tag] };
+          const res = await api.post('/tasks/tags/apply', body);
+          state.allTags = res.data?.tags ?? state.allTags;
+          window.yuvomi.showToast(t('tasks.tagsUpdated', { count: res.data?.updated ?? 0 }), 'success');
+          closeModal({ force: true });
+          state.selectedTaskIds.clear();
+          updateBulkActionsBar(container);
+          renderFilters(container);
+          await loadTasks(container);
+        } catch (err) {
+          window.yuvomi.showToast(err.message ?? t('common.errorGeneric'), 'danger');
+        }
       });
-      offset?.addEventListener('change', () => {
-        if (!customFields) return;
-        customFields.style.display = offset.value === 'offset_custom' ? '' : 'none';
-      });
-      // Form-Events
-      panel.querySelector('#task-form')
-        ?.addEventListener('submit', (e) => handleFormSubmit(e, container));
-
-      panel.querySelector('[data-action="delete-task"]')
-        ?.addEventListener('click', (e) => handleDeleteTask(e.currentTarget.dataset.id, container));
     },
   });
 }
@@ -841,6 +1435,7 @@ function openTaskCategoryManager(container) {
         labelResolver: (item) => (item.label_key ? t(item.label_key) : (item.name || item.key)),
         titleKey: 'tasks.manageCategories',
         hintKey: 'category.manageHint',
+        deleteDetailKey: 'category.deleteConfirmDetail',
       });
     },
     onClose: () => manager?.removeEventListener('category-manager-changed', onChanged),
@@ -880,17 +1475,24 @@ async function handleFormSubmit(e, container) {
     submitBtn.textContent = originalLabel;
     return;
   }
+  // Ein noch nicht übernommener Tag im Eingabefeld zählt mit — wer tippt und
+  // direkt speichert, hat ihn gemeint.
+  const pendingTag = form.querySelector('#task-tag-input')?.value ?? '';
+  const tags = normalizeTagList([...modalTags, ...pendingTag.split(',')]);
+
   const body = {
     title:           form.title.value.trim(),
     description:     form.description.value.trim() || null,
     priority:        form.priority.value,
     category:        form.category.value,
+    tags,
     start_date:      startDate || null,
     due_date:        dueDate || null,
     assigned_to:     getSelectedUserIds(form, 'task_assigned'),
     visibility:      form.querySelector('#task-visibility')?.value || 'all',
     is_recurring:    rrule.is_recurring ? 1 : 0,
     recurrence_rule: rrule.recurrence_rule,
+    recurrence_from_completion: rrule.recurrence_from_completion ? 1 : 0,
     points:          Math.max(0, Math.trunc(Number(form.points?.value)) || 0),
   };
   const dueTimeRaw = form.due_time?.value || '';
@@ -963,6 +1565,9 @@ async function handleFormSubmit(e, container) {
 
     btnSuccess(submitBtn, originalLabel);
     setTimeout(() => closeModal({ force: true }), 700);
+    // Erst die Tag-Liste, dann neu zeichnen: ein gerade vergebener Tag soll
+    // sofort in Filterleiste und Vorschlägen stehen (#586).
+    await refreshTags();
     await loadTasks(container);
   } catch (err) {
     resetSubmit(err.message);
@@ -1007,6 +1612,9 @@ async function handleAddSubtask(parentId, container) {
 // Kanban-Ansicht
 // --------------------------------------------------------
 
+// Die Spalten sind der Weg einer Aufgabe. Die letzte ist keine Station dieses
+// Wegs, sondern die Ablage daneben (#688) - deshalb steht dort 'archived' und
+// nicht ein vierter Status.
 const KANBAN_COLS = () => [
   { status: 'open',        label: t('tasks.kanbanOpen'),       colorVar: '--color-text-secondary' },
   { status: 'in_progress', label: t('tasks.kanbanInProgress'), colorVar: '--color-warning'        },
@@ -1014,21 +1622,75 @@ const KANBAN_COLS = () => [
   { status: 'archived',    label: t('tasks.kanbanArchived'),   colorVar: '--color-text-tertiary'  },
 ];
 
+/** In welcher Spalte steht die Aufgabe? Die Ablage sticht den Status. */
+function kanbanColumnOf(task) {
+  return isArchived(task) ? 'archived' : task.status;
+}
+
 function kanbanNextStatus(status) {
   if (status === 'open')        return 'in_progress';
   if (status === 'in_progress') return 'done';
   return 'open';
 }
 
+/**
+ * Eine Aufgabe in eine Spalte bewegen - der einzige Weg, auf dem das Board
+ * schreibt (Maus-Drop, Touch-Drop und der Weiterschalt-Knopf).
+ *
+ * Aus der Ablage zurück heißt: zurückholen, Status unangetastet lassen. Genau
+ * das ging vorher nicht, weil die Spalte den Status SETZTE - eine erledigte
+ * Aufgabe kam als offene zurück (#688).
+ */
+async function moveTaskToColumn(before, column) {
+  // `before` ist der Stand VOR dem optimistischen Update - der State ist zu
+  // diesem Zeitpunkt schon umgeschrieben, und die Entscheidung, ob überhaupt ein
+  // Statuswechsel nötig ist, muss sich auf den alten Stand beziehen.
+  if (column === 'archived') {
+    await setTaskArchived(before.id, true);
+    return;
+  }
+  if (before.archived_at) await setTaskArchived(before.id, false);
+  if (before.status !== column) await api.patch(`/tasks/${before.id}/status`, { status: column });
+}
+
+/** Optimistisches Spiegelbild von moveTaskToColumn auf dem State-Objekt. */
+function applyColumnLocally(task, column) {
+  if (column === 'archived') {
+    task.archived_at = new Date().toISOString();
+    return;
+  }
+  task.archived_at = null;
+  task.status = column;
+}
+
+/** Board-Bewegung mit optimistischem Vorgriff - der eine Weg für alle drei Gesten. */
+async function runColumnMove(task, column, container) {
+  const before = { id: task.id, status: task.status, archived_at: task.archived_at };
+  applyColumnLocally(task, column);
+  renderKanban(container);
+  try {
+    await moveTaskToColumn(before, column);
+  } catch (err) {
+    window.yuvomi.showToast(err.message, 'danger');
+  }
+  await loadTasks(container);
+}
+
 function renderKanbanCard(task) {
-  const due  = formatDueDate(task.due_date, task.due_time, task.status === 'done' || task.status === 'archived');
-  const next = kanbanNextStatus(task.status);
-  const icon = next === 'done' ? 'check' : next === 'in_progress' ? 'circle-play' : 'rotate-ccw';
-  const nextLabel = next === 'done'
-    ? t('tasks.kanbanMoveToDone')
-    : next === 'in_progress'
-      ? t('tasks.kanbanMoveToInProgress')
-      : t('tasks.kanbanMoveToOpen');
+  const archived = isArchived(task);
+  const due  = formatDueDate(task.due_date, task.due_time, task.status === 'done' || archived);
+  // Aus der Ablage führt nur ein Schritt: zurück. Wohin, sagt der Status, den
+  // die Aufgabe die ganze Zeit behalten hat.
+  const next = archived ? task.status : kanbanNextStatus(task.status);
+  const icon = archived ? 'archive-restore'
+    : next === 'done' ? 'check' : next === 'in_progress' ? 'circle-play' : 'rotate-ccw';
+  const nextLabel = archived
+    ? t('tasks.unarchiveButton')
+    : next === 'done'
+      ? t('tasks.kanbanMoveToDone')
+      : next === 'in_progress'
+        ? t('tasks.kanbanMoveToInProgress')
+        : t('tasks.kanbanMoveToOpen');
   return `
     <div class="kanban-card ${task.status === 'done' ? 'kanban-card--done' : ''}"
          data-task-id="${task.id}" draggable="true">
@@ -1038,6 +1700,7 @@ function renderKanbanCard(task) {
       <div class="kanban-card__meta">
         ${renderPriorityBadge(task.priority)}
         ${due ? `<span class="due-date ${due.cls}"><i data-lucide="clock" class="icon-sm" aria-hidden="true"></i> ${due.label}</span>` : ''}
+        ${renderTagBadges(task.tags)}
       </div>
       <div class="kanban-card__footer">
         ${renderAvatarStack(task.assigned_users ?? [], { size: 22 }) || '<span></span>'}
@@ -1057,7 +1720,8 @@ function renderKanban(container) {
   const grouped = {};
   for (const col of cols) grouped[col.status] = [];
   for (const t of filteredTasks()) {
-    if (grouped[t.status]) grouped[t.status].push(t);
+    const column = kanbanColumnOf(t);
+    if (grouped[column]) grouped[column].push(t);
     else grouped['open'].push(t);
   }
 
@@ -1178,22 +1842,11 @@ function wireKanbanDrag(container) {
     if (!zone || !state.dragTaskId) return;
     zone.classList.remove('kanban-col__body--over');
 
-    const newStatus = zone.dataset.dropZone;
-    const taskId    = state.dragTaskId;
-    const task      = state.tasks.find((t) => String(t.id) === String(taskId));
-    if (!task || task.status === newStatus) return;
+    const column = zone.dataset.dropZone;
+    const task   = state.tasks.find((t) => String(t.id) === String(state.dragTaskId));
+    if (!task || kanbanColumnOf(task) === column) return;
 
-    // Optimistisches Update
-    task.status = newStatus;
-    renderKanban(container);
-
-    try {
-      await api.patch(`/tasks/${taskId}/status`, { status: newStatus });
-      await loadTasks(container); // sync
-    } catch (err) {
-      window.yuvomi.showToast(err.message, 'danger');
-      await loadTasks(container);
-    }
+    await runColumnMove(task, column, container);
   });
 
   // Klick auf Status-Button: Status ohne Modal wechseln
@@ -1203,19 +1856,11 @@ function wireKanbanDrag(container) {
       e.stopPropagation();
       const card      = statusBtn.closest('.kanban-card[data-task-id]');
       if (!card) return;
-      const taskId    = card.dataset.taskId;
-      const newStatus = statusBtn.dataset.nextStatus;
-      const task      = state.tasks.find((t) => String(t.id) === String(taskId));
+      const task = state.tasks.find((t) => String(t.id) === String(card.dataset.taskId));
       if (!task) return;
-      task.status = newStatus;
-      renderKanban(container);
-      try {
-        await api.patch(`/tasks/${taskId}/status`, { status: newStatus });
-        await loadTasks(container);
-      } catch (err) {
-        window.yuvomi.showToast(err.message, 'danger');
-        await loadTasks(container);
-      }
+      // Der Knopf einer abgelegten Karte holt zurück, statt weiterzuschalten -
+      // sein data-next-status trägt dann den Status, den die Aufgabe behalten hat.
+      await runColumnMove(task, statusBtn.dataset.nextStatus, container);
       return;
     }
 
@@ -1228,7 +1873,7 @@ function wireKanbanDrag(container) {
           loadTaskForEdit(card.dataset.taskId),
           loadReminderForTask(card.dataset.taskId),
         ]);
-        openTaskModal({ task, users: state.users, reminder }, container);
+        openTaskDetail({ task, users: state.users, reminder }, container);
       } catch (err) {
         window.yuvomi.showToast(t('tasks.loadError'), 'danger');
       }
@@ -1330,18 +1975,10 @@ function wireKanbanTouch(container) {
     cleanup();
 
     if (!zone || !task) return;
-    const newStatus = zone.dataset.dropZone;
-    if (task.status === newStatus) return;
+    const column = zone.dataset.dropZone;
+    if (kanbanColumnOf(task) === column) return;
 
-    task.status = newStatus;
-    renderKanban(container);
-    try {
-      await api.patch(`/tasks/${tid}/status`, { status: newStatus });
-      await loadTasks(container);
-    } catch (err) {
-      window.yuvomi.showToast(err.message, 'danger');
-      await loadTasks(container);
-    }
+    await runColumnMove(task, column, container);
   }, { passive: true });
 
   board.addEventListener('touchcancel', cleanup, { passive: true });
@@ -1416,37 +2053,53 @@ function renderFilters(container) {
   // Im Kanban ist der Statusfilter unwirksam (die Spalten SIND der Status) und
   // wird nicht als Chip gezeigt - daher auch nicht mitzählen, sonst behauptet
   // "Filter N" einen unsichtbaren Filter (Audit P3).
-  const activeCount    = [
-    state.viewMode === 'kanban' ? '' : state.filters.status,
-    state.filters.priority,
-    state.filters.assigned_to,
-  ].filter(Boolean).length;
+  const activeCount    = (state.viewMode === 'kanban' ? 0 : state.filters.status.length)
+    + state.filters.priority.length
+    + state.filters.assigned_to.length
+    + state.filters.tags.length;
 
   // ---- Chip-Leiste: nur aktive Filter + Toggle-Button ----
   bar.replaceChildren();
 
-  if (state.filters.status && state.viewMode !== 'kanban') {
-    const chip = makeChip({ label: statusLabels[state.filters.status], active: true, withRemove: true });
-    chip.dataset.filter = 'status';
-    bar.appendChild(chip);
+  // Ein Chip je gewähltem Wert, in jeder Achse. Jeder trägt seinen eigenen
+  // Wert, damit das Entfernen genau diesen einen löst und nicht die ganze
+  // Auswahl (#671) - vorher gab es je Achse nur einen Wert und damit einen Chip.
+  if (state.viewMode !== 'kanban') {
+    state.filters.status.forEach((value) => {
+      const chip = makeChip({ label: statusLabels[value] ?? value, active: true, withRemove: true });
+      chip.dataset.filter = 'status';
+      chip.dataset.value = value;
+      bar.appendChild(chip);
+    });
   }
-  if (state.filters.priority) {
-    const chip = makeChip({ label: priorityLabels[state.filters.priority], active: true, withRemove: true });
+  state.filters.priority.forEach((value) => {
+    const chip = makeChip({ label: priorityLabels[value] ?? value, active: true, withRemove: true });
     chip.dataset.filter = 'priority';
+    chip.dataset.value = value;
     bar.appendChild(chip);
-  }
-  // Aktiver Personen-Filter — außer es ist die eigene ID, die deckt der
-  // dedizierte „Mir zugewiesen"-Chip ab (keine Doppel-Anzeige).
-  if (state.filters.assigned_to && !isAssignedToMe()) {
-    const u = state.users.find((u) => u.id === Number(state.filters.assigned_to));
+  });
+  // Aktive Personen-Filter — außer der eigenen ID, die deckt der dedizierte
+  // „Mir zugewiesen"-Chip ab (keine Doppel-Anzeige).
+  state.filters.assigned_to.forEach((value) => {
+    if (state.currentUserId != null && Number(value) === Number(state.currentUserId)) return;
+    const u = state.users.find((user) => user.id === Number(value));
     const chip = makeChip({
       label: u?.display_name ?? t('tasks.filterGroupPerson'),
       active: true,
       withRemove: true,
     });
     chip.dataset.filter = 'assigned_to';
+    chip.dataset.value = value;
     bar.appendChild(chip);
-  }
+  });
+  // Ein Chip je gewähltem Tag. Jeder trägt seinen eigenen Wert, damit das
+  // Entfernen genau diesen einen löst und nicht die ganze Auswahl.
+  state.filters.tags.forEach((tag) => {
+    const chip = makeChip({ label: tag, active: true, withRemove: true });
+    chip.dataset.filter = 'tag';
+    chip.dataset.value = tag;
+    bar.appendChild(chip);
+  });
 
   // "Mir zugewiesen" Schnellzugriff — nur sinnvoll bei mehreren Familienmitgliedern.
   // Icon+Label bewusst identisch zum Kalender-Toggle (gleiche Fähigkeit, eine Gestalt).
@@ -1511,12 +2164,19 @@ function renderFilters(container) {
   const recent = getRecentFilters();
   recent.forEach((f) => {
     const parts = [];
-    if (f.status)      parts.push(statusLabelsMap[f.status]   ?? f.status);
-    if (f.priority)    parts.push(priorityLabelsMap[f.priority] ?? f.priority);
-    if (f.assigned_to) {
-      const u = state.users.find((u) => u.id === Number(f.assigned_to));
+    // Jeder Wert jeder Achse wird benannt: seit #671 kann ein gemerktes Set
+    // "Hoch" UND "Mittel" enthalten, und ein Chip, der nur den ersten nennt,
+    // schaltete beim Klick mehr, als er behauptet.
+    f.status.forEach((v) => parts.push(statusLabelsMap[v] ?? v));
+    f.priority.forEach((v) => parts.push(priorityLabelsMap[v] ?? v));
+    f.assigned_to.forEach((v) => {
+      const u = state.users.find((user) => user.id === Number(v));
       if (u) parts.push(u.display_name);
-    }
+    });
+    // Die Tags gehören in die Beschriftung, weil der Chip sie beim Klick
+    // mitsetzt: ohne sie hieße ein Chip „Offen" und schaltete zusätzlich
+    // Tag-Filter, die niemand am Chip ablesen kann (#586).
+    parts.push(...f.tags);
     if (!parts.length) return;
     // Aktions-Chip (wendet ein Filter-Set an), kein Ein/Aus-Zustand → pressed:null.
     const chip = makeChip({ label: parts.join(' · '), extraClass: 'filter-chip--recent', pressed: null });
@@ -1537,7 +2197,7 @@ function renderFilters(container) {
       ...(state.viewMode !== 'kanban' ? [{
         key: 'status',
         label: t('tasks.filterGroupStatus'),
-        items: STATUSES().map((s) => ({ value: s.value, label: s.label })),
+        items: FILTER_STATUSES().map((s) => ({ value: s.value, label: s.label })),
       }] : []),
       {
         key: 'priority',
@@ -1550,6 +2210,15 @@ function renderFilters(container) {
         key: 'assigned_to',
         label: t('tasks.filterGroupPerson'),
         items: state.users.map((u) => ({ value: String(u.id), label: u.display_name })),
+      });
+    }
+    // Tags nur anbieten, wenn welche vergeben sind — ohne CalDAV-Spiegel und ohne
+    // eigene Vergabe bleibt die Gruppe sonst als leere Zeile stehen (#586).
+    if (state.allTags.length) {
+      groups.push({
+        key: 'tag',
+        label: t('tasks.filterGroupTag'),
+        items: state.allTags.map((entry) => ({ value: entry.tag, label: entry.tag })),
       });
     }
 
@@ -1568,7 +2237,11 @@ function renderFilters(container) {
       row.className = 'filter-panel__chips';
 
       group.items.forEach((item) => {
-        const isActive = state.filters[group.key] === item.value;
+        // Jede Gruppe erlaubt Mehrfachauswahl (#671); die Tags unterscheiden
+        // sich nur darin, dass ihre Zugehörigkeit die Schreibweise ignoriert.
+        const isActive = group.key === 'tag'
+          ? hasTagFilter(item.value)
+          : hasFilter(group.key, item.value);
         const chip = makeChip({ label: item.label, active: isActive, withRemove: isActive });
         chip.dataset.filter = group.key;
         chip.dataset.value = item.value;
@@ -1593,8 +2266,11 @@ function renderFilters(container) {
 }
 
 function updateOverdueBadge() {
+  // Ein Badge zählt, was wartet. Eine abgelegte Aufgabe wartet nicht - sie
+  // erschiene sonst im Kanban und unter aktivem Archiv-Chip als offene Schuld
+  // (#688), obwohl kein Weg von der Zahl zu ihr führt.
   const overdue = state.tasks.filter((t) => {
-    if (!t.due_date || t.status === 'done') return false;
+    if (!t.due_date || t.status === 'done' || isArchived(t)) return false;
     return new Date(t.due_date) < new Date().setHours(0, 0, 0, 0);
   }).length;
 
@@ -1648,25 +2324,89 @@ const ASSIGNED_TO_ME_KEY = 'yuvomi:taskAssignedToMe';
 // eigenen User-ID. Wird pro Gerät gemerkt und beim Laden aus dem gespeicherten
 // assigned_to-Wert (== eigene ID) abgeleitet, damit Panel-Auswahl und Chip synchron bleiben.
 function isAssignedToMe() {
-  return state.currentUserId != null
-    && String(state.filters.assigned_to) === String(state.currentUserId);
+  return state.currentUserId != null && hasFilter('assigned_to', state.currentUserId);
 }
 
 function persistAssignedToMe() {
   try { localStorage.setItem(ASSIGNED_TO_ME_KEY, isAssignedToMe() ? '1' : '0'); } catch {}
 }
 
+/** Ist dieser Tag gerade gefiltert? Schreibweise zählt dabei nicht. */
+function hasTagFilter(tag) {
+  const key = String(tag).toLowerCase();
+  return state.filters.tags.some((active) => active.toLowerCase() === key);
+}
+
+/**
+ * Tag im Filter an- oder abwählen. Mehrere Tags engen UND-verknüpft ein, also
+ * fügt ein Klick hinzu statt zu ersetzen.
+ */
+async function toggleTagFilter(tag, container) {
+  const key = String(tag).toLowerCase();
+  state.filters.tags = hasTagFilter(tag)
+    ? state.filters.tags.filter((active) => active.toLowerCase() !== key)
+    : [...state.filters.tags, tag];
+  if (state.filters.tags.length) saveRecentFilter(state.filters);
+  renderFilters(container);
+  await loadTasks(container);
+}
+
+/**
+ * Ein gespeichertes Filter-Set auf die aktuelle Form bringen.
+ *
+ * Einzelne Strings stammen aus Einträgen, die vor der jeweiligen Mehrfachauswahl
+ * im localStorage gelandet sind - `tag` vor der Tag-Auswahl, `status`,
+ * `priority` und `assigned_to` vor #671. Ohne die Umschreibung wären das dort
+ * keine Arrays, und der erste `.includes` darauf risse die Seite auf, für Werte,
+ * die niemand mehr absichtlich gesetzt hat.
+ */
+function normalizeFilterSet(f = {}) {
+  const asList = (value) => (Array.isArray(value) ? value : (value ? [value] : [])).filter(Boolean).map(String);
+  return {
+    status:      asList(f.status),
+    priority:    asList(f.priority),
+    assigned_to: asList(f.assigned_to),
+    tags:        asList(Array.isArray(f.tags) ? f.tags : (f.tag ? [f.tag] : [])),
+  };
+}
+
+/** Ist dieser Wert in der Achse gerade gewählt? */
+function hasFilter(key, value) {
+  return (state.filters[key] || []).includes(String(value));
+}
+
+/**
+ * Wert einer ODER-Achse an- oder abwählen. Ein Klick ergänzt, statt zu
+ * ersetzen - sonst bliebe es bei einem Wert pro Reihe (#671).
+ */
+async function toggleValueFilter(key, value, container) {
+  const current = state.filters[key] || [];
+  const next = String(value);
+  state.filters[key] = current.includes(next)
+    ? current.filter((v) => v !== next)
+    : [...current, next];
+  if (state.filters[key].length) saveRecentFilter(state.filters);
+  renderFilters(container);
+  await loadTasks(container);
+}
+
 function getRecentFilters() {
-  try { return JSON.parse(localStorage.getItem(RECENT_FILTERS_KEY) ?? '[]'); } catch { return []; }
+  try {
+    return JSON.parse(localStorage.getItem(RECENT_FILTERS_KEY) ?? '[]').map(normalizeFilterSet);
+  } catch { return []; }
 }
 
 function saveRecentFilter(filters) {
-  if (!filters.status && !filters.priority && !filters.assigned_to) return;
-  const key = [filters.status, filters.priority, filters.assigned_to].join('|');
-  const recent = getRecentFilters().filter((f) =>
-    [f.status, f.priority, f.assigned_to].join('|') !== key
-  );
-  recent.unshift({ ...filters });
+  const set = normalizeFilterSet(filters);
+  if (!set.status.length && !set.priority.length && !set.assigned_to.length && !set.tags.length) return;
+  // Jede Achse gehört mit allen ihren Werten in den Schlüssel: sonst verdrängte
+  // „Offen + Garten" den Eintrag „Offen + Haus", weil beide auf dieselbe Kennung
+  // fielen - seit #671 gilt dasselbe für zwei Prioritäten statt einer.
+  const axis = (values) => [...values].map((v) => String(v).toLowerCase()).sort().join(',');
+  const keyOf = (f) => [f.status, f.priority, f.assigned_to, f.tags].map(axis).join('|');
+  const key = keyOf(set);
+  const recent = getRecentFilters().filter((f) => keyOf(f) !== key);
+  recent.unshift(set);
   try { localStorage.setItem(RECENT_FILTERS_KEY, JSON.stringify(recent.slice(0, RECENT_FILTERS_MAX))); } catch {}
 }
 
@@ -1790,7 +2530,7 @@ function wireSwipeGestures(container) {
         }, 200);
 
       } else if (dx > SWIPE_THRESHOLD) {
-        // Swipe rechts → Bearbeiten-Modal
+        // Swipe rechts → Detailansicht
         resetCard(true);
         vibrate(20);
         try {
@@ -1798,7 +2538,7 @@ function wireSwipeGestures(container) {
             loadTaskForEdit(taskId),
             loadReminderForTask(taskId),
           ]);
-          openTaskModal({ task, users: state.users, reminder }, container);
+          openTaskDetail({ task, users: state.users, reminder }, container);
         } catch (err) {
           window.yuvomi.showToast(t('tasks.loadError'), 'danger');
         }
@@ -1844,7 +2584,7 @@ function wireFilterChips(container) {
 
   // Alle Filter zurücksetzen
   container.querySelector('#filter-clear-all')?.addEventListener('click', async () => {
-    state.filters = { status: '', priority: '', assigned_to: '' };
+    state.filters = { status: [], priority: [], assigned_to: [], tags: [] };
     renderFilters(container);
     await loadTasks(container);
   });
@@ -1857,25 +2597,22 @@ function wireFilterChips(container) {
     await loadTasks(container);
   });
 
-  // "Mir zugewiesen" Toggle — schaltet assigned_to auf die eigene ID
+  // "Mir zugewiesen" Toggle — nimmt die eigene ID in den Personen-Filter auf
+  // bzw. wieder heraus. Seit #671 eine Achse mit mehreren Werten: eine bereits
+  // gewählte zweite Person bleibt dabei stehen, statt still zu verschwinden.
   container.querySelector('#filter-assigned-me')?.addEventListener('click', async () => {
-    state.filters.assigned_to = isAssignedToMe() ? '' : String(state.currentUserId);
-    renderFilters(container);
-    await loadTasks(container);
+    await toggleValueFilter('assigned_to', state.currentUserId, container);
   });
 
   // Chip-Klicks (in Bar + Panel)
   container.querySelectorAll('[data-filter]').forEach((chip) => {
     chip.addEventListener('click', async () => {
       const filter = chip.dataset.filter;
-      if (chip.classList.contains('filter-chip--active')) {
-        state.filters[filter] = '';
-      } else {
-        state.filters[filter] = chip.dataset.value;
-        saveRecentFilter(state.filters);
+      if (filter === 'tag') {
+        await toggleTagFilter(chip.dataset.value, container);
+        return;
       }
-      renderFilters(container);
-      await loadTasks(container);
+      await toggleValueFilter(filter, chip.dataset.value, container);
     });
   });
 
@@ -1883,8 +2620,7 @@ function wireFilterChips(container) {
   container.querySelectorAll('[data-recent-filter]').forEach((chip) => {
     chip.addEventListener('click', async () => {
       try {
-        const f = JSON.parse(chip.dataset.recentFilter);
-        state.filters = { status: f.status || '', priority: f.priority || '', assigned_to: f.assigned_to || '' };
+        state.filters = normalizeFilterSet(JSON.parse(chip.dataset.recentFilter));
       } catch { return; }
       renderFilters(container);
       await loadTasks(container);
@@ -1957,7 +2693,7 @@ function wireNewTaskBtn(container) {
     openTaskModal({ users: state.users }, container);
   };
   container.querySelector('#btn-new-task')?.addEventListener('click', handler);
-  container.querySelector('#fab-new-task')?.addEventListener('click', handler);
+  findPageFab('fab-new-task')?.addEventListener('click', handler);
 }
 
 function updateBulkActionsBar(container) {
@@ -2032,13 +2768,18 @@ function wireBulkActions(container) {
       return;
     }
 
+    if (action === 'bulk-tag-add' || action === 'bulk-tag-remove') {
+      openBulkTagDialog(taskIds, action === 'bulk-tag-add' ? 'add' : 'remove', container);
+      return;
+    }
+
     try {
       if (action === 'bulk-mark-done' || action === 'bulk-mark-open') {
         const status = btn.dataset.status;
         await Promise.all(taskIds.map(id => api.patch(`/tasks/${id}/status`, { status })));
         window.yuvomi.showToast(t('tasks.bulkStatusChanged'), 'success');
       } else if (action === 'bulk-archive') {
-        await Promise.all(taskIds.map(id => api.patch(`/tasks/${id}/status`, { status: 'archived' })));
+        await Promise.all(taskIds.map(id => setTaskArchived(id, true)));
         window.yuvomi.showToast(t('tasks.bulkArchived'), 'success');
       }
 
@@ -2129,16 +2870,17 @@ function wireTaskList(container) {
           loadTaskForEdit(id),
           loadReminderForTask(id),
         ]);
-        openTaskModal({ task, users: state.users, reminder }, container);
+        openTaskDetail({ task, users: state.users, reminder }, container);
       } catch (err) {
         window.yuvomi.showToast(t('tasks.loadError'), 'danger');
       }
     }
 
-    if (action === 'archive-task') {
+    if (action === 'archive-task' || action === 'unarchive-task') {
+      const archive = action === 'archive-task';
       try {
-        await api.patch(`/tasks/${id}/status`, { status: 'archived' });
-        window.yuvomi.showToast(t('tasks.archivedToast'), 'success');
+        await setTaskArchived(id, archive);
+        window.yuvomi.showToast(archive ? t('tasks.archivedToast') : t('tasks.unarchivedToast'), 'success');
         await loadTasks(container);
       } catch (err) {
         window.yuvomi.showToast(err.message, 'danger');
@@ -2161,7 +2903,9 @@ export async function render(container, { user }) {
   // „Mir zugewiesen" pro Gerät wiederherstellen (setzt assigned_to auf die eigene ID)
   try {
     if (state.currentUserId != null && localStorage.getItem(ASSIGNED_TO_ME_KEY) === '1') {
-      state.filters.assigned_to = String(state.currentUserId);
+      if (!hasFilter('assigned_to', state.currentUserId)) {
+        state.filters.assigned_to = [...state.filters.assigned_to, String(state.currentUserId)];
+      }
     }
   } catch {}
 
@@ -2208,6 +2952,13 @@ export async function render(container, { user }) {
           </button>
           <button class="btn btn--icon btn--ghost" id="btn-manage-categories"
                   aria-label="${t('tasks.manageCategories')}" title="${t('tasks.manageCategories')}">
+            <i data-lucide="folder-tree" class="icon-lg" aria-hidden="true"></i>
+          </button>
+          <!-- Der Tag-Verwalter bekommt das Etiketten-Icon, die Kategorien den
+               Ordnerbaum: die beiden Achsen sind bewusst getrennt, und dieselbe
+               Bildsprache für beide hätte genau das wieder eingeebnet. -->
+          <button class="btn btn--icon btn--ghost" id="btn-manage-tags"
+                  aria-label="${t('tasks.manageTags')}" title="${t('tasks.manageTags')}">
             <i data-lucide="tags" class="icon-lg" aria-hidden="true"></i>
           </button>
           <button class="btn btn--primary toolbar-new-btn" id="btn-new-task" style="gap:var(--space-1)">
@@ -2245,6 +2996,14 @@ export async function render(container, { user }) {
               <i data-lucide="archive" class="icon-md" aria-hidden="true"></i>
               ${t('tasks.bulkArchive')}
             </button>
+            <button class="btn btn--secondary btn--sm" id="bulk-tag-add">
+              <i data-lucide="tag" class="icon-md" aria-hidden="true"></i>
+              ${t('tasks.bulkTagAdd')}
+            </button>
+            <button class="btn btn--secondary btn--sm" id="bulk-tag-remove">
+              <i data-lucide="tag-off" class="icon-md" aria-hidden="true"></i>
+              ${t('tasks.bulkTagRemove')}
+            </button>
             <button class="btn btn--danger btn--sm" id="bulk-delete">
               <i data-lucide="trash-2" class="icon-md" aria-hidden="true"></i>
               ${t('tasks.bulkDelete')}
@@ -2271,31 +3030,28 @@ export async function render(container, { user }) {
 
   // Daten laden (Filter-State aus vorheriger Session berücksichtigen)
   try {
-    const params = new URLSearchParams();
-    // Statusfilter im Kanban weglassen (Spalten SIND der Status), sonst startet die
-    // Ansicht mit leeren "In Bearbeitung"/"Erledigt"-Spalten (Audit A1-07/P3) -
-    // gleiche Regel wie loadTasks().
-    if (state.filters.status && state.viewMode !== 'kanban') params.set('status', state.filters.status);
-    if (state.filters.priority)    params.set('priority',    state.filters.priority);
-    if (state.filters.assigned_to) params.set('assigned_to', state.filters.assigned_to);
-    if (state.showFuture)          params.set('include_future', '1');
-    const query = params.toString() ? `?${params}` : '';
-
-    const [tasksData, metaData] = await Promise.all([
-      api.get(`/tasks${query}`),
+    const [tasksData, metaData, preferencesData] = await Promise.all([
+      api.get(`/tasks${taskQuery()}`),
       api.get('/tasks/meta/options'),
+      // Reine Anzeigepräferenz: ein Fehler hier darf die Aufgabenliste nicht
+      // mit in den Ladefehler ziehen, deshalb eigener Fallback.
+      api.get('/preferences').catch(() => ({ data: {} })),
     ]);
     state.tasks = tasksData.data ?? [];
     state.users = metaData.users ?? [];
     state.categories = metaData.categories ?? [];
+    state.allTags = metaData.tags ?? [];
     state.defaultPoints = Number(metaData.default_points) || 0;
+    state.subtasksExpandedByDefault = preferencesData.data?.tasks_subtasks_expanded === true;
   } catch (err) {
     console.error('[Tasks] Ladefehler:', err.message);
     window.yuvomi.showToast(t('tasks.loadError'), 'danger');
     state.tasks = [];
     state.users = [];
     state.categories = [];
+    state.allTags = [];
     state.defaultPoints = 0;
+    state.subtasksExpandedByDefault = false;
   }
 
   // UI verdrahten
@@ -2306,8 +3062,11 @@ export async function render(container, { user }) {
   wireBulkSelect(container);
   wireBulkCheckboxes(container);
   wireBulkActions(container);
+  wireTagBadgeFilter(container);
   container.querySelector('#btn-manage-categories')
     ?.addEventListener('click', () => openTaskCategoryManager(container));
+  container.querySelector('#btn-manage-tags')
+    ?.addEventListener('click', () => openTagManager(container));
   renderFilters(container);
   renderTaskList(container);
 
@@ -2319,7 +3078,7 @@ export async function render(container, { user }) {
     },
   });
 
-  // Deep-Link: ?open=<id> öffnet direkt das Edit-Modal
+  // Deep-Link: ?open=<id> öffnet die Detailansicht
   const openId = new URLSearchParams(window.location.search).get('open');
   if (openId) {
     try {
@@ -2327,7 +3086,7 @@ export async function render(container, { user }) {
         loadTaskForEdit(openId),
         loadReminderForTask(openId),
       ]);
-      openTaskModal({ task, users: state.users, reminder }, container);
+      openTaskDetail({ task, users: state.users, reminder }, container);
     } catch { /* Task existiert nicht oder kein Zugriff */ }
   }
 }

@@ -264,4 +264,56 @@ test('Ohne Eltern-Freigabe (rewards_require_approval=0) wird sofort gutgeschrieb
   db.prepare("UPDATE sync_config SET value = '1' WHERE key = 'rewards_require_approval'").run();
 });
 
+// --------------------------------------------------------
+// Stellvertretung (#655): Eltern erledigen mit jüngeren Kindern, die sich nicht
+// selbst anmelden. Beide Hälften des Wunsches trägt der Bestand schon - dieser
+// Abschnitt hält sie fest, damit sie nicht als Nebeneffekt verlorengehen.
+// --------------------------------------------------------
+
+test('Punkte gehen an die zugewiesene Person, nicht an die abhakende (#655)', () => {
+  // Die übrigen Vergabe-Tests belegen das nur zufällig: dort nimmt die handelnde
+  // Person gar nicht am Punktesystem teil, kann also ohnehin nichts bekommen.
+  // Hier tut sie es - erst dann ist "der Zugewiesene verdient" eine echte Aussage.
+  const parent = db.prepare("INSERT INTO users (username, display_name, password_hash, role) VALUES ('papa', 'Papa', 'x', 'member')").run().lastInsertRowid;
+  db.prepare('INSERT INTO reward_participants (user_id, enabled) VALUES (?, 1)').run(parent);
+
+  const parentBefore = getBalance(db, parent);
+  const childBefore = getBalance(db, child1);
+
+  const taskId = makeTask(25, [child1]);
+  awardForCompletion(db, taskId, parent);
+
+  assert.equal(getBalance(db, child1), childBefore + 25, 'das Kind erhält die Punkte');
+  assert.equal(getBalance(db, parent), parentBefore, 'der abhakende Elternteil erhält nichts');
+
+  // Aufräumen: ein zusätzlicher Teilnehmer würde spätere Salden-/Rang-Tests
+  // verschieben, falls dieser Block je nach vorne wandert.
+  db.prepare('DELETE FROM reward_participants WHERE user_id = ?').run(parent);
+});
+
+test('Admin löst stellvertretend ein; ein Mitglied nur für sich selbst (#655)', async () => {
+  asAdmin();
+  await request('POST', '/api/v1/rewards/bonus', { user_id: child1, delta: 500 });
+  const child1Before = getBalance(db, child1);
+
+  // Elternteil löst für das Kind ein: der Abzug trifft das Kind, nicht den Admin.
+  const proxy = await request('POST', '/api/v1/rewards/redemptions', { catalog_id: rewardId, user_id: child1 });
+  assert.equal(proxy.status, 201);
+  assert.equal(getBalance(db, child1), child1Before - 100, 'die Punkte des Kindes werden reserviert');
+
+  // Gegenprobe: ein Mitglied, das eine fremde user_id mitschickt, löst für sich
+  // selbst ein. Die fremde Angabe wird ignoriert, nicht befolgt - keine
+  // Rechteausweitung, aber auch kein Fehler, den der Aufrufer bemerken würde.
+  asAdmin();
+  await request('POST', '/api/v1/rewards/bonus', { user_id: child2, delta: 500 });
+  const c1 = getBalance(db, child1);
+  const c2 = getBalance(db, child2);
+
+  asChild(child2);
+  const spoofed = await request('POST', '/api/v1/rewards/redemptions', { catalog_id: rewardId, user_id: child1 });
+  assert.equal(spoofed.status, 201);
+  assert.equal(getBalance(db, child1), c1, 'das fremde Konto bleibt unberührt');
+  assert.equal(getBalance(db, child2), c2 - 100, 'abgebucht wird beim Aufrufer selbst');
+});
+
 test.after(() => { server.close(); db.close(); });

@@ -319,6 +319,93 @@ test('legt Nutzer ohne Name mit preferred_username als display_name an', () => {
   assert(user.display_name === 'dana', `Falscher display_name: ${user.display_name}`);
 });
 
+// ─── Username-Ableitung (#653) ────────────────────────────────────────────────
+
+// Das app-weite Username-Format aus /setup, /invites und den User-Routen.
+const USERNAME_PATTERN = /^[a-zA-Z0-9._-]{3,64}$/;
+
+test('nutzt die E-Mail NICHT als username-Fallback', () => {
+  const db = buildOidcTestDb();
+  const userinfo = { sub: 'synology-user-01', email: 'familie@example.com', name: 'Kind Eins' };
+  const user = findOrCreateOidcUser(db, userinfo);
+  assert(!user.username.includes('@'), `E-Mail als username übernommen: ${user.username}`);
+  assert(user.username === 'synology-user-01', `Falscher username: ${user.username}`);
+});
+
+test('geteilte Familien-E-Mail erzeugt getrennte, eindeutige Usernamen', () => {
+  const db = buildOidcTestDb();
+  const shared = 'familie@example.com';
+  const first  = findOrCreateOidcUser(db, { sub: 'kind-eins', email: shared, name: 'Kind Eins' });
+  const second = findOrCreateOidcUser(db, { sub: 'kind-zwei', email: shared, name: 'Kind Zwei' });
+  assert(first.username === 'kind-eins', `Falscher username: ${first.username}`);
+  assert(second.username === 'kind-zwei', `Falscher username: ${second.username}`);
+  assert(first.id !== second.id, 'Zwei subs müssen zwei Accounts ergeben');
+});
+
+test('sub dient ohne oidc--Präfix als Fallback', () => {
+  const db = buildOidcTestDb();
+  const user = findOrCreateOidcUser(db, { sub: '550e8400-e29b-41d4-a716-446655440000' });
+  assert(user.username === '550e8400-e29b-41d4-a716-446655440000', `Falscher username: ${user.username}`);
+});
+
+test('nutzt den non-standard username-Claim vor dem sub', () => {
+  const db = buildOidcTestDb();
+  const userinfo = { sub: 'daniel@LDAP-Domain', username: 'daniel', email: 'daniel@example.com' };
+  const user = findOrCreateOidcUser(db, userinfo);
+  assert(user.username === 'daniel', `Falscher username: ${user.username}`);
+});
+
+test('abgeleiteter username erfüllt immer das app-weite Format', () => {
+  const db = buildOidcTestDb();
+  const cases = [
+    { sub: 'daniel@LDAP-Domain' },                        // Synology: sub trägt den Directory-Teil
+    { sub: 'x' },                                          // zu kurz → nächster Kandidat
+    { sub: '@@@' },                                        // nach Bereinigung leer
+    { sub: 'ok-1', preferred_username: 'Björn Müller' },   // Umlaute + Leerzeichen
+    { sub: 'ok-2', preferred_username: 'a'.repeat(200) },  // über der Längengrenze
+  ];
+  for (const userinfo of cases) {
+    const user = findOrCreateOidcUser(db, userinfo);
+    assert(
+      USERNAME_PATTERN.test(user.username),
+      `Ungültiger username für sub=${userinfo.sub}: ${user.username}`,
+    );
+  }
+});
+
+test('transliteriert Diakritika statt sie zu Bindestrichen zu machen', () => {
+  const db = buildOidcTestDb();
+  const user = findOrCreateOidcUser(db, { sub: 'umlaut-sub', preferred_username: 'Björn Müller' });
+  assert(user.username === 'Bjorn-Muller', `Falscher username: ${user.username}`);
+});
+
+// ─── oidc_provider aus dem iss-Claim (#653) ───────────────────────────────────
+
+test('speichert den iss-Claim als oidc_provider', () => {
+  const db = buildOidcTestDb();
+  process.env.OIDC_ISSUER = 'https://cname.example.com/';
+  const user = findOrCreateOidcUser(db, { sub: 'iss-sub-01', iss: 'https://real-idp.example.com/', preferred_username: 'ida' });
+  delete process.env.OIDC_ISSUER;
+  assert(user.oidc_provider === 'https://real-idp.example.com/', `Falscher oidc_provider: ${user.oidc_provider}`);
+});
+
+test('fällt ohne iss-Claim auf OIDC_ISSUER zurück', () => {
+  const db = buildOidcTestDb();
+  process.env.OIDC_ISSUER = 'https://idp.example.com/';
+  const user = findOrCreateOidcUser(db, { sub: 'iss-sub-02', preferred_username: 'ivo' });
+  delete process.env.OIDC_ISSUER;
+  assert(user.oidc_provider === 'https://idp.example.com/', `Falscher oidc_provider: ${user.oidc_provider}`);
+});
+
+test('setzt beim Linking ebenfalls den iss-Claim', () => {
+  const db = buildOidcTestDb();
+  addLocalUserWithEmail(db, 'ingo', 'ingo@example.com');
+  const user = findOrCreateOidcUser(db, {
+    sub: 'iss-sub-03', iss: 'https://real-idp.example.com/', email: 'ingo@example.com', email_verified: true,
+  });
+  assert(user.oidc_provider === 'https://real-idp.example.com/', `Falscher oidc_provider: ${user.oidc_provider}`);
+});
+
 // ─── Abschluss ────────────────────────────────────────────────────────────────
 
 console.log(`\n  ${passed} bestanden, ${failed} fehlgeschlagen\n`);

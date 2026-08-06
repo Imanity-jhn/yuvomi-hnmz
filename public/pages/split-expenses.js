@@ -4,11 +4,15 @@
  */
 
 import { api } from '/api.js';
-import { openModal as openSharedModal, closeModal, confirmModal } from '/components/modal.js';
-import { t, formatDate, getLocale, getNumberFormat, dateInputPlaceholder, parseDateInput, isDateInputValid } from '/i18n.js';
+import { openModal as openSharedModal, closeModal, confirmModal, confirmOverModal, reportFieldError } from '/components/modal.js';
+import { renderDocumentAttachField, bindDocumentAttachField } from '/components/document-attach.js';
+import { t, formatDate, getLocale, dateInputPlaceholder, parseDateInput, isDateInputValid } from '/i18n.js';
 import { esc } from '/utils/html.js';
 import { stagger } from '/utils/ux.js';
 import { renderSkeletonList } from '/utils/skeleton.js';
+import { formatMoney, amountPlaceholder, toDecimalString, amountIsSavable, smallestUnitLabel } from '/utils/money.js';
+import { wireTablist } from '/utils/tablist.js';
+import { findPageFab } from '/utils/fab.js';
 
 let state = {
   meta: null,
@@ -29,16 +33,21 @@ let state = {
   user: null,
 };
 let _container = null;
+let _statusTablist = null;   // wireTablist-Handle des Statusfilters (sync ohne onChange)
 
 function setHtml(element, html) {
   element.replaceChildren();
   element.insertAdjacentHTML('beforeend', html);
 }
 
+// Format aus utils/money.js - EINE Quelle für das ganze Budget-Modul (Critique
+// P0). Geteilte Ausgaben tragen die Rolle `plain`: ein Rechnungsposten der
+// Gruppe ist keine Bewegung auf dem Konto des Betrachters, wer ihn ausgelegt
+// hat, hat eine Forderung und kein Minus. Die Rollentabelle steht in money.js.
 function money(amount, currency) {
   const n = Number(amount || 0);
   if (!Number.isFinite(n)) return `${amount} ${currency}`;
-  return getNumberFormat({ style: 'currency', currency }).format(n);
+  return formatMoney(n, currency);
 }
 
 function groupIcon(type) {
@@ -57,7 +66,7 @@ export async function render(container, { user } = {}) {
   state.user = user || null;
   setHtml(container, `
     <div class="split-page">
-      <header class="split-topbar">
+      <header class="budget-panel-head split-topbar">
         <div>
           <h1 class="split-title">${t('splitExpenses.title')}</h1>
           <p class="split-subtitle">${t('splitExpenses.subtitle')}</p>
@@ -67,7 +76,7 @@ export async function render(container, { user } = {}) {
           ${t('splitExpenses.addExpense')}
         </button>
       </header>
-      <section class="split-summary" id="split-summary"></section>
+      <section class="budget-summary" id="split-summary"></section>
       <div class="split-layout">
         <aside class="split-groups-panel">
           <div class="split-panel-head">
@@ -83,9 +92,17 @@ export async function render(container, { user } = {}) {
               <input id="split-group-search" type="search" placeholder="${t('splitExpenses.searchGroups')}" autocomplete="off">
             </span>
           </label>
-          <div class="split-status-filter" id="split-status-filter" role="group" aria-label="${t('splitExpenses.statusLabel')}">
-            <button type="button" class="filter-chip filter-chip--sm" data-status="active">${t('splitExpenses.statusActive')}</button>
-            <button type="button" class="filter-chip filter-chip--sm" data-status="archived">${t('splitExpenses.statusArchived')}</button>
+          <!-- Geteilter Umschalter-Baustein des Budget-Moduls statt eigener
+               Pillen-Optik, und role="radiogroup" statt role="group": eine
+               Einfachauswahl, die ihren Zustand ansagt und über die geteilte
+               Verhaltensschicht Pfeiltasten mitbringt (Critique 2026-07-30, P1). -->
+          <div class="budget-segmented split-status-filter" id="split-status-filter" role="radiogroup" aria-label="${t('splitExpenses.statusLabel')}">
+            ${[['active', 'splitExpenses.statusActive'], ['archived', 'splitExpenses.statusArchived']].map(([id, key]) => {
+              const on = state.groupStatus === id;
+              return `<button type="button" class="budget-segmented__item${on ? ' is-active' : ''}"
+                  role="radio" data-tab-id="${id}" aria-checked="${on}"
+                  tabindex="${on ? '0' : '-1'}">${t(key)}</button>`;
+            }).join('')}
           </div>
           <div class="split-groups" id="split-groups"></div>
         </aside>
@@ -164,7 +181,7 @@ async function loadMemberCandidates() {
 function bindShell() {
   _container.querySelector('#split-add-group')?.addEventListener('click', () => openGroupModal());
   _container.querySelector('#split-add-expense')?.addEventListener('click', () => openExpenseModal());
-  _container.querySelector('#split-fab')?.addEventListener('click', () => openExpenseModal());
+  findPageFab('split-fab')?.addEventListener('click', () => openExpenseModal());
   let groupSearchTimer;
   _container.querySelector('#split-group-search')?.addEventListener('input', (e) => {
     const value = e.target.value.trim();
@@ -176,14 +193,17 @@ function bindShell() {
       renderAll();
     }, 250);
   });
-  _container.querySelector('#split-status-filter')?.addEventListener('click', async (e) => {
-    const chip = e.target.closest('[data-status]');
-    if (!chip || chip.dataset.status === state.groupStatus) return;
-    state.groupStatus = chip.dataset.status;
-    state.activeGroupId = null;
-    await loadGroups();
-    await loadGroupData();
-    renderAll();
+  _statusTablist = wireTablist(_container.querySelector('#split-status-filter'), {
+    activeId: state.groupStatus,
+    activeClass: 'is-active',
+    mode: 'select',
+    onChange: async (id) => {
+      state.groupStatus = id;
+      state.activeGroupId = null;
+      await loadGroups();
+      await loadGroupData();
+      renderAll();
+    },
   });
   _container.querySelector('#split-groups')?.addEventListener('click', async (e) => {
     const btn = e.target.closest('[data-group-id]');
@@ -211,14 +231,12 @@ function renderAll() {
  * Ausgabe würde dort in eine archivierte Gruppe laufen.
  */
 function renderStatusFilter() {
-  _container.querySelectorAll('#split-status-filter [data-status]').forEach((chip) => {
-    const active = chip.dataset.status === state.groupStatus;
-    chip.classList.toggle('filter-chip--active', active);
-    chip.setAttribute('aria-pressed', String(active));
-  });
+  // Zustand über die geteilte Verhaltensschicht spiegeln (sync löst kein
+  // onChange aus) statt Klassen und ARIA von Hand nachzuziehen.
+  _statusTablist?.sync(state.groupStatus);
   const addExpense = _container.querySelector('#split-add-expense');
   if (addExpense) addExpense.hidden = isArchivedView();
-  const fab = _container.querySelector('#split-fab');
+  const fab = findPageFab('split-fab');
   if (fab) fab.hidden = isArchivedView();
 }
 
@@ -226,18 +244,23 @@ function renderSummary() {
   const summary = _container.querySelector('#split-summary');
   const owed = state.dashboard?.total_owed || [];
   const owing = state.dashboard?.total_owing || [];
+  // Geteilte Kennzahlkarte des Budget-Moduls (budget.css). Die frühere eigene
+  // .split-summary-card war die dritte von fünf Bauarten im selben Modul
+  // (Critique 2026-07-30, P0).
+  // Rolle `total`: die Richtung steht im Label („Du bekommst" / „Du schuldest"),
+  // nicht im Vorzeichen - deshalb der Ton explizit statt aus der Zahl.
   setHtml(summary, `
-    <div class="split-summary-card split-summary-card--positive">
-      <span>${t('splitExpenses.youAreOwed')}</span>
-      <strong>${owed.length ? owed.map((r) => money(r.amount, r.currency)).join(' · ') : money(0, state.meta.default_currency)}</strong>
+    <div class="budget-summary-card budget-summary-card--positive">
+      <div class="budget-summary-card__label">${t('splitExpenses.youAreOwed')}</div>
+      <div class="budget-summary-card__amount">${owed.length ? owed.map((r) => money(r.amount, r.currency)).join(' · ') : money(0, state.meta.default_currency)}</div>
     </div>
-    <div class="split-summary-card split-summary-card--negative">
-      <span>${t('splitExpenses.youOwe')}</span>
-      <strong>${owing.length ? owing.map((r) => money(r.amount, r.currency)).join(' · ') : money(0, state.meta.default_currency)}</strong>
+    <div class="budget-summary-card budget-summary-card--negative">
+      <div class="budget-summary-card__label">${t('splitExpenses.youOwe')}</div>
+      <div class="budget-summary-card__amount">${owing.length ? owing.map((r) => money(r.amount, r.currency)).join(' · ') : money(0, state.meta.default_currency)}</div>
     </div>
-    <div class="split-summary-card">
-      <span>${isArchivedView() ? t('splitExpenses.statusArchived') : t('splitExpenses.activeGroups')}</span>
-      <strong>${state.groups.length}</strong>
+    <div class="budget-summary-card">
+      <div class="budget-summary-card__label">${isArchivedView() ? t('splitExpenses.statusArchived') : t('splitExpenses.activeGroups')}</div>
+      <div class="budget-summary-card__amount">${state.groups.length}</div>
     </div>
   `);
 }
@@ -381,11 +404,17 @@ function renderBalances() {
 function renderExpenses(readOnly = false) {
   if (!state.expenses.length) return `<div class="split-muted">${t('splitExpenses.noExpenses')}</div>`;
   return state.expenses.map((expense) => {
+    // Beleg-Marke (#583): dass ein Nachweis vorliegt, ist die Information -
+    // wie viele es sind, beantwortet keine Frage vor dem Öffnen.
+    const receiptCount = expense.attachments?.length ?? 0;
+    const receiptMark = receiptCount
+      ? ` <span class="split-expense__receipt" role="img" aria-label="${esc(t('splitExpenses.receiptsAttachedLabel', { count: receiptCount }))}"><i data-lucide="paperclip" aria-hidden="true"></i></span>`
+      : '';
     const body = `
       <div class="split-expense__icon"><i data-lucide="${categoryIcon(expense.category)}" aria-hidden="true"></i></div>
       <div class="split-expense__body">
         <strong>${esc(expense.title)}</strong>
-        <span>${t('splitExpenses.paidBy')}: ${esc(expense.payer_name || '')} · ${formatDate(expense.expense_date)}</span>
+        <span>${t('splitExpenses.paidBy')}: ${esc(expense.payer_name || '')} · ${formatDate(expense.expense_date)}${receiptMark}</span>
       </div>
       <div class="split-expense__amount">${money(expense.amount, expense.currency)}</div>
     `;
@@ -466,6 +495,7 @@ async function deleteGroup(groupId) {
   const confirmed = await confirmModal(t('splitExpenses.deleteGroupConfirm'), {
     danger: true,
     confirmLabel: t('splitExpenses.deleteGroup'),
+    detail: t('splitExpenses.deleteGroupConfirmDetail'),
   });
   if (!confirmed) return;
   await api.delete(`/split-expenses/groups/${groupId}`);
@@ -584,11 +614,17 @@ function defaultSplitValues(group) {
 
 function updateSplitInputs(panel) {
   const method = panel.querySelector('[name="split_method"]')?.value || 'equal';
+  // Der Betrag und die Teilbeträge stehen in der gewählten Währung; Prozente
+  // und Anteile sind reine Zahlen und behalten ihren festen Platzhalter.
+  const currency = panel.querySelector('[name="currency"]')?.value || state.meta?.default_currency || 'EUR';
+  const zero = amountPlaceholder(currency);
+  const amountInput = panel.querySelector('[name="amount"]');
+  if (amountInput) amountInput.placeholder = zero;
   panel.querySelectorAll('.split-split-value').forEach((input) => {
     input.hidden = method === 'equal';
     input.required = method !== 'equal';
     if (method === 'percentage') input.placeholder = '30';
-    else if (method === 'exact') input.placeholder = '70.00';
+    else if (method === 'exact') input.placeholder = zero;
     else if (method === 'shares') input.placeholder = '1';
     else input.placeholder = '';
   });
@@ -596,8 +632,42 @@ function updateSplitInputs(panel) {
   validateSplitForm(panel);
 }
 
+/**
+ * Ein Geldbetrag aus dem Formular in der Schreibweise, die der Server erwartet.
+ *
+ * parseMoneyToMinor() in server/services/split-expenses.js nimmt ausschliesslich
+ * /^-?\d+(\.\d+)?$/ entgegen, die Eingabe folgt dagegen der Region - bis in die
+ * Ziffern hinein. Ohne diese Umschrift kommt "12,50" oder "۱۲٫۵۰" unverändert
+ * am Server an, und das Anlegen scheitert dort mit einem Fehler, der auf kein
+ * Feld zeigt. Die Umschrift selbst steht in utils/money.js, der einen Quelle
+ * für Geldformate.
+ */
+const decimalString = toDecimalString;
+
+/**
+ * Weist einen Betrag zurück, der mehr Nachkommastellen hat als die Währung
+ * kennt. Die Felder hier sind Textfelder, es gibt also kein `step`, das der
+ * Browser prüfen könnte - und der Platzhalter zeigt bei HUF, IDR oder IRR
+ * bereits ganze Einheiten an.
+ *
+ * Ohne diese Prüfung landet die Ablehnung beim Server (parseMoneyToMinor wirft
+ * bei zu vielen Stellen), und die Meldung erscheint als ortloser Fehler statt
+ * am Feld, das sie meint.
+ *
+ * @returns {boolean} true, wenn abgewiesen wurde (der Aufrufer bricht dann ab)
+ */
+function rejectOffGridSplitAmount(input, value, currency, original = null) {
+  if (input == null || value === '' || value == null) return false;
+  if (amountIsSavable(value, currency, { original })) return false;
+  reportFieldError(input, t('common.amountPrecisionRequired', {
+    currency,
+    step: smallestUnitLabel(currency),
+  }));
+  return true;
+}
+
 function numberValue(value) {
-  const normalized = String(value || '').trim().replace(',', '.');
+  const normalized = decimalString(value);
   if (!normalized) return NaN;
   return Number(normalized);
 }
@@ -710,7 +780,7 @@ function collectGroupDefaults(form, data) {
   const config = [];
   if (method === 'percentage' || method === 'shares') {
     form.querySelectorAll('.split-default-value').forEach((input) => {
-      const raw = String(input.value).trim();
+      const raw = decimalString(input.value);
       if (!raw) return;
       const uid = Number(input.name.replace('default_value_', ''));
       config.push(method === 'shares' ? { user_id: uid, shares: Number(raw) } : { user_id: uid, percentage: raw });
@@ -738,7 +808,7 @@ function collectSplitPayload(form) {
   const participants = [...form.querySelectorAll('input[name="participants"]:checked')].map((input) => Number(input.value));
   if (method === 'equal') return { participants, splits: [] };
   const splits = participants.map((userId) => {
-    const value = form.querySelector(`[name="split_value_${userId}"]`)?.value.trim() || '';
+    const value = decimalString(form.querySelector(`[name="split_value_${userId}"]`)?.value);
     if (method === 'percentage') return { user_id: userId, percentage: value };
     if (method === 'exact') return { user_id: userId, amount: value };
     return { user_id: userId, shares: Number(value) };
@@ -851,7 +921,7 @@ function openExpenseModal(expense = null) {
       <form id="split-expense-form" class="split-form">
         <label>${t('splitExpenses.titleLabel')}<input class="input" name="title" required maxlength="200" value="${esc(expense?.title || '')}"></label>
         <div class="split-form-row">
-          <label>${t('splitExpenses.amount')}<input class="input" name="amount" inputmode="decimal" placeholder="42.50" required value="${esc(expense?.amount || '')}"></label>
+          <label>${t('splitExpenses.amount')}<input class="input" name="amount" inputmode="decimal" placeholder="${amountPlaceholder(isEdit ? expense.currency : group.default_currency)}" required value="${esc(expense?.amount || '')}"></label>
           <label>${t('splitExpenses.paidBy')}<select class="input" name="payer_id">${memberOptions(isEdit ? expense.payer_id : state.user?.id)}</select></label>
         </div>
         <div class="split-form-row">
@@ -867,6 +937,12 @@ function openExpenseModal(expense = null) {
         <p class="form-hint" id="split-method-hint">${t(`splitExpenses.splitHint.${method}`)}</p>
         <fieldset class="split-participants"><legend>${t('splitExpenses.participants')}</legend>${groupMemberCheckboxes(selectedIds, splitValues)}</fieldset>
         <label>${t('splitExpenses.notes')}<textarea class="input" name="description" rows="3" maxlength="5000">${esc(expense?.description || '')}</textarea></label>
+        ${renderDocumentAttachField({
+          attachments: isEdit ? (expense.attachments || []) : [],
+          label: t('splitExpenses.receiptsLabel'),
+          hint: t('splitExpenses.receiptsHint'),
+          icon: 'receipt',
+        })}
         <div class="modal-actions">
           ${isEdit ? `<button class="btn btn--danger" type="button" id="split-delete-expense">${t('common.delete')}</button>` : ''}
           <button class="btn btn--secondary" type="button" id="split-cancel-expense">${t('common.cancel')}</button>
@@ -875,8 +951,19 @@ function openExpenseModal(expense = null) {
       </form>
     `,
     onSave(panel) {
+      // Belege (#583): landen als Dokumente im Dokumente-Modul, benannt nach der
+      // Ausgabe - ein Kassenbon soll dort auffindbar bleiben.
+      const receipts = bindDocumentAttachField(panel, {
+        category: 'finance',
+        folderName: t('documents.splitExpensesFolder'),
+        documentName: (file) => t('splitExpenses.receiptDocumentName', {
+          title: panel.querySelector('[name="title"]').value.trim() || file.name,
+          group: group?.name || '',
+        }),
+      });
       panel.querySelector('#split-cancel-expense')?.addEventListener('click', () => closeModal());
       panel.querySelector('[name="split_method"]')?.addEventListener('change', () => updateSplitInputs(panel));
+      panel.querySelector('[name="currency"]')?.addEventListener('change', () => updateSplitInputs(panel));
       panel.querySelector('#split-expense-form')?.addEventListener('input', () => validateSplitForm(panel));
       panel.querySelectorAll('input[name="participants"]').forEach((input) => {
         const row = input.closest('.split-participant-row');
@@ -889,9 +976,13 @@ function openExpenseModal(expense = null) {
       });
       updateSplitInputs(panel);
       panel.querySelector('#split-delete-expense')?.addEventListener('click', async () => {
-        const confirmed = await confirmModal(t('splitExpenses.deleteExpenseConfirm'), {
+        // confirmOverModal statt confirmModal: das Ausgaben-Formular trägt
+        // Betrag, Teilnehmer, Aufteilung und wartende Belege - „Abbrechen" gibt
+        // es unverändert zurück, statt alles davon zu verdrängen.
+        const confirmed = await confirmOverModal(t('splitExpenses.deleteExpenseConfirm'), {
           danger: true,
           confirmLabel: t('common.delete'),
+          detail: t('splitExpenses.deleteExpenseConfirmDetail'),
         });
         if (!confirmed) return;
         await api.delete(`/split-expenses/expenses/${expense.id}`);
@@ -904,8 +995,22 @@ function openExpenseModal(expense = null) {
         if (!validateSplitForm(panel)) return;
         const form = panel.querySelector('#split-expense-form');
         const data = Object.fromEntries(new FormData(form));
+        data.amount = decimalString(data.amount);
+        const expenseCurrency = form.querySelector('[name="currency"]')?.value || group.default_currency;
+        if (rejectOffGridSplitAmount(form.querySelector('[name="amount"]'), numberValue(data.amount),
+          expenseCurrency, isEdit ? expense.amount : null)) return;
+        // Auch die Genau-Beträge: sie sind Geld in derselben Währung.
+        if (form.querySelector('[name="split_method"]')?.value === 'exact') {
+          for (const field of form.querySelectorAll('.split-split-value')) {
+            if (field.hidden || !field.value) continue;
+            if (rejectOffGridSplitAmount(field, numberValue(field.value), expenseCurrency)) return;
+          }
+        }
         const { participants, splits } = collectSplitPayload(form);
         const payload = { ...data, participants, splits };
+        // commit() lädt wartende Dateien erst jetzt hoch: ein abgebrochenes
+        // Formular hinterlässt keine verwaiste Datei im Dokumente-Modul.
+        if (receipts) payload.attachment_document_ids = await receipts.commit();
         if (isEdit) await api.put(`/split-expenses/expenses/${expense.id}`, payload);
         else await api.post(`/split-expenses/groups/${state.activeGroupId}/expenses`, payload);
         closeModal({ force: true });
@@ -933,10 +1038,16 @@ function openSettlementModal() {
         </div>
         <p class="form-hint field-hint--warn" id="split-settlement-same" role="status" hidden><i data-lucide="alert-triangle" aria-hidden="true"></i><span>${t('splitExpenses.settlementSamePerson')}</span></p>
         <div class="split-form-row">
-          <label>${t('splitExpenses.amount')}<input class="input" name="amount" inputmode="decimal" required value="${debt ? esc(String(debt.amount)) : ''}"></label>
+          <label>${t('splitExpenses.amount')}<input class="input" name="amount" inputmode="decimal" placeholder="${amountPlaceholder(debt?.currency || group.default_currency)}" required value="${debt ? esc(String(debt.amount)) : ''}"></label>
           <label>${t('splitExpenses.currency')}<select class="input" name="currency">${state.meta.currencies.map((c) => `<option value="${c}" ${c === (debt?.currency || group.default_currency) ? 'selected' : ''}>${c}</option>`).join('')}</select></label>
         </div>
         <label>${t('splitExpenses.notes')}<textarea class="input" name="notes" rows="3" maxlength="5000"></textarea></label>
+        ${renderDocumentAttachField({
+          label: t('splitExpenses.proofLabel'),
+          hint: t('splitExpenses.proofHint'),
+          icon: 'receipt',
+          maxItems: 1,
+        })}
         <div class="modal-actions">
           <button class="btn btn--secondary" type="button" id="split-cancel-settlement">${t('common.cancel')}</button>
           <button class="btn btn--primary" type="submit" id="split-save-settlement">${t('splitExpenses.registerPayment')}</button>
@@ -944,6 +1055,17 @@ function openSettlementModal() {
       </form>
     `,
     onSave(panel) {
+      // Zahlungsnachweis: das Modell kennt genau ein Dokument je Zahlung
+      // (settlements.proof_document_id), deshalb wird unten nur das erste
+      // übernommen - mehrere Nachweise für eine Überweisung gibt es nicht.
+      const proof = bindDocumentAttachField(panel, {
+        category: 'finance',
+        folderName: t('documents.splitExpensesFolder'),
+        documentName: (file) => t('splitExpenses.proofDocumentName', {
+          group: group?.name || '',
+          name: file.name,
+        }),
+      });
       const form = panel.querySelector('#split-settlement-form');
       const payerSel = form.querySelector('[name="payer_id"]');
       const payeeSel = form.querySelector('[name="payee_id"]');
@@ -965,11 +1087,23 @@ function openSettlementModal() {
       });
       payeeSel.addEventListener('change', syncSameHint);
       syncSameHint();
+      // Der Platzhalter zeigt die Null im Format der gewählten Währung und muss
+      // beim Wechsel mitgehen - JPY schreibt "0", EUR "0,00".
+      const currencySel = form.querySelector('[name="currency"]');
+      currencySel?.addEventListener('change', () => {
+        form.querySelector('[name="amount"]').placeholder = amountPlaceholder(currencySel.value);
+      });
       panel.querySelector('#split-cancel-settlement')?.addEventListener('click', () => closeModal());
       form?.addEventListener('submit', async (e) => {
         e.preventDefault();
         if (samePerson()) { syncSameHint(); payeeSel.focus(); return; }
         const data = Object.fromEntries(new FormData(form));
+        data.amount = decimalString(data.amount);
+        if (rejectOffGridSplitAmount(form.querySelector('[name="amount"]'), numberValue(data.amount),
+          form.querySelector('[name="currency"]')?.value || group.default_currency,
+          debt?.amount ?? null)) return;
+        const proofIds = proof ? await proof.commit() : [];
+        if (proofIds.length) data.proof_document_id = proofIds[0];
         await api.post(`/split-expenses/groups/${state.activeGroupId}/settlements`, data);
         closeModal({ force: true });
         await refreshDashboard();

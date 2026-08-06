@@ -196,6 +196,13 @@ const auth = {
   deleteUser: (id) => api.delete(`/auth/users/${id}`),
   forgotPassword: (identifier) => api.post('/auth/forgot-password', { identifier }),
   resetPassword: (token, password) => api.post('/auth/reset-password', { token, password }),
+  // Einladungen: die ersten drei sind Admin-Routen, die letzten beiden öffentlich
+  // (die /join-Seite ruft sie ohne Session auf).
+  createInvite: (data) => api.post('/auth/invites', data),
+  getInvites: () => api.get('/auth/invites'),
+  revokeInvite: (id) => api.delete(`/auth/invites/${id}`),
+  previewInvite: (token) => api.get(`/auth/invites/preview?token=${encodeURIComponent(token)}`),
+  acceptInvite: (data) => api.post('/auth/invites/accept', data),
 };
 
 // --------------------------------------------------------
@@ -217,4 +224,18 @@ const notifications = {
   testChannel: (id) => api.post(`/notifications/channels/${id}/test`, {}),
 };
 
-export { api, auth, email, notifications, ApiError };
+// --------------------------------------------------------
+// Mealie – Rezept-Mirror-Sync
+// --------------------------------------------------------
+
+const mealie = {
+  listAccounts: () => api.get('/mealie/accounts'),
+  createAccount: (body) => api.post('/mealie/accounts', body),
+  updateAccount: (id, body) => api.patch(`/mealie/accounts/${id}`, body),
+  deleteAccount: (id) => api.delete(`/mealie/accounts/${id}`),
+  testAccount: (id) => api.post(`/mealie/accounts/${id}/test`, {}),
+  syncAccount: (id) => api.post(`/mealie/accounts/${id}/sync`, {}),
+  getStatus: () => api.get('/mealie/status'),
+};
+
+export { api, auth, email, notifications, mealie, ApiError };

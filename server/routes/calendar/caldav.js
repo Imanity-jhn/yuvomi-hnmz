@@ -122,7 +122,7 @@ router.get('/caldav/status', (req, res) => {
 });
 
 // --------------------------------------------------------
-// CalDAV Reminders (VTODO) Sync Routes — read-only into Tasks & Shopping
+// CalDAV Reminders (VTODO) Sync Routes — Tasks & Shopping, in beide Richtungen (#617)
 // --------------------------------------------------------
 
 // Reminder-list discovery & selection

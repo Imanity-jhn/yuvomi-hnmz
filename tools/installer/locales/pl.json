@@ -4,7 +4,7 @@
     "continue": "Dalej",
     "back": "Wstecz",
     "generate": "Generuj",
-    "generating": "…",
+    "generating": "Generowanie…",
     "optional": "Opcjonalne",
     "stepCounter": "Krok {{n}} z {{total}}",
     "toggleVisibility": "Pokaż lub ukryj wartość",
@@ -48,8 +48,8 @@
     "unitsMetric": "Metryczne (°C)",
     "unitsImperial": "Imperialne (°F)",
     "errCoords": "Szerokość i długość geograficzna są wymagane.",
-    "errLat": "Nieprawidłowa szerokość geograficzna (–90 do 90).",
-    "errLon": "Nieprawidłowa długość geograficzna (–180 do 180)."
+    "errLat": "Nieprawidłowa szerokość geograficzna (-90 do 90).",
+    "errLon": "Nieprawidłowa długość geograficzna (-180 do 180)."
   },
   "calendar": {
     "title": "Synchronizacja kalendarza",
@@ -101,19 +101,26 @@
   "docker": {
     "title": "Uruchamianie Yuvomi",
     "subtitle": "Pobieranie obrazu i uruchamianie kontenera Docker.",
-    "starting": "Uruchamianie kontenera …",
     "elapsed": "upłynęło {{n}} s",
     "running": "Kontener jest sprawny i działa",
     "failed": "Nie udało się uruchomić kontenera",
     "unknownError": "Nieznany błąd",
     "toAdmin": "Przejdź do konfiguracji administratora",
-    "retry": "Spróbuj ponownie"
+    "retry": "Spróbuj ponownie",
+    "phasePull": "Pobieranie obrazu",
+    "phaseBoot": "Uruchamianie kontenera",
+    "phaseHealth": "Trwa kontrola stanu",
+    "firstRunHint": "Za pierwszym razem może to potrwać kilka minut.",
+    "stalled": "Trwa to dłużej niż zwykle. Dziennik poniżej pokazuje dlaczego.",
+    "showLogs": "Pokaż dziennik",
+    "hideLogs": "Ukryj dziennik",
+    "timedOut": "Brak odpowiedzi po 15 minutach. Sprawdź dziennik i spróbuj ponownie."
   },
   "admin": {
     "title": "Utwórz konto administratora",
     "subtitle": "Skonfiguruj swoje pierwsze logowanie. To konto ma pełny dostęp do Yuvomi.",
     "userLabel": "Nazwa użytkownika",
-    "userHint": "3–64 znaki: litery, cyfry, . - _",
+    "userHint": "3-64 znaki: litery, cyfry, . - _",
     "nameLabel": "Wyświetlana nazwa",
     "passLabel": "Hasło",
     "passPlaceholder": "Co najmniej 8 znaków",
@@ -121,7 +128,7 @@
     "creating": "Tworzenie …",
     "create": "Utwórz konto",
     "errAll": "Wszystkie pola są wymagane.",
-    "errUser": "Nieprawidłowy format nazwy użytkownika (3–64 znaki, litery/cyfry/._-).",
+    "errUser": "Nieprawidłowy format nazwy użytkownika (3-64 znaki, litery/cyfry/._-).",
     "errPass": "Hasło musi mieć co najmniej 8 znaków.",
     "errMatch": "Hasła nie są zgodne.",
     "errCreate": "Nie udało się utworzyć konta administratora."
@@ -190,7 +197,17 @@
     "documentGoogleDriveReuseHint": "Pozostaw oba pola puste, aby ponownie użyć danych logowania OAuth Kalendarza Google. Aby użyć własnych, utwórz je w Google Cloud Console (jak w kroku Kalendarz).",
     "documentGoogleDriveRedirectLabel": "Identyfikator URI przekierowania",
     "errDocumentGoogleDrivePair": "Identyfikator klienta i klucz tajny Google Drive muszą być ustawione razem albo oba pozostawione puste.",
-    "errDocumentGoogleDriveCredentials": "Google Drive wymaga własnego identyfikatora klienta i klucza tajnego albo skonfigurowanych danych logowania Kalendarza Google."
+    "errDocumentGoogleDriveCredentials": "Google Drive wymaga własnego identyfikatora klienta i klucza tajnego albo skonfigurowanych danych logowania Kalendarza Google.",
+    "dataDirLabel": "Folder danych na hoście",
+    "dataDirHint": "Gdzie na serwerze znajdują się baza danych i dane aplikacji. Zostaw puste, aby użyć ./data obok pliku compose.",
+    "documentLocalDirLabel": "Folder na hoście",
+    "documentLocalDirHint": "Folder na serwerze montowany do kontenera. Zostaw puste, aby użyć ./documents.",
+    "documentWebdavPrivateNetwork": "Zezwól na cel WebDAV w sieci domowej",
+    "documentWebdavPrivateNetworkHint": "Wymagane dla Nextcloud we własnej sieci. Znosi ochronę SSRF dla tego celu.",
+    "icsPrivateNetwork": "Zezwól na subskrypcje kalendarza z sieci domowej",
+    "icsPrivateNetworkHint": "Wymagane dla kanałów ICS z urządzeń we własnej sieci. Znosi ochronę SSRF dla subskrypcji kalendarza.",
+    "oidcTrustEmail": "Ufaj adresowi e-mail bez claimu verified",
+    "oidcTrustEmailHint": "Włącz tylko wtedy, gdy dostawca nie wysyła email_verified, a Ty mu ufasz."
   },
   "welcome": {
     "title": "Witamy w Yuvomi",

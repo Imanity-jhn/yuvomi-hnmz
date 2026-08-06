@@ -50,10 +50,12 @@ function makeDb() {
 // --- web-push Mock --------------------------------------------------------
 function makeWebpushMock() {
   const calls = [];
+  const subjects = [];
   return {
     calls,
+    subjects,
     generateVAPIDKeys: () => ({ publicKey: 'PUB_GEN', privateKey: 'PRIV_GEN' }),
-    setVapidDetails: () => {},
+    setVapidDetails: (subject) => { subjects.push(subject); },
     sendNotification: async (sub, payload) => {
       calls.push({ endpoint: sub.endpoint, payload });
       if (sub.endpoint.includes('gone')) { const e = new Error('gone'); e.statusCode = 410; throw e; }
@@ -61,6 +63,24 @@ function makeWebpushMock() {
       return { statusCode: 201 };
     },
   };
+}
+
+/** Env-Variablen um einen Aufruf herum setzen und danach exakt wiederherstellen. */
+function withEnv(vars, fn) {
+  const previous = {};
+  for (const [key, value] of Object.entries(vars)) {
+    previous[key] = process.env[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    return fn();
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
 }
 
 const { createPushService } = await import('../server/services/push.js');
@@ -81,6 +101,73 @@ test('reuses persisted VAPID keys (no regeneration)', () => {
   const webpush = makeWebpushMock();
   const svc = createPushService({ db, webpush });
   assert.equal(svc.getPublicKey(), 'PUB_DB');
+});
+
+// --- VAPID-Subject --------------------------------------------------------
+// Apple (web.push.apple.com) weist ein VAPID-JWT mit nicht routbarem `sub` mit
+// 403 BadJwtToken ab. Der frühere Default `mailto:admin@localhost` liess Push auf
+// iOS/iPadOS damit komplett ausfallen, während Android weiter auslieferte (#580).
+function resolvedSubject(db, env = {}) {
+  const webpush = makeWebpushMock();
+  return withEnv({ VAPID_SUBJECT: undefined, BASE_URL: undefined, ...env }, () => {
+    createPushService({ db, webpush }).ensureVapid();
+    return webpush.subjects.at(-1);
+  });
+}
+
+test('VAPID subject never falls back to a non-routable host', () => {
+  const subject = resolvedSubject(makeDb());
+  assert.doesNotMatch(subject, /localhost/, 'Apple rejects a localhost subject with 403');
+  assert.match(subject, /^mailto:[^@]+@[^@.]+\.[a-z]{2,}$/i);
+});
+
+test('VAPID_SUBJECT wins over every other source', () => {
+  const db = makeDb();
+  db.prepare("INSERT INTO sync_config (key,value) VALUES ('email_from_address','box@mail.example')").run();
+  const subject = resolvedSubject(db, {
+    VAPID_SUBJECT: 'mailto:me@example.org',
+    BASE_URL: 'https://yuvomi.example.net',
+  });
+  assert.equal(subject, 'mailto:me@example.org');
+});
+
+test('VAPID subject uses the configured sender address before BASE_URL', () => {
+  const db = makeDb();
+  db.prepare("INSERT INTO sync_config (key,value) VALUES ('email_from_address','box@mail.example')").run();
+  assert.equal(resolvedSubject(db, { BASE_URL: 'https://yuvomi.example.net' }), 'mailto:box@mail.example');
+});
+
+test('VAPID subject falls back to the BASE_URL origin', () => {
+  const subject = resolvedSubject(makeDb(), { BASE_URL: 'https://yuvomi.example.net/app/' });
+  assert.equal(subject, 'https://yuvomi.example.net');
+});
+
+test('VAPID subject accepts a bare mail address without the mailto scheme', () => {
+  assert.equal(resolvedSubject(makeDb(), { VAPID_SUBJECT: 'me@example.org' }), 'mailto:me@example.org');
+});
+
+test('VAPID subject discards unusable configured values', () => {
+  const fallback = resolvedSubject(makeDb());
+  const unusable = [
+    'mailto:admin@localhost',
+    'mailto:admin',
+    'https://localhost:3000',
+    'https://yuvomi.local',
+    'http://192.168.1.10.lan',
+    'ftp://example.org',
+    'not a subject',
+    '   ',
+  ];
+  for (const value of unusable) {
+    // Ohne weiteren Kandidaten muss der Platzhalter greifen, nie der kaputte Wert.
+    assert.equal(resolvedSubject(makeDb(), { VAPID_SUBJECT: value }), fallback, `should discard ${value}`);
+  }
+});
+
+test('VAPID subject skips an unusable sender address and keeps BASE_URL', () => {
+  const db = makeDb();
+  db.prepare("INSERT INTO sync_config (key,value) VALUES ('email_from_address','admin@localhost')").run();
+  assert.equal(resolvedSubject(db, { BASE_URL: 'https://yuvomi.example.net' }), 'https://yuvomi.example.net');
 });
 
 test('sendPushToUser sends to all subs and reports count', async () => {

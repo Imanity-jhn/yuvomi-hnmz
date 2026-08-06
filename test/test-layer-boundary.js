@@ -36,6 +36,10 @@ const SHARED_ISOMORPHIC = new Set([
   'public/utils/recipe-meal-types.js',
   'public/utils/contact-name.js',
   'public/utils/pantry-units.js',
+  // #620: Das Format der Sync-Ziel-Kennung. Der Server validiert genau das,
+  // was Event-Modal und Einstellungen bauen - zwei Definitionen desselben
+  // Formats würden sich unbemerkt auseinanderentwickeln.
+  'public/utils/sync-target.js',
 ]);
 
 const SOURCE_EXT = /\.(js|mjs)$/;

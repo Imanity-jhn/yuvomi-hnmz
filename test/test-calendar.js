@@ -359,11 +359,13 @@ test('filterTasksForCalendar: Tasks ohne due_date werden gefiltert', () => {
   assert(result[0].id === 2, 'Task B muss enthalten sein');
 });
 
-test('filterTasksForCalendar: done-Tasks werden gefiltert', () => {
+test('filterTasksForCalendar: done- und abgelegte Tasks werden gefiltert', () => {
+  // Abgelegt ist seit #688 kein Status, sondern archived_at - eine abgelegte
+  // Aufgabe steht weiter auf 'open' und darf trotzdem keinen Chip bekommen.
   const tasks = [
-    { id: 1, title: 'A', due_date: '2026-06-15', status: 'done'     },
-    { id: 2, title: 'B', due_date: '2026-06-16', status: 'open'     },
-    { id: 3, title: 'C', due_date: '2026-06-17', status: 'archived' },
+    { id: 1, title: 'A', due_date: '2026-06-15', status: 'done', archived_at: null },
+    { id: 2, title: 'B', due_date: '2026-06-16', status: 'open', archived_at: null },
+    { id: 3, title: 'C', due_date: '2026-06-17', status: 'open', archived_at: '2026-06-01T10:00:00Z' },
   ];
   const result = ftc(tasks);
   assert(result.length === 1, 'Nur 1 Task erwartet');

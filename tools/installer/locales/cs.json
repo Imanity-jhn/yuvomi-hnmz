@@ -4,7 +4,7 @@
     "continue": "Pokračovat",
     "back": "Zpět",
     "generate": "Generovat",
-    "generating": "…",
+    "generating": "Generuji…",
     "optional": "Volitelné",
     "stepCounter": "Krok {{n}} z {{total}}",
     "toggleVisibility": "Zobrazit nebo skrýt hodnotu",
@@ -48,8 +48,8 @@
     "unitsMetric": "Metrické (°C)",
     "unitsImperial": "Imperiální (°F)",
     "errCoords": "Zeměpisná šířka a délka jsou povinné.",
-    "errLat": "Neplatná zeměpisná šířka (–90 až 90).",
-    "errLon": "Neplatná zeměpisná délka (–180 až 180)."
+    "errLat": "Neplatná zeměpisná šířka (-90 až 90).",
+    "errLon": "Neplatná zeměpisná délka (-180 až 180)."
   },
   "calendar": {
     "title": "Synchronizace kalendáře",
@@ -125,7 +125,17 @@
     "documentGoogleDriveReuseHint": "Chcete-li znovu použít přihlašovací údaje OAuth Kalendáře Google, ponechte obě pole prázdná. Pro vlastní údaje je vytvořte v Google Cloud Console (jako v kroku Kalendář).",
     "documentGoogleDriveRedirectLabel": "URI přesměrování",
     "errDocumentGoogleDrivePair": "ID klienta a tajný klíč Google Drive musí být buď oba vyplněny, nebo oba prázdné.",
-    "errDocumentGoogleDriveCredentials": "Google Drive vyžaduje vlastní ID klienta a tajný klíč nebo nastavené přihlašovací údaje Kalendáře Google."
+    "errDocumentGoogleDriveCredentials": "Google Drive vyžaduje vlastní ID klienta a tajný klíč nebo nastavené přihlašovací údaje Kalendáře Google.",
+    "dataDirLabel": "Složka dat na hostiteli",
+    "dataDirHint": "Kde na serveru leží databáze a data aplikace. Nechte prázdné pro ./data vedle souboru compose.",
+    "documentLocalDirLabel": "Složka na hostiteli",
+    "documentLocalDirHint": "Složka na serveru, která se připojí do kontejneru. Nechte prázdné pro ./documents.",
+    "documentWebdavPrivateNetwork": "Povolit cíl WebDAV v domácí síti",
+    "documentWebdavPrivateNetworkHint": "Potřeba pro Nextcloud ve vlastní síti. Ruší ochranu SSRF pro tento cíl.",
+    "icsPrivateNetwork": "Povolit odběry kalendáře z domácí sítě",
+    "icsPrivateNetworkHint": "Potřeba pro ICS kanály ze zařízení ve vlastní síti. Ruší ochranu SSRF pro odběry kalendáře.",
+    "oidcTrustEmail": "Důvěřovat e-mailu bez claimu verified",
+    "oidcTrustEmailHint": "Zapněte jen tehdy, pokud váš poskytovatel neposílá email_verified a důvěřujete mu."
   },
   "review": {
     "title": "Přehled",
@@ -159,19 +169,26 @@
   "docker": {
     "title": "Spouštění Yuvomi",
     "subtitle": "Obraz se načítá a kontejner Docker se spouští.",
-    "starting": "Spouštění kontejneru …",
     "elapsed": "{{n}} s uplynulo",
     "running": "Kontejner je v pořádku a spuštěn",
     "failed": "Kontejner se nepodařilo spustit",
     "unknownError": "Neznámá chyba",
     "toAdmin": "Pokračovat na nastavení správce",
-    "retry": "Zkusit znovu"
+    "retry": "Zkusit znovu",
+    "phasePull": "Stahování obrazu",
+    "phaseBoot": "Kontejner se spouští",
+    "phaseHealth": "Probíhá kontrola stavu",
+    "firstRunHint": "Poprvé to může trvat několik minut.",
+    "stalled": "Trvá to déle než obvykle. Protokol níže ukazuje proč.",
+    "showLogs": "Zobrazit protokol",
+    "hideLogs": "Skrýt protokol",
+    "timedOut": "Po 15 minutách žádná odpověď. Zkontrolujte protokol a zkuste to znovu."
   },
   "admin": {
     "title": "Vytvoření účtu správce",
     "subtitle": "Nastav své první přihlášení. Tento účet má úplný přístup k Yuvomi.",
     "userLabel": "Uživatelské jméno",
-    "userHint": "3–64 znaků: písmena, číslice, . - _",
+    "userHint": "3-64 znaků: písmena, číslice, . - _",
     "nameLabel": "Zobrazované jméno",
     "passLabel": "Heslo",
     "passPlaceholder": "Minimálně 8 znaků",
@@ -179,7 +196,7 @@
     "creating": "Vytváří se …",
     "create": "Vytvořit účet",
     "errAll": "Všechna pole jsou povinná.",
-    "errUser": "Neplatný formát uživatelského jména (3–64 znaků, písmena/číslice/._-).",
+    "errUser": "Neplatný formát uživatelského jména (3-64 znaků, písmena/číslice/._-).",
     "errPass": "Heslo musí mít alespoň 8 znaků.",
     "errMatch": "Hesla se neshodují.",
     "errCreate": "Nepodařilo se vytvořit účet správce."

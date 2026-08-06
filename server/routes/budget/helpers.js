@@ -157,16 +157,113 @@ export function localizedSubcategory(subcategory, lang) {
 // Wiederkehrende Einträge: Intervalle + virtuelles (geglättetes) Budget
 // --------------------------------------------------------
 
-export const RECURRENCE_INTERVAL_KEYS = ['monthly', 'half_year', 'yearly'];
+/**
+ * Das Intervall ist eine EINHEIT plus eine Anzahl (#636), nicht mehr eine feste
+ * Liste von Rhythmen. Die alten Schlüssel monthly/half_year/yearly konnten nur
+ * drei Abstände ausdrücken; eine Zahlung alle zwei Wochen oder alle drei Monate
+ * war nicht abbildbar, obwohl genau solche Verträge der Alltag sind.
+ *
+ * `half_year` ist deshalb kein Schlüssel mehr, sondern monatlich × 6 - Migration
+ * 128 rechnet den Bestand um. Zwei Schreibweisen für denselben Rhythmus wären
+ * sonst dauerhaft nebeneinander gelaufen, und jede Auswertung müsste beide kennen.
+ *
+ * Den Wochentag bzw. den Tag im Monat trägt das Datum des Eintrags selbst: eine
+ * Serie, die am 15. beginnt, kommt am 15. wieder. Ein eigenes Feld dafür (wie es
+ * die Vorlage in #636 kennt) wäre eine zweite Wahrheit neben `date`.
+ */
+export const RECURRENCE_INTERVAL_KEYS = ['weekly', 'monthly', 'yearly'];
 
-/** Anzahl Monate zwischen zwei Vorkommen einer Serie. */
-export function monthsPerInterval(interval) {
-  return interval === 'yearly' ? 12 : interval === 'half_year' ? 6 : 1;
+// Obergrenze wie im RRULE-Formular der Aufgaben/Termine: dieselbe Zahl im
+// Eingabefeld, damit "alle N" überall dasselbe Höchstmaß hat.
+export const MAX_INTERVAL_COUNT = 99;
+
+/** Anzahl auf eine ganze Zahl in [1, MAX_INTERVAL_COUNT] bringen. */
+export function normalizeIntervalCount(value) {
+  const n = Math.trunc(Number(value));
+  if (!Number.isFinite(n) || n < 1) return 1;
+  return Math.min(n, MAX_INTERVAL_COUNT);
+}
+
+/**
+ * Vorkommen pro Jahr - die gemeinsame Größe hinter Glättung und Auswertung.
+ * Für Wochen ist das bewusst 52 und nicht 365.25/7: der Monatsanteil einer
+ * wöchentlichen Zahlung ist eine Planungsgröße, keine Abrechnung, und 52 ist
+ * die Zahl, mit der Verträge rechnen.
+ */
+export function occurrencesPerYear(interval, count = 1) {
+  const n = normalizeIntervalCount(count);
+  if (interval === 'weekly') return 52 / n;
+  if (interval === 'yearly') return 1 / n;
+  return 12 / n;
 }
 
 /** Effektiver Monatsanteil eines Periodenbetrags (für virtuelles Budget). */
-export function effectiveMonthly(amount, interval) {
-  return cents(Number(amount || 0) / monthsPerInterval(interval));
+export function effectiveMonthly(amount, interval, count = 1) {
+  return cents(Number(amount || 0) * occurrencesPerYear(interval, count) / 12);
+}
+
+/**
+ * Erwartete, noch nicht bestätigte Buchungen zählen in KEINER Summe mit (#637).
+ *
+ * Sie sind sichtbar und planbar, aber sie sind nicht passiert. Zählten sie mit,
+ * bliebe genau die Diskrepanz zum Kontoauszug bestehen, wegen der die
+ * Bestätigung überhaupt gewünscht wurde.
+ *
+ * Ein Fragment statt einer Regel pro Abfrage: die Summen liegen über fünf
+ * Dateien verstreut (Übersicht, Statistik, Plan, Kontostand, Dashboard), und
+ * eine vergessene Stelle fiele niemandem auf - sie zeigte nur eine Zahl, die um
+ * eine erwartete Buchung danebenliegt. `test:budget-structure` prüft deshalb
+ * jede SUM über budget_entries auf dieses Fragment.
+ *
+ * @param {string} [alias] Tabellen-Alias der Abfrage, leer für unaliasierte
+ * @returns {string} beginnt mit ' AND '
+ */
+export function bookedOnly(alias = '') {
+  return ` AND ${alias ? `${alias}.` : ''}is_pending = 0`;
+}
+
+const MS_PER_DAY = 86_400_000;
+
+/**
+ * Alle Fälligkeitstage einer Serie innerhalb eines Monats, aufsteigend.
+ *
+ * Der Starttag selbst zählt nicht mit: er ist der Eintrag, der die Serie trägt.
+ * Wochenserien liefern hier mehrere Tage - genau daran hing bisher, dass es
+ * keine gab: die Materialisierung kannte nur einen Termin je Monat.
+ *
+ * @param {string} startDate  YYYY-MM-DD, Datum des Serien-Originals
+ * @param {string} interval   'weekly' | 'monthly' | 'yearly'
+ * @param {number} count      Anzahl der Einheiten zwischen zwei Vorkommen
+ * @param {string} month      YYYY-MM
+ * @returns {string[]}        YYYY-MM-DD
+ */
+export function occurrenceDatesInMonth(startDate, interval, count, month) {
+  const step = normalizeIntervalCount(count);
+  const [y, m] = month.split('-').map(Number);
+  const [sy, sm, sd] = startDate.split('-').map(Number);
+  if (!y || !m || !sy) return [];
+
+  if (interval === 'weekly') {
+    const start      = Date.UTC(sy, sm - 1, sd);
+    const monthStart = Date.UTC(y, m - 1, 1);
+    const monthEnd   = Date.UTC(y, m, 0);
+    const stepMs     = step * 7 * MS_PER_DAY;
+    // Direkt zum ersten Vorkommen im Monat rechnen statt sich hinzuiterieren:
+    // eine 2019 begonnene Wochenserie hat sonst hunderte Leerläufe je Aufruf.
+    let i = Math.max(1, Math.ceil((monthStart - start) / stepMs));
+    const dates = [];
+    for (let at = start + i * stepMs; at <= monthEnd; at += stepMs) {
+      if (at >= monthStart) dates.push(ymd(new Date(at)));
+    }
+    return dates;
+  }
+
+  const monthsPer = (interval === 'yearly' ? 12 : 1) * step;
+  const monthsDiff = (y - sy) * 12 + (m - sm);
+  if (monthsDiff < 1 || monthsDiff % monthsPer !== 0) return [];
+  // Monatsüberlauf kappen: der 31. wird im April zum 30.
+  const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  return [`${month}-${String(Math.min(sd, lastDay)).padStart(2, '0')}`];
 }
 
 /**
@@ -176,14 +273,12 @@ export function effectiveMonthly(amount, interval) {
  * Virtuelle Serien (recurrence_virtual = 1) halten im Original bereits den
  * geglätteten Monatsanteil (amount); es wird in JEDEM Monat eine Instanz erzeugt.
  * Nicht-virtuelle Serien erzeugen den vollen Betrag nur in Fälligkeitsmonaten
- * (alle monthsPerInterval(interval) Monate ab dem Startmonat).
+ * (an den Tagen aus occurrenceDatesInMonth).
  * @param {import('better-sqlite3-multiple-ciphers').Database} database
  * @param {string} month  YYYY-MM
  */
 export function generateRecurringInstances(database, month) {
   const [y, m] = month.split('-').map(Number);
-  const monthStart = `${month}-01`;
-  const monthEnd   = `${month}-31`;
 
   // Alle Serien-Originale, die vor diesem Monat begonnen haben
   const originals = database.prepare(`
@@ -192,43 +287,53 @@ export function generateRecurringInstances(database, month) {
       AND strftime('%Y-%m', date) < ?
   `).all(month);
 
+  const skipStmt = database.prepare(
+    'SELECT 1 FROM budget_recurrence_skipped WHERE parent_id = ? AND date = ?'
+  );
+  const existsStmt = database.prepare(
+    'SELECT id FROM budget_entries WHERE recurrence_parent_id = ? AND date = ?'
+  );
+  const insertStmt = database.prepare(`
+    INSERT INTO budget_entries
+      (title, amount, category, subcategory, date, is_recurring, recurrence_parent_id,
+       created_by, owner_id, visibility, is_pending)
+    VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+  `);
+
   for (const orig of originals) {
-    // Übersprungener Monat?
-    const skipped = database.prepare(
-      'SELECT 1 FROM budget_recurrence_skipped WHERE parent_id = ? AND month = ?'
-    ).get(orig.id, month);
-    if (skipped) continue;
-
-    // Instanz schon vorhanden?
-    const existing = database.prepare(`
-      SELECT id FROM budget_entries
-      WHERE recurrence_parent_id = ? AND date BETWEEN ? AND ?
-    `).get(orig.id, monthStart, monthEnd);
-    if (existing) continue;
-
-    // Bei nicht-virtuellen Serien nur in Fälligkeitsmonaten erzeugen.
     const interval = orig.recurrence_interval || 'monthly';
-    if (!orig.recurrence_virtual) {
-      const [oy, om] = orig.date.split('-').map(Number);
-      const monthsDiff = (y - oy) * 12 + (m - om);
-      if (monthsDiff < 1 || monthsDiff % monthsPerInterval(interval) !== 0) continue;
+
+    // Virtuelle Serien tragen im Original bereits den Monatsanteil: sie kommen in
+    // JEDEM Monat einmal vor, unabhängig vom Rhythmus - auch bei Wochenserien,
+    // deren Anteil sonst über den Monat verstreut läge, ohne dass eine der
+    // Buchungen die Zahlung wäre.
+    const dates = orig.recurrence_virtual
+      ? [`${month}-${String(Math.min(
+          parseInt(orig.date.split('-')[2], 10),
+          new Date(Date.UTC(y, m, 0)).getUTCDate(),
+        )).padStart(2, '0')}`]
+      : occurrenceDatesInMonth(orig.date, interval, orig.recurrence_interval_count, month);
+
+    for (const date of dates) {
+      // Übersprungen (eine gelöschte Instanz) oder schon vorhanden? Beides wird am
+      // Fälligkeitstag geprüft, nicht am Monat: eine Wochenserie hat mehrere pro
+      // Monat, und ein gelöschter Dienstag darf die übrigen nicht mitnehmen.
+      if (skipStmt.get(orig.id, date)) continue;
+      if (existsStmt.get(orig.id, date)) continue;
+
+      // Materialisierte Instanz erbt Eigentümer + Sichtbarkeit des Serien-Originals
+      // (#476/#505). Ohne das würde jede Instanz owner_id=NULL + visibility='shared'
+      // (Spalten-Default) bekommen: eine private Serie würde im Haushalt sichtbar und
+      // für die Eigentümer:in in scope=mine unsichtbar.
+      // Verlangt die Serie eine Bestätigung (#637), entsteht die Buchung als
+      // erwartet: sichtbar und planbar, aber in keiner Summe. Der Ursprung
+      // selbst bleibt eine echte Buchung - er wurde von Hand eingetragen.
+      insertStmt.run(
+        orig.title, orig.amount, orig.category, orig.subcategory || '', date,
+        orig.id, orig.created_by, orig.owner_id, orig.visibility || 'shared',
+        orig.recurrence_confirm ? 1 : 0,
+      );
     }
-
-    // Datum berechnen: gleicher Tag, am letzten Tag des Monats gekappt
-    const origDay    = parseInt(orig.date.split('-')[2], 10);
-    const lastDay    = new Date(y, m, 0).getDate();
-    const instanceDay = Math.min(origDay, lastDay);
-    const instanceDate = `${month}-${String(instanceDay).padStart(2, '0')}`;
-
-    // Materialisierte Instanz erbt Eigentümer + Sichtbarkeit des Serien-Originals
-    // (#476/#505). Ohne das würde jede Instanz owner_id=NULL + visibility='shared'
-    // (Spalten-Default) bekommen: eine private Serie würde im Haushalt sichtbar und
-    // für die Eigentümer:in in scope=mine unsichtbar.
-    database.prepare(`
-      INSERT INTO budget_entries
-        (title, amount, category, subcategory, date, is_recurring, recurrence_parent_id, created_by, owner_id, visibility)
-      VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
-    `).run(orig.title, orig.amount, orig.category, orig.subcategory || '', instanceDate, orig.id, orig.created_by, orig.owner_id, orig.visibility || 'shared');
   }
 }
 
@@ -588,23 +693,33 @@ export function listAccounts(includeArchived = false, filter = { clause: '', par
     SELECT a.*,
            a.starting_balance + COALESCE((
              SELECT SUM(e.amount) FROM budget_entries e
-             WHERE e.account_id = a.id AND e.date <= ?${f.clause}
+             WHERE e.account_id = a.id AND e.date <= ?${f.clause}${bookedOnly('e')}
            ), 0) AS current_balance,
            a.starting_balance + COALESCE((
              SELECT SUM(e.amount) FROM budget_entries e
-             WHERE e.account_id = a.id${f.clause}
+             WHERE e.account_id = a.id${f.clause}${bookedOnly('e')}
            ), 0) AS projected_balance,
            (SELECT COUNT(*) FROM budget_entries e WHERE e.account_id = a.id${f.clause}) AS entry_count
     FROM budget_accounts a
     WHERE ? = 1 OR a.archived = 0
     ORDER BY a.sort_order ASC, a.name COLLATE NOCASE ASC
   `).all(today, ...f.params, ...f.params, ...f.params, includeArchived ? 1 : 0);
-  return rows.map((a) => ({
-    ...a,
-    starting_balance:  cents(a.starting_balance),
-    current_balance:   cents(a.current_balance),
-    projected_balance: cents(a.projected_balance),
-  }));
+  return rows.map((a) => {
+    const currentBalance = cents(a.current_balance);
+    // Verfügbarer Rahmen nur für Kreditkarten mit gepflegtem Limit. Ein negativer
+    // Saldo ist die offene Schuld; ein positiver (Guthaben auf der Karte) vergrößert
+    // den Rahmen nicht, deshalb der Clamp auf 0.
+    const availableLimit = a.type === 'credit' && a.credit_limit != null
+      ? Math.max(0, cents(a.credit_limit) - Math.max(0, -currentBalance))
+      : null;
+    return {
+      ...a,
+      starting_balance:  cents(a.starting_balance),
+      current_balance:   currentBalance,
+      projected_balance: cents(a.projected_balance),
+      available_limit:   availableLimit,
+    };
+  });
 }
 
 export function nextAccountSortOrder() {

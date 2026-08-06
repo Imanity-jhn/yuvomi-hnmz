@@ -21,6 +21,8 @@ import * as db from '../db.js';
 import * as outbound from './calendar-outbound.js';
 import { decodeHtmlEntities } from '../utils/html-entities.js';
 import { nearestColorId } from '../utils/ical-color.js';
+// Fallback-Zone für den Outbound-Sync, wenn Google für den Zielkalender keine liefert.
+import { serverTimeZone } from '../utils/timezone.js';
 import { assignDefaultToEvent } from './sync-assignment.js';
 
 const GOOGLE_COLOR = '#4285F4';
@@ -1011,16 +1013,6 @@ function normalizeRecurrenceUntil(rule, allDay) {
     const timePart = digits.length > 8 ? digits.slice(8, 14).padEnd(6, '0') : '235959';
     return `UNTIL=${datePart}T${timePart}Z`;
   }).join(';');
-}
-
-// Fallback-Zeitzone für den Outbound-Sync, wenn Google für den Zielkalender
-// keine liefert: Container-TZ (TZ-Env, siehe .env.example) → System-Zone → UTC.
-function serverTimeZone() {
-  const envTz = (process.env.TZ || '').trim();
-  if (envTz) return envTz;
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-  } catch { return 'UTC'; }
 }
 
 /**

@@ -4,7 +4,7 @@
     "continue": "Continuer",
     "back": "Retour",
     "generate": "Générer",
-    "generating": "…",
+    "generating": "Génération…",
     "optional": "Facultatif",
     "stepCounter": "Étape {{n}} sur {{total}}",
     "toggleVisibility": "Afficher ou masquer la valeur",
@@ -48,8 +48,8 @@
     "unitsMetric": "Métrique (°C)",
     "unitsImperial": "Impérial (°F)",
     "errCoords": "La latitude et la longitude sont requises.",
-    "errLat": "Latitude invalide (–90 à 90).",
-    "errLon": "Longitude invalide (–180 à 180)."
+    "errLat": "Latitude invalide (-90 à 90).",
+    "errLon": "Longitude invalide (-180 à 180)."
   },
   "calendar": {
     "title": "Synchronisation du calendrier",
@@ -101,19 +101,26 @@
   "docker": {
     "title": "Démarrage d'Yuvomi",
     "subtitle": "Téléchargement de l'image et démarrage du conteneur Docker.",
-    "starting": "Démarrage du conteneur …",
     "elapsed": "{{n}} s écoulées",
     "running": "Le conteneur est sain et en cours d'exécution",
     "failed": "Le conteneur n'a pas pu démarrer",
     "unknownError": "Erreur inconnue",
     "toAdmin": "Continuer vers la configuration de l'administrateur",
-    "retry": "Réessayer"
+    "retry": "Réessayer",
+    "phasePull": "Téléchargement de l’image",
+    "phaseBoot": "Démarrage du conteneur",
+    "phaseHealth": "Contrôle de santé en cours",
+    "firstRunHint": "La première fois, cela peut prendre plusieurs minutes.",
+    "stalled": "Cela prend plus de temps que d’habitude. Le journal ci-dessous en montre la raison.",
+    "showLogs": "Afficher le journal",
+    "hideLogs": "Masquer le journal",
+    "timedOut": "Aucune réponse après 15 minutes. Consultez le journal et réessayez."
   },
   "admin": {
     "title": "Créer un compte administrateur",
     "subtitle": "Configurez votre première connexion. Ce compte a un accès complet à Yuvomi.",
     "userLabel": "Nom d'utilisateur",
-    "userHint": "3–64 caractères : lettres, chiffres, . - _",
+    "userHint": "3-64 caractères : lettres, chiffres, . - _",
     "nameLabel": "Nom affiché",
     "passLabel": "Mot de passe",
     "passPlaceholder": "Au moins 8 caractères",
@@ -121,7 +128,7 @@
     "creating": "Création …",
     "create": "Créer le compte",
     "errAll": "Tous les champs sont requis.",
-    "errUser": "Format de nom d'utilisateur non valide (3–64 caractères, lettres/chiffres/._-).",
+    "errUser": "Format de nom d'utilisateur non valide (3-64 caractères, lettres/chiffres/._-).",
     "errPass": "Le mot de passe doit comporter au moins 8 caractères.",
     "errMatch": "Les mots de passe ne correspondent pas.",
     "errCreate": "Échec de la création du compte administrateur."
@@ -190,7 +197,17 @@
     "documentGoogleDriveReuseHint": "Laissez les deux champs vides pour réutiliser les identifiants OAuth de Google Agenda. Pour utiliser des identifiants dédiés, créez-les dans la console Google Cloud (comme à l’étape Agenda).",
     "documentGoogleDriveRedirectLabel": "URI de redirection",
     "errDocumentGoogleDrivePair": "L’ID client et le secret client de Google Drive doivent être tous deux renseignés ou tous deux vides.",
-    "errDocumentGoogleDriveCredentials": "Google Drive nécessite son propre ID client et secret client ou des identifiants Google Agenda configurés."
+    "errDocumentGoogleDriveCredentials": "Google Drive nécessite son propre ID client et secret client ou des identifiants Google Agenda configurés.",
+    "dataDirLabel": "Dossier de données sur l’hôte",
+    "dataDirHint": "Où se trouvent la base de données et les données de l’application sur le serveur. Laissez vide pour utiliser ./data à côté du fichier compose.",
+    "documentLocalDirLabel": "Dossier sur l’hôte",
+    "documentLocalDirHint": "Le dossier du serveur monté dans le conteneur. Laissez vide pour utiliser ./documents.",
+    "documentWebdavPrivateNetwork": "Autoriser une cible WebDAV sur votre réseau local",
+    "documentWebdavPrivateNetworkHint": "Nécessaire pour un Nextcloud sur votre propre réseau. Lève la protection SSRF pour cette cible.",
+    "icsPrivateNetwork": "Autoriser les abonnements de calendrier depuis votre réseau local",
+    "icsPrivateNetworkHint": "Nécessaire pour les flux ICS d’appareils sur votre propre réseau. Lève la protection SSRF pour les abonnements de calendrier.",
+    "oidcTrustEmail": "Faire confiance à l’e-mail sans claim verified",
+    "oidcTrustEmailHint": "À activer uniquement si votre fournisseur n’envoie pas email_verified et que vous lui faites confiance."
   },
   "welcome": {
     "title": "Bienvenue sur Yuvomi",

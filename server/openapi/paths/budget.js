@@ -35,11 +35,11 @@ export function budgetPaths() {
       delete: op({ summary: 'Delete budget subcategory', tag: 'Budget', params: [stringPathParam('key', 'Category key'), stringPathParam('subKey', 'Subcategory key')], stateChanging: true }),
     },
     '/api/v1/budget/accounts': {
-      get: op({ summary: 'List accounts with starting and running balance plus net worth', tag: 'Budget' }),
-      post: op({ summary: 'Create account (name, type, starting balance)', tag: 'Budget', stateChanging: true, requestBody: jsonBody(null) }),
+      get: op({ summary: 'List accounts with starting and running balance, net worth, and available limit on credit cards', tag: 'Budget' }),
+      post: op({ summary: 'Create account (name, type, starting balance; credit cards also take credit_bank and credit_limit)', tag: 'Budget', stateChanging: true, requestBody: jsonBody(null) }),
     },
     '/api/v1/budget/accounts/{id}': {
-      put: op({ summary: 'Update account', tag: 'Budget', params: [idParam()], stateChanging: true, requestBody: jsonBody(null) }),
+      put: op({ summary: 'Update account (credit cards also take credit_bank and credit_limit)', tag: 'Budget', params: [idParam()], stateChanging: true, requestBody: jsonBody(null) }),
       delete: op({ summary: 'Delete account (linked entries are kept, account_id cleared)', tag: 'Budget', params: [idParam()], stateChanging: true }),
     },
     '/api/v1/budget/loans': {
@@ -64,18 +64,18 @@ export function budgetPaths() {
           name: 'scope',
           in: 'query',
           required: false,
-          description: "View filter when the household runs in personal budget mode (preference `budget_mode=personal`): `mine` shows entries you own, `household` shows the shared pot. Ignored in shared mode. Entries also carry `owner_id` and `visibility` (`private`|`shared`); private entries are only visible to their owner (no admin bypass).",
+          description: "View filter when the household runs in personal budget mode (preference `budget_mode=personal`): `mine` shows entries you own, `household` shows the shared pot. Ignored in shared mode. Entries also carry `owner_id` and `visibility` (`private`|`shared`); private entries are only visible to their owner (no admin bypass). Each entry carries `attachments`: linked documents from the documents module, filtered by document visibility.",
           schema: { type: 'string', enum: ['mine', 'household'], default: 'mine' },
         }],
       }),
-      post: op({ summary: 'Create budget entry (optional `visibility`: private|shared; owner is the creator)', tag: 'Budget', stateChanging: true, requestBody: jsonBody(null) }),
+      post: op({ summary: 'Create budget entry (optional `visibility`: private|shared; owner is the creator; optional `attachment_document_ids`: receipts from the documents module)', tag: 'Budget', stateChanging: true, requestBody: jsonBody(null) }),
     },
     '/api/v1/budget/{id}': {
-      put: op({ summary: 'Update budget entry', tag: 'Budget', params: [idParam()], stateChanging: true, requestBody: jsonBody(null) }),
+      put: op({ summary: 'Update budget entry (`attachment_document_ids` replaces the receipt links; omit the field to leave them untouched)', tag: 'Budget', params: [idParam()], stateChanging: true, requestBody: jsonBody(null) }),
       delete: op({ summary: 'Delete budget entry', tag: 'Budget', params: [idParam()], stateChanging: true }),
     },
     '/api/v1/budget/{id}/series': {
-      put: op({ summary: 'Update recurring budget entry series', tag: 'Budget', params: [idParam()], stateChanging: true, requestBody: jsonBody(null) }),
+      put: op({ summary: 'Update recurring budget entry series (receipts stay with the single entry and are not part of the series)', tag: 'Budget', params: [idParam()], stateChanging: true, requestBody: jsonBody(null) }),
       delete: op({ summary: 'Delete recurring budget entry series', tag: 'Budget', params: [idParam()], stateChanging: true }),
     },
     '/api/v1/budget/stats': {

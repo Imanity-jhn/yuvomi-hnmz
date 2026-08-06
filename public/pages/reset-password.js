@@ -19,6 +19,10 @@ export async function render(container) {
     <main class="login-page" id="main-content">
       <div class="login-card card card--padded">
         <h1 class="login-card__title">${esc(t('resetPassword.title'))}</h1>
+        <!-- Beide Meldungen stehen außerhalb des Formulars: der Erfolgsfall
+             blendet das Formular aus, und ein Kind davon wäre mit ihm weg. -->
+        <div class="login-error" id="reset-error" role="alert" aria-live="polite" hidden></div>
+        <div class="login-success" id="reset-success" role="status" aria-live="polite" hidden></div>
         <form class="login-form" id="reset-form" novalidate>
           <div class="form-group">
             <label class="label" for="password">${esc(t('resetPassword.passwordLabel'))}</label>
@@ -30,8 +34,6 @@ export async function render(container) {
             <input class="input" type="password" id="confirm" name="confirm"
               autocomplete="new-password" required />
           </div>
-          <div class="login-error" id="reset-error" role="alert" aria-live="polite" hidden></div>
-          <div class="login-success" id="reset-success" role="status" aria-live="polite" hidden></div>
           <button type="submit" class="btn btn--primary login-form__submit" id="reset-btn">
             ${esc(t('resetPassword.submit'))}
           </button>

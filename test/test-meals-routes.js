@@ -19,6 +19,11 @@ import express from 'express';
 
 const dbmod = await import('../server/db.js');
 const { default: mealsRouter } = await import('../server/routes/meals.js');
+// Der Einkaufs-Router hängt mit drin, weil die Rücknahme eines Transfers über
+// ihn läuft (POST /shopping/items/undo-transfer). Beim Mahlzeit-Pfad gehört das
+// `on_shopping_list`-Flag zum Übertrag und muss mit zurück - das ist ohne beide
+// Router nicht prüfbar.
+const { default: shoppingRouter } = await import('../server/routes/shopping.js');
 const { addDays, mealWeekday } = await import('../server/services/meal-recurrence.js');
 const db = dbmod.get();
 
@@ -35,6 +40,7 @@ app.use((req, _res, next) => {
   req.session = { userId: actor.id, role: actor.role };
   next();
 });
+app.use('/shopping', shoppingRouter);
 app.use('/', mealsRouter);
 const server = app.listen(0);
 const baseUrl = await new Promise((r) => server.on('listening', () => r(`http://127.0.0.1:${server.address().port}`)));
@@ -307,6 +313,128 @@ test('DELETE /:id einer Serien-Instanz erzeugt Ausnahme statt Neu-Materialisieru
   assert.equal(cnt, 0, 'keine Neu-Materialisierung nach Ausnahme');
 });
 
+// --------------------------------------------------------------------------
+// Wiederholungs-Grenze (#619)
+// --------------------------------------------------------------------------
+test('POST / mit repeat_until: Template trägt end_date, Materialisierung hört dort auf', async () => {
+  const start = '2041-03-04';
+  const until = addDays(start, 7); // genau eine weitere Wiederholung
+  const created = (await createMeal({ date: start, title: 'Begrenzt', repeat_weekly: true, repeat_until: until })).body.data;
+  const tplId = created.recurrence_template_id;
+  assert.equal(
+    db.prepare('SELECT end_date FROM meal_recurrence_templates WHERE id = ?').get(tplId).end_date,
+    until,
+  );
+  assert.equal(created.recurrence_end_date, until, 'Antwort nennt das Serien-Ende');
+
+  await call('GET', `/?week=${until}`);
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM meals WHERE recurrence_template_id = ? AND date = ?').get(tplId, until).c, 1);
+
+  // Die Woche NACH dem Ende bleibt leer - genau das fehlte in #619
+  const beyond = addDays(start, 14);
+  await call('GET', `/?week=${beyond}`);
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM meals WHERE recurrence_template_id = ? AND date = ?').get(tplId, beyond).c, 0);
+});
+
+test('POST /: repeat_until vor dem Datum → 400', async () => {
+  const r = await createMeal({ date: '2041-04-01', repeat_weekly: true, repeat_until: '2041-03-01' });
+  assert.equal(r.status, 400);
+  assert.match(r.body.error, /Wiederholungs-Ende/);
+});
+
+test('POST /: repeat_until ohne repeat_weekly bleibt folgenlos', async () => {
+  const r = await createMeal({ date: '2041-04-08', title: 'Einmalig', repeat_until: '2041-04-01' });
+  assert.equal(r.status, 201, 'kein Fehler, weil ohne Serie kein Ende existiert');
+  assert.equal(r.body.data.recurrence_template_id, null);
+});
+
+test('PUT /:id?scope=series mit repeat_until: kürzt die Serie und räumt spätere Instanzen ab', async () => {
+  const start = '2041-05-06';
+  const created = (await createMeal({ date: start, title: 'Kürzen', repeat_weekly: true })).body.data;
+  const tplId = created.recurrence_template_id;
+  const week2 = addDays(start, 7);
+  const week3 = addDays(start, 14);
+  await call('GET', `/?week=${week2}`);
+  await call('GET', `/?week=${week3}`);
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM meals WHERE recurrence_template_id = ?').get(tplId).c, 3);
+
+  const r = await call('PUT', `/${created.id}?scope=series`, { repeat_until: week2 });
+  assert.equal(r.status, 200);
+  assert.equal(db.prepare('SELECT end_date FROM meal_recurrence_templates WHERE id = ?').get(tplId).end_date, week2);
+  const dates = db.prepare('SELECT date FROM meals WHERE recurrence_template_id = ? ORDER BY date').all(tplId).map((m) => m.date);
+  assert.deepEqual(dates, [start, week2], 'Instanz hinter dem Ende entfernt');
+
+  // Und sie kommt nicht zurück
+  await call('GET', `/?week=${week3}`);
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM meals WHERE recurrence_template_id = ? AND date = ?').get(tplId, week3).c, 0);
+});
+
+test('PUT /:id?scope=series mit leerem repeat_until: Serie läuft wieder unbegrenzt', async () => {
+  const start = '2041-06-03';
+  const until = addDays(start, 7);
+  const created = (await createMeal({ date: start, title: 'Entgrenzen', repeat_weekly: true, repeat_until: until })).body.data;
+  const tplId = created.recurrence_template_id;
+
+  const r = await call('PUT', `/${created.id}?scope=series`, { repeat_until: '' });
+  assert.equal(r.status, 200);
+  assert.equal(db.prepare('SELECT end_date FROM meal_recurrence_templates WHERE id = ?').get(tplId).end_date, null);
+
+  const beyond = addDays(start, 14);
+  await call('GET', `/?week=${beyond}`);
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM meals WHERE recurrence_template_id = ? AND date = ?').get(tplId, beyond).c, 1);
+});
+
+test('PUT /:id?scope=series: repeat_until vor Serienbeginn → 400', async () => {
+  const created = (await createMeal({ date: '2041-07-01', title: 'Zu früh', repeat_weekly: true })).body.data;
+  const r = await call('PUT', `/${created.id}?scope=series`, { repeat_until: '2041-06-01' });
+  assert.equal(r.status, 400);
+});
+
+test('DELETE /:id?scope=future: beendet die Serie ab diesem Termin, Vergangenes bleibt', async () => {
+  const start = '2041-08-05';
+  const created = (await createMeal({ date: start, title: 'AbHier', repeat_weekly: true })).body.data;
+  const tplId = created.recurrence_template_id;
+  const week2 = addDays(start, 7);
+  const week3 = addDays(start, 14);
+  await call('GET', `/?week=${week2}`);
+  await call('GET', `/?week=${week3}`);
+
+  const second = db.prepare('SELECT id FROM meals WHERE recurrence_template_id = ? AND date = ?').get(tplId, week2);
+  const r = await call('DELETE', `/${second.id}?scope=future`);
+  assert.equal(r.status, 204);
+
+  const dates = db.prepare('SELECT date FROM meals WHERE recurrence_template_id = ? ORDER BY date').all(tplId).map((m) => m.date);
+  assert.deepEqual(dates, [start], 'nur der Termin vor dem Schnitt bleibt');
+  assert.equal(
+    db.prepare('SELECT end_date FROM meal_recurrence_templates WHERE id = ?').get(tplId).end_date,
+    addDays(week2, -1),
+  );
+
+  // Kein Nachwachsen mehr - der Kern von #619
+  await call('GET', `/?week=${week2}`);
+  await call('GET', `/?week=${week3}`);
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM meals WHERE recurrence_template_id = ?').get(tplId).c, 1);
+});
+
+test('DELETE /:id?scope=future auf dem ersten Termin entfernt die Vorlage ganz', async () => {
+  const start = '2041-09-02';
+  const created = (await createMeal({ date: start, title: 'AbStart', repeat_weekly: true })).body.data;
+  const tplId = created.recurrence_template_id;
+  await call('GET', `/?week=${addDays(start, 7)}`);
+
+  const r = await call('DELETE', `/${created.id}?scope=future`);
+  assert.equal(r.status, 204);
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM meal_recurrence_templates WHERE id = ?').get(tplId).c, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM meals WHERE recurrence_template_id = ?').get(tplId).c, 0);
+});
+
+test('DELETE /:id?scope=future ohne Serie löscht nur die Mahlzeit', async () => {
+  const m = (await createMeal({ date: '2041-10-07', title: 'Solo' })).body.data;
+  const r = await call('DELETE', `/${m.id}?scope=future`);
+  assert.equal(r.status, 204);
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM meals WHERE id = ?').get(m.id).c, 0);
+});
+
 test('DELETE /:id?scope=series: entfernt alle Instanzen + Template', async () => {
   const created = (await createMeal({ date: '2026-10-05', title: 'GanzeSerie', repeat_weekly: true })).body.data;
   const tplId = created.recurrence_template_id;
@@ -399,6 +527,46 @@ test('POST /:id/to-shopping-list: überträgt nur offene, markiert sie, idempote
   // zweiter Aufruf überträgt nichts
   const r2 = await call('POST', `/${m.id}/to-shopping-list`, { listId: LIST });
   assert.equal(r2.body.data.transferred, 0);
+  assert.deepEqual(r2.body.data.added_ids, []);
+});
+
+/**
+ * Beim Mahlzeit-Pfad gehört das `on_shopping_list`-Flag zum Übertrag.
+ *
+ * Wer nur die Einkaufsartikel löscht, lässt die Zutaten für immer als „schon
+ * übertragen" zurück - weder auf der Liste noch erneut übertragbar. Genau
+ * deshalb läuft die Rücknahme über einen eigenen Endpunkt und nicht über N
+ * DELETEs (Audit 2026-07-30, P1-B).
+ */
+test('POST /:id/to-shopping-list: das Undo nimmt Artikel UND Zutaten-Flag zurück', async () => {
+  const m = (await createMeal({
+    date: '2026-06-04', title: 'Undo', ingredients: [{ name: 'Hafer' }, { name: 'Zimt' }],
+  })).body.data;
+  db.prepare('INSERT INTO shopping_items (list_id, name) VALUES (?, ?)').run(LIST, 'Fremd');
+
+  const r = await call('POST', `/${m.id}/to-shopping-list`, { listId: LIST });
+  assert.equal(r.body.data.transferred, 2);
+  assert.equal(r.body.data.added_ids.length, 2);
+
+  const undo = await call('POST', '/shopping/items/undo-transfer', { ids: r.body.data.added_ids });
+  assert.equal(undo.body.data.removed, 2);
+
+  assert.equal(
+    db.prepare('SELECT COUNT(*) c FROM shopping_items WHERE added_from_meal = ?').get(m.id).c, 0,
+    'die erzeugten Artikel sind weg',
+  );
+  assert.equal(
+    db.prepare('SELECT COUNT(*) c FROM shopping_items WHERE list_id = ? AND name = ?').get(LIST, 'Fremd').c, 1,
+    'der Fremdartikel bleibt unberührt',
+  );
+  assert.equal(
+    db.prepare('SELECT COUNT(*) c FROM meal_ingredients WHERE meal_id = ? AND on_shopping_list = 0').get(m.id).c, 2,
+    'die Zutaten sind wieder offen',
+  );
+
+  // Der Beweis, dass die Rücknahme vollständig war: derselbe Transfer geht erneut.
+  const again = await call('POST', `/${m.id}/to-shopping-list`, { listId: LIST });
+  assert.equal(again.body.data.transferred, 2);
 });
 
 test('POST /week-to-shopping-list: fehlende listId → 400', async () => {

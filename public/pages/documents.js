@@ -11,19 +11,11 @@ import { esc } from '/utils/html.js';
 import { stagger, wireScrollFade, scheduleUndoableDelete } from '/utils/ux.js';
 import { renderSkeletonList } from '/utils/skeleton.js';
 import { renderPageSearch, wirePageSearch } from '/utils/page-search.js';
+import { previewKind } from '/utils/document-preview.js';
+import { findPageFab } from '/utils/fab.js';
 
 const CATEGORIES = ['medical', 'school', 'identity', 'insurance', 'finance', 'home', 'vehicle', 'legal', 'travel', 'pets', 'warranty', 'taxes', 'work', 'other'];
 const MAX_FILE_SIZE = 5 * 1024 * 1024;
-
-// MIME-Typen, die der Browser direkt anzeigen kann
-const VIEWABLE_MIME = new Set([
-  'application/pdf',
-  'image/png',
-  'image/jpeg',
-  'image/webp',
-  'text/plain',
-  'text/csv',
-]);
 
 const CATEGORY_ICONS = {
   medical: 'heart-pulse',
@@ -251,7 +243,7 @@ function applyFilters() {
 
 function bindPageEvents() {
   _container.querySelector('#documents-folder-add')?.addEventListener('click', () => openFolderModal());
-  _container.querySelector('#fab-new-document')?.addEventListener('click', () => openDocumentModal());
+  findPageFab('fab-new-document')?.addEventListener('click', () => openDocumentModal());
 
   _search = wirePageSearch(_container, {
     id: 'documents-search',
@@ -713,7 +705,7 @@ async function renameFolder(folder) {
 async function deleteFolder(folder) {
   const confirmed = await confirmModal(
     t('documents.deleteFolderConfirm', { name: folder.name }),
-    { danger: true, confirmLabel: t('documents.deleteFolder') },
+    { danger: true, confirmLabel: t('documents.deleteFolder'), detail: t('documents.deleteFolderConfirmDetail') },
   );
   if (!confirmed) return;
   try {
@@ -1112,7 +1104,7 @@ async function deleteSelected() {
   if (!docs.length) return;
   const confirmed = await confirmModal(
     t('documents.bulkDeleteConfirm', { count: docs.length }),
-    { danger: true, confirmLabel: t('common.delete') },
+    { danger: true, confirmLabel: t('common.delete'), detail: t('documents.bulkDeleteConfirmDetail') },
   );
   if (!confirmed) return;
   exitSelectMode();
@@ -1795,7 +1787,7 @@ function openDocumentViewer(doc) {
               <i data-lucide="external-link" class="icon-md" aria-hidden="true"></i>
               ${t('documents.dmsOpenExternal')}
             </a>` : ''}
-            ${doc.mime_type === 'application/pdf' ? `
+            ${previewKind(doc.mime_type) === 'pdf' ? `
             <a class="btn btn--ghost btn--icon btn--icon-sm" href="${previewUrl}" target="_blank" rel="noopener noreferrer"
                title="${t('documents.viewerOpenInTab')}" aria-label="${t('documents.viewerOpenInTab')}">
               <i data-lucide="external-link" class="icon-md" aria-hidden="true"></i>
@@ -1817,12 +1809,12 @@ function openDocumentViewer(doc) {
     onSave(panel) {
       if (window.lucide) window.lucide.createIcons({ el: panel });
       // PDFs ohne nativen Inline-Viewer (mobile Browser): mit pdf.js auf Canvas rendern
-      if (doc.mime_type === 'application/pdf' && !canRenderPdfNatively()) {
+      if (previewKind(doc.mime_type) === 'pdf' && !canRenderPdfNatively()) {
         const container = panel.querySelector('[data-pdf-pages]');
         pdfTeardown = renderPdfPages(container, previewUrl, doc, downloadUrl);
       }
       // Text-Dokumente: Inhalt asynchron laden
-      if (doc.mime_type === 'text/plain' || doc.mime_type === 'text/csv') {
+      if (previewKind(doc.mime_type) === 'text') {
         const body = panel.querySelector('#document-viewer-body');
         fetch(previewUrl, { credentials: 'same-origin' })
           .then((res) => res.text())
@@ -1843,7 +1835,8 @@ function openDocumentViewer(doc) {
 }
 
 function renderViewerContent(doc, previewUrl, downloadUrl) {
-  if (doc.mime_type === 'application/pdf') {
+  const kind = previewKind(doc.mime_type);
+  if (kind === 'pdf') {
     if (canRenderPdfNatively()) {
       // Kein `sandbox` am PDF-iframe: Chromium verweigert die Initialisierung seines internen
       // PDF-Viewers in sandboxed Frames und zeigt stattdessen "This page was blocked by Chrome".
@@ -1869,11 +1862,11 @@ function renderViewerContent(doc, previewUrl, downloadUrl) {
       </div>
     </div>`;
   }
-  if (doc.mime_type === 'image/png' || doc.mime_type === 'image/jpeg' || doc.mime_type === 'image/webp') {
+  if (kind === 'image') {
     return `<img class="document-viewer__image" src="${previewUrl}" alt="${esc(doc.name)}"`
       + ` loading="lazy">`;
   }
-  if (doc.mime_type === 'text/plain' || doc.mime_type === 'text/csv') {
+  if (kind === 'text') {
     // Inhalt wird asynchron in onSave geladen; Platzhalter anzeigen
     return `<div class="document-viewer__loading" role="status">
       <i data-lucide="loader-circle" class="document-viewer__spinner" aria-hidden="true"></i>

@@ -18,7 +18,7 @@
 .shopping-page {
   display: flex;
   flex-direction: column;
-  height: calc(100dvh - var(--safe-area-inset-top) - var(--nav-bottom-height) - var(--safe-area-inset-bottom));
+  height: 100%;
   /* Full-bleed-Root (Issue #577): Content-Spalte über --page-inline-pad auf den
    * direkten Kindern. Die 720er-Lesespalte der Liste (unten, ab 1024px) bleibt
    * davon unberührt und sitzt weiterhin an derselben Stelle. */
@@ -29,7 +29,7 @@
 
 @media (min-width: 1024px) {
   .shopping-page {
-    height: 100dvh;
+    height: 100%;
   }
 }
 
@@ -221,22 +221,16 @@
   min-width: var(--target-lg);
 }
 
-/* Kopf-Inhalt auf dasselbe Lesemaß wie der Körper.
+/* Kopf-Inhalt auf dasselbe Lesemaß wie der Körper: `.page-toolbar--narrow`
+ * (layout.css), gesetzt im Markup neben `--in-group`. Hier stand dieselbe
+ * Absicht als `> * { max-width: ... }` - sie kappte die Slot-Breiten und ließ
+ * die Aktionen trotzdem an der äußeren Kante stehen; die Begründung steht am
+ * geteilten Selektor.
  *
- * Der Kopf bleibt full-bleed (Chrome läuft bis zur Shell-Kante, Issue #577),
- * aber sein INHALT lief bis 1156px, während die Liste darunter bei 720px endet:
- * gemessen 428px Versatz in Einkaufen, 500px im Vorrat - der Papierkorb hing
- * weit rechts über leerer Seite (Critique 2026-07-30). DESIGN.md macht die
- * gemeinsame Fluchtlinie zur Bedingung; sie gilt für beide Kanten, nicht nur
- * für die linke. */
-@media (min-width: 1024px) {
-  .shopping-page .page-toolbar--in-group > * {
-    max-width: var(--content-max-width-narrow);
-  }
-
-  .shopping-page .page-toolbar--in-group {
-    flex-wrap: wrap;
-  }
+ * Der Kopf darf umbrechen: Titel und die drei Listen-Aktionen brauchen
+ * zusammen mehr als das Lesemaß, sobald der Listenname lang wird. */
+.shopping-page .page-toolbar--in-group {
+  flex-wrap: wrap;
 }
 
 /* --------------------------------------------------------
@@ -571,8 +565,10 @@
  * Zeichen („Broc…", „Cherr…"). 24% der Viewportbreite für einen Knopf in der
  * Ecke (Critique 2026-07-30, P0).
  *
- * Der FAB fährt jetzt beim Abwärtsscrollen weg (utils/fab-scroll.js) - eine
- * Antwort für alle vier Tabs, statt einer Gasse hier und 14 Überdeckungen dort. */
+ * Den Freiraum trägt jetzt `--fab-safe-zone`: eine Marge an .app-content
+ * verkürzt den Scrollport, sodass bei jedem Scrollstand nichts Bedienbares mehr
+ * unter dem FAB liegt - eine Antwort für alle vier Tabs, statt einer Gasse hier
+ * und 14 Überdeckungen dort. */
 
 /* Der Abstand zwischen den Gruppen kommt aus dem gap von .kitchen-list. */
 

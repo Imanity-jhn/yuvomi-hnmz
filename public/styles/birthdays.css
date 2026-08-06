@@ -382,7 +382,7 @@
 .bd-import-row__badge {
   flex: none;
   font-size: var(--text-xs);
-  color: var(--color-text-on-accent);
+  color: var(--color-ink-on-vivid);
   background: var(--module-accent);
   padding: var(--space-0h) var(--space-2);
   border-radius: var(--radius-full);

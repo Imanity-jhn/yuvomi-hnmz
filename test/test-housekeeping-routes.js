@@ -403,6 +403,165 @@ test('PUT /visits/:id: Stundenkraft berechnet Betrag aus minutes_worked', async 
   assert.equal(row.daily_rate, computeHourlyAmount(120, 30));
 });
 
+// ---------------------------------------------------------------------------
+// Datensprache und Outbound-Kopplung der Besuchs-Artefakte
+//
+// Die Oberfläche schickt Titel und Beschreibung übersetzt mit; diese Fallbacks
+// greifen für alles, was die API direkt anspricht. Sie standen fest auf
+// Englisch, obwohl die Texte in calendar_events/tasks landen und von dort in
+// API, ICS-Feed und Sync gehen - dieselbe Ursache wie #631/#632.
+// ---------------------------------------------------------------------------
+
+function setConfig(key, value) {
+  db.prepare(`
+    INSERT INTO sync_config (key, value) VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `).run(key, value);
+}
+
+async function freshWorker(name) {
+  await call('POST', '/worker', {
+    as: ADM,
+    body: { username: name, display_name: name, password: 'secret123', daily_rate: 40 },
+  });
+  const list = await call('GET', '/workers', { as: ADM });
+  return list.body.data.find((w) => w.display_name === name).id;
+}
+
+let LOCALIZED_SESSION;
+
+test('Fallback-Titel folgen der Datensprache des Haushalts', async () => {
+  setConfig('language', 'de');
+  setConfig('date_format', 'dmy');
+  setConfig('currency', 'EUR');
+  setConfig('housekeeping_payment_tasks', '1');
+
+  const workerId = await freshWorker('Marta');
+  // Bewusst ohne event_title/payment_* - genau der Pfad eines API-Aufrufers.
+  const r = await call('POST', '/work-sessions/check-in', {
+    as: ADM,
+    body: { worker_id: workerId, daily_rate: 40, extras: 5, local_date: '2025-06-02' },
+  });
+  assert.equal(r.status, 201);
+  LOCALIZED_SESSION = r.body.data.id;
+
+  const row = db.prepare(`
+    SELECT calendar_event_id, payment_task_id FROM housekeeping_work_sessions WHERE id = ?
+  `).get(LOCALIZED_SESSION);
+
+  const event = db.prepare('SELECT title FROM calendar_events WHERE id = ?').get(row.calendar_event_id);
+  assert.equal(event.title, 'Haushaltshilfe: Marta');
+
+  const task = db.prepare('SELECT title, description FROM tasks WHERE id = ?').get(row.payment_task_id);
+  assert.equal(task.title, 'Marta für Haushaltshilfe bezahlen');
+  // Datum nach date_format, Betrag als Währung - wie der Client es schriebe.
+  assert.match(task.description, /02\.06\.2025/);
+  assert.match(task.description, /45/);
+});
+
+test('ohne gesetzte Sprache bleibt es beim englischen Bestandsverhalten', async () => {
+  db.prepare(`DELETE FROM sync_config WHERE key IN ('language', 'region')`).run();
+  // Sprache am Ende wiederherstellen: die Folgetests pruefen deutsche Texte, und
+  // ohne das schriebe updateVisitLinks die Beschreibung stillschweigend auf
+  // Englisch zurueck - der Test davor haette dann eine Zusicherung gemacht, die
+  // der naechste Aufruf widerlegt.
+
+  const workerId = await freshWorker('Nina');
+  const r = await call('POST', '/work-sessions/check-in', {
+    as: ADM,
+    body: { worker_id: workerId, daily_rate: 40, local_date: '2025-06-03' },
+  });
+  const row = db.prepare('SELECT calendar_event_id FROM housekeeping_work_sessions WHERE id = ?').get(r.body.data.id);
+  const event = db.prepare('SELECT title FROM calendar_events WHERE id = ?').get(row.calendar_event_id);
+  assert.equal(event.title, 'Housekeeping: Nina');
+
+  setConfig('language', 'de');
+});
+
+test('ein verschobener Besuch wird zum Provider nachgezogen', async () => {
+  // Der Termin liegt bereits beim Provider: der Apple-Sync lädt jedes lokale
+  // Event ohne Kalenderzuordnung hoch und stellt die Zeile danach auf 'apple'.
+  // Ab da erreicht ihn nur noch outbound_dirty (#632).
+  setConfig('apple_caldav_url', 'https://caldav.icloud.com/');
+  const row = db.prepare('SELECT calendar_event_id FROM housekeeping_work_sessions WHERE id = ?').get(LOCALIZED_SESSION);
+  db.prepare(`
+    UPDATE calendar_events
+    SET external_source = 'apple', external_calendar_id = 'hk-test@oikos.local',
+        external_object_url = 'https://caldav.icloud.com/home/hk-test.ics', outbound_dirty = 0
+    WHERE id = ?
+  `).run(row.calendar_event_id);
+
+  const r = await call('PUT', `/visits/${LOCALIZED_SESSION}`, { as: ADM, body: { date: '2025-06-09', daily_rate: 40 } });
+  assert.equal(r.status, 200);
+
+  const event = db.prepare('SELECT start_datetime, outbound_dirty FROM calendar_events WHERE id = ?')
+    .get(row.calendar_event_id);
+  assert.equal(event.start_datetime, '2025-06-09');
+  assert.equal(event.outbound_dirty, 1, 'die Verschiebung muss den Provider erreichen');
+});
+
+test('im Nur-Lesen-Modus bleibt der verschobene Besuch gegen den Inbound geschützt', async () => {
+  // Ein schreibgeschützter Provider nimmt den Push nicht an - der Marker ist aber
+  // auch der Schutz davor, dass der Inbound das neue Datum überschreibt.
+  setConfig('google_refresh_token', 'token');
+  setConfig('google_readonly', '1');
+
+  const workerId = await freshWorker('Rita');
+  const created = await call('POST', '/work-sessions/check-in', {
+    as: ADM,
+    body: { worker_id: workerId, daily_rate: 40, local_date: '2025-07-01' },
+  });
+  const row = db.prepare('SELECT calendar_event_id AS id FROM housekeeping_work_sessions WHERE id = ?')
+    .get(created.body.data.id);
+  db.prepare(`
+    UPDATE calendar_events
+    SET external_source = 'google', external_calendar_id = ?, outbound_dirty = 0 WHERE id = ?
+  `).run(`hk-ro-${row.id}@google`, row.id);
+
+  await call('PUT', `/visits/${created.body.data.id}`, { as: ADM, body: { date: '2025-07-08', daily_rate: 40 } });
+
+  const event = db.prepare('SELECT start_datetime, outbound_dirty FROM calendar_events WHERE id = ?').get(row.id);
+  assert.equal(event.start_datetime, '2025-07-08');
+  assert.equal(event.outbound_dirty, 1, 'ohne Marker überschriebe der nächste Inbound das alte Datum zurück');
+
+  db.prepare(`DELETE FROM sync_config WHERE key IN ('google_refresh_token', 'google_readonly')`).run();
+});
+
+test('ein gelöschter Besuch räumt die Kopie beim Provider mit ab', async () => {
+  const row = db.prepare('SELECT calendar_event_id FROM housekeeping_work_sessions WHERE id = ?').get(LOCALIZED_SESSION);
+  const before = db.prepare('SELECT COUNT(*) AS c FROM calendar_pending_deletions').get().c;
+
+  const r = await call('DELETE', `/visits/${LOCALIZED_SESSION}`, { as: ADM });
+  assert.equal(r.status, 200);
+
+  assert.equal(
+    db.prepare('SELECT COUNT(*) AS c FROM calendar_events WHERE id = ?').get(row.calendar_event_id).c,
+    0,
+    'lokal gelöscht',
+  );
+  assert.ok(
+    db.prepare('SELECT COUNT(*) AS c FROM calendar_pending_deletions').get().c > before,
+    'die Löschung beim Provider muss vorgemerkt sein, sonst bleibt der Termin dort stehen',
+  );
+});
+
+test('ein rein lokaler Besuch merkt nichts beim Provider vor', async () => {
+  const workerId = await freshWorker('Tomas');
+  const created = await call('POST', '/work-sessions/check-in', {
+    as: ADM,
+    body: { worker_id: workerId, daily_rate: 40, local_date: '2025-06-04' },
+  });
+  const before = db.prepare('SELECT COUNT(*) AS c FROM calendar_pending_deletions').get().c;
+
+  await call('DELETE', `/visits/${created.body.data.id}`, { as: ADM });
+
+  assert.equal(
+    db.prepare('SELECT COUNT(*) AS c FROM calendar_pending_deletions').get().c,
+    before,
+    'ohne Provider-Zuordnung gibt es dort nichts zu löschen',
+  );
+});
+
 test('teardown: Server schließen', async () => {
   await new Promise((r) => server.close(r));
 });

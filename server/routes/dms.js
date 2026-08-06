@@ -8,6 +8,7 @@ import * as db from '../db.js';
 import { createLogger } from '../logger.js';
 import { str, MAX_TITLE } from '../middleware/validate.js';
 import { getAdapter as defaultGetAdapter, SUPPORTED_PROVIDERS } from '../services/dms/index.js';
+import { documentVisibleSql } from '../services/document-access.js';
 import { StorageError, readDocumentContent } from '../services/document-storage.js';
 
 let adapterFactory = defaultGetAdapter;
@@ -214,10 +215,7 @@ router.post('/push', async (req, res) => {
     const docId = Number(req.body.document_id);
     const doc = db.get().prepare(`
       SELECT d.* FROM family_documents d
-      WHERE d.id = @id AND (
-        d.created_by = @userId OR d.visibility = 'family'
-        OR EXISTS (SELECT 1 FROM family_document_access a WHERE a.document_id = d.id AND a.user_id = @userId)
-      )
+      WHERE d.id = @id AND ${documentVisibleSql('d')}
     `).get({ id: docId, userId: userId(req) });
     if (!doc) return res.status(404).json({ error: 'Document not found.', code: 404 });
     if (doc.storage_backend === 'dms') {

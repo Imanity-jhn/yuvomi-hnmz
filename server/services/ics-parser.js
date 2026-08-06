@@ -22,6 +22,94 @@ function unescapeICSText(str) {
     .replace(/\\\\/g, '\\');
 }
 
+// Maximal übernommene Tags je Aufgabe und Zeichen je Tag. Die Werte kommen von
+// fremden Servern; ohne Deckel wandert ein absurd getaggtes VTODO ungebremst in
+// die Datenbank und in jede Filterleiste. Beide Grenzen gelten identisch in der
+// Route (server/routes/tasks.js).
+const MAX_CATEGORIES = 32;
+const MAX_CATEGORY_LEN = 64;
+
+/**
+ * CATEGORIES eines Komponenten-Blocks als Liste (#586).
+ *
+ * Zwei Eigenheiten, die ein naives `get('CATEGORIES')` verfehlt:
+ *
+ * 1. Die Property darf mehrfach vorkommen. RFC 5545 erlaubt sowohl
+ *    `CATEGORIES:a,b` als auch zwei getrennte CATEGORIES-Zeilen, und Clients
+ *    nutzen beides. Deshalb alle Vorkommen einsammeln statt nur des ersten.
+ * 2. `\,` ist ein escaptes Komma **im Wert**, kein Trenner. Erst am unescapten
+ *    Komma splitten, dann jedes Element einzeln unescapen - andersherum zerfiele
+ *    ein Tag wie „Haus\, Garten" in zwei.
+ */
+/**
+ * Eine CATEGORIES-Zeile am Trenner-Komma zerlegen.
+ *
+ * Ein Lookbehind auf ein einzelnes Zeichen reicht dafür nicht: `\\` ist ein
+ * escapter Backslash **im Wert**, und `foo\\,bar` meint die Tags `foo\` und
+ * `bar`. Der Blick auf nur ein vorangehendes Zeichen sähe dort einen Escape und
+ * verweigerte die Trennung. Also Zeichen für Zeichen: eine Escape-Sequenz wird
+ * am Stück übernommen, danach ist das nächste Komma wieder ein Trenner.
+ */
+function splitCategoryList(value) {
+  const out = [];
+  let current = '';
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i];
+    if (ch === '\\' && i + 1 < value.length) {
+      current += ch + value[i + 1];
+      i++;
+      continue;
+    }
+    if (ch === ',') { out.push(current); current = ''; continue; }
+    current += ch;
+  }
+  out.push(current);
+  return out;
+}
+
+function parseCategories(block) {
+  const re  = /^CATEGORIES(?:;[^:\n]*)?:(.*)$/gim;
+  const out = [];
+  const seen = new Set();
+  let m;
+  while ((m = re.exec(block)) !== null) {
+    for (const raw of splitCategoryList(m[1])) {
+      const tag = unescapeICSText(raw.trim())?.trim().slice(0, MAX_CATEGORY_LEN);
+      if (!tag) continue;
+      const key = tag.toLowerCase();
+      if (seen.has(key)) continue;   // Groß-/Kleinschreibung eint, erste Schreibweise gewinnt
+      seen.add(key);
+      out.push(tag);
+      if (out.length >= MAX_CATEGORIES) return out;
+    }
+  }
+  return out;
+}
+
+// RELATED-TO (RFC 5545 §3.8.4.5) trägt die Unteraufgaben-Beziehung: Apple
+// Reminders, Nextcloud Tasks und Tasks.org hängen sie ans KIND und schreiben
+// die UID des Elternteils hinein. Der Parameter RELTYPE ist optional und hat
+// laut §3.2.15 den Default PARENT - ein RELATED-TO ohne RELTYPE ist also
+// bereits die Elternangabe und darf nicht übersehen werden.
+//
+// Die Gegenrichtung (RELTYPE=CHILD am Elternteil) kommt seltener vor, kostet
+// hier aber nur eine Zeile; wer sie schreibt, verlöre seine Hierarchie sonst
+// genauso still. SIBLING ist keine Hierarchie und wird verworfen.
+function parseRelations(block) {
+  const re = /^RELATED-TO((?:;[^:;\n]*)*):(.*)$/gim;
+  const childUids = [];
+  let parentUid = null;
+  let m;
+  while ((m = re.exec(block)) !== null) {
+    const relType = (/;RELTYPE=([^;:]+)/i.exec(m[1])?.[1] || 'PARENT').trim().toUpperCase();
+    const value = unescapeICSText(m[2].trim())?.trim();
+    if (!value) continue;
+    if (relType === 'PARENT') { if (!parentUid) parentUid = value; }
+    else if (relType === 'CHILD' && !childUids.includes(value)) childUids.push(value);
+  }
+  return { parentUid, childUids };
+}
+
 function parseICS(ics) {
   const unfolded = unfoldLines(ics);
   const events   = [];
@@ -189,7 +277,9 @@ function parseVTODO(ics) {
     const prioRaw = get('PRIORITY');
     let priority  = prioRaw !== null ? parseInt(prioRaw, 10) : null;
     if (priority === 0 || Number.isNaN(priority)) priority = null;
-    todos.push({ uid, summary, description, completed, status, due, priority });
+    const tags = parseCategories(block);
+    const { parentUid, childUids } = parseRelations(block);
+    todos.push({ uid, summary, description, completed, status, due, priority, tags, parentUid, childUids });
   }
   return todos;
 }
@@ -282,4 +372,4 @@ function expandRRULE(vevent, windowStart, windowEnd) {
   return results;
 }
 
-export { unfoldLines, unescapeICSText, parseICS, parseVTODO, formatICSDate, tzLocalToUTC, applyDuration, expandRRULE, normalizeRecurrenceOverrides };
+export { unfoldLines, unescapeICSText, parseICS, parseVTODO, parseCategories, MAX_CATEGORIES, MAX_CATEGORY_LEN, formatICSDate, tzLocalToUTC, applyDuration, expandRRULE, normalizeRecurrenceOverrides };

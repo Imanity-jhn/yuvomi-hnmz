@@ -44,14 +44,24 @@
 }
 
 /* Eingebettet im Budget-Tab: Sub-Domain erbt den Parent-Akzent und der Kopf
- * sinkt von Seitentitel- auf Sektionsebene - der Modulkopf ist bereits "Budget". */
+ * sinkt von Seitentitel- auf Sektionsebene - der Modulkopf ist bereits "Budget".
+ * Seitenfläche und Rand gehören dem Panel, nicht dem Sub-Page-Wrapper: der
+ * eigene Gradient lief sonst als getönte Vollbreiten-Bahn innerhalb der
+ * Budget-Seite (Critique 2026-07-30). Gleiches Muster in subscriptions.css. */
 .budget-page .split-page {
   --module-accent: var(--module-budget);
+  background: none;
+  padding-block: 0;
+  padding-inline: 0;
+  min-height: 0;
 }
 
+/* Eingebettet ist der Split-Titel eine Sektionsüberschrift, kein Seitentitel -
+ * der Modulkopf sagt bereits „Budget". Die Auszeichnung steht deshalb in der
+ * geteilten Eyebrow-Liste in typography.css, zusammen mit
+ * .budget-panel-head__title; hier bleibt nur die Farbe. */
 .budget-page .split-title {
-  font-size: var(--text-lg);
-  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-secondary);
 }
 
 .split-subtitle,
@@ -62,56 +72,22 @@
   color: var(--color-text-secondary);
 }
 
-.split-summary {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: var(--space-3);
-}
+/* Die Kennzahl-Zeile ist .budget-summary (budget.css). Die frühere eigene
+ * .split-summary-card war die dritte von fünf Kartenbauarten im selben Modul
+ * (Critique 2026-07-30, P0) - ersatzlos entfallen, das Markup trägt jetzt
+ * .budget-summary-card. */
 
-.split-summary-card,
+/* Arbeitsflächen sind opak: Glass bleibt Overlays und Modals vorbehalten
+ * (Begründung an .budget-summary-card in budget.css). Diese Datei setzte auf
+ * denselben Rollen --glass-bg-card und widersprach damit der Regel innerhalb
+ * des eigenen Moduls. */
 .split-card,
 .split-groups-panel {
-  background-color: var(--glass-bg-card);
-  border: 1px solid var(--glass-border-subtle);
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border-subtle);
   border-radius: var(--radius-glass-card);
-  box-shadow: var(--glass-shadow-sm);
+  box-shadow: var(--shadow-sm);
 }
-
-.split-summary-card {
-  position: relative;
-  padding: var(--space-4);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-.split-summary-card::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  background-color: color-mix(in srgb, var(--module-accent) calc(var(--glass-tint-strength) / 2), transparent);
-  pointer-events: none;
-  z-index: 0;
-}
-
-.split-summary-card > * {
-  position: relative;
-  z-index: 1;
-}
-
-.split-summary-card span {
-  color: var(--color-text-secondary);
-  font-size: var(--text-sm);
-}
-
-.split-summary-card strong {
-  font-size: var(--text-xl);
-  color: var(--color-text-primary);
-}
-
-.split-summary-card--positive strong { color: var(--color-success); }
-.split-summary-card--negative strong { color: var(--color-danger); }
 
 .split-layout {
   min-height: 0;
@@ -184,15 +160,16 @@
 
 /* Statusfilter der Gruppenliste (Aktiv/Archiviert, #574). Teilt die
  * .filter-chip-Vokabel mit Aufgaben/Dokumenten. */
+/* Optik kommt aus .budget-segmented; hier bleibt nur, was die Seitenleiste
+ * braucht: volle Breite statt inline-flex, damit die zwei Zustände die Spalte
+ * ausfüllen. */
 .split-status-filter {
   display: flex;
-  gap: var(--space-2);
   margin-top: var(--space-2);
 }
 
-.split-status-filter .filter-chip {
+.split-status-filter .budget-segmented__item {
   flex: 1;
-  justify-content: center;
 }
 
 .split-groups {
@@ -267,6 +244,19 @@
   font-size: var(--text-sm);
 }
 
+/* Beleg-Marke in der Metazeile (#583): gleiche Größe wie der Text daneben,
+ * damit sie mitläuft statt die Zeilenhöhe aufzureißen. */
+.split-expense__receipt {
+  display: inline-flex;
+  vertical-align: text-bottom;
+  color: var(--module-accent);
+}
+
+.split-expense__receipt svg {
+  width: 14px;
+  height: 14px;
+}
+
 .split-main {
   min-width: 0;
   display: flex;
@@ -281,8 +271,9 @@
 .split-group-header {
   justify-content: space-between;
   padding: var(--space-4);
-  background-color: var(--glass-bg-card);
-  border: 1px solid var(--glass-border-subtle);
+  /* Arbeitsfläche, also opak - dieselbe Regel wie .split-card darüber. */
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border-subtle);
   border-radius: var(--radius-glass-card);
 }
 
@@ -484,9 +475,8 @@ button.split-expense:hover {
 }
 
 @container split-page (max-width: 639px) {
-  .split-summary {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
+  /* Die Kennzahl-Zeile bricht über .budget-summary (budget.css) um; die frühere
+     2+1-Reihe ließ die dritte Karte auf halber Breite mit einem Loch daneben. */
 
   .split-group-header,
   .split-topbar {

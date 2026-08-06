@@ -9,6 +9,11 @@ import express from 'express';
 import * as db from '../db.js';
 import * as holidays from '../services/holidays.js';
 import { str, MAX_SHORT } from '../middleware/validate.js';
+import { getSupportedLocales, isSupportedLocale, resolveHouseholdLocale } from '../utils/i18n.js';
+import { retitleBirthdayEvents } from '../services/birthdays.js';
+// Geteilte isomorphe Util (#620, Allowlist in test/test-layer-boundary.js):
+// dasselbe Kennungsformat, das Event-Modal und Einstellungen verwenden.
+import { parseSyncTargetValue } from '../../public/utils/sync-target.js';
 
 const log = createLogger('Preferences');
 
@@ -17,7 +22,7 @@ const router = express.Router();
 const VALID_MEAL_TYPES = ['breakfast', 'lunch', 'dinner', 'snack'];
 const DEFAULT_MEAL_TYPES = VALID_MEAL_TYPES.join(',');
 
-const VALID_CURRENCIES = ['AED', 'AUD', 'BRL', 'CAD', 'CHF', 'CLP', 'CNY', 'CZK', 'DKK', 'EUR', 'GBP', 'HUF', 'IDR', 'INR', 'IRR', 'JPY', 'KRW', 'KZT', 'NOK', 'PLN', 'RUB', 'SAR', 'SEK', 'TRY', 'UAH', 'USD', 'ZAR'];
+const VALID_CURRENCIES = ['AED', 'ARS', 'AUD', 'BBD', 'BOB', 'BRL', 'BSD', 'BZD', 'CAD', 'CHF', 'CLP', 'CNY', 'COP', 'CRC', 'CUP', 'CZK', 'DKK', 'DOP', 'EUR', 'GBP', 'GTQ', 'GYD', 'HNL', 'HTG', 'HUF', 'IDR', 'INR', 'IRR', 'JMD', 'JPY', 'KRW', 'KZT', 'MXN', 'MYR', 'NIO', 'NOK', 'NZD', 'PAB', 'PEN', 'PHP', 'PLN', 'PYG', 'RUB', 'SAR', 'SEK', 'SRD', 'TRY', 'TTD', 'UAH', 'USD', 'UYU', 'VES', 'XCD', 'ZAR'];
 const DEFAULT_CURRENCY = 'EUR';
 const DEFAULT_APP_NAME = 'Yuvomi';
 
@@ -38,10 +43,22 @@ const DEFAULT_WEEK_START = 'monday';
 const VALID_BUDGET_MODES = ['shared', 'personal'];
 const DEFAULT_BUDGET_MODE = 'shared';
 
+// Datensprache des Haushalts (#631, #632): in welcher Sprache der Server Inhalte
+// *speichert*, die er selbst erzeugt - heute die Titel und Beschreibungen der
+// Geburtstags-Termine. Anders als die UI-Sprache (per-user im localStorage) muss
+// das haushaltweit sein: eine calendar_events-Zeile hat genau einen Titel, und
+// den lesen REST-API, ICS-Feed, CalDAV-/Google-Outbound und die Suche.
+// Nicht gesetzt = aus der Region abgeleitet, sonst Englisch (resolveHouseholdLocale).
+const VALID_LANGUAGES = getSupportedLocales();
+
 // Region ist nur ein Anzeige-Hinweis (Locale-Code wie "fr-FR" oder "custom").
 // Der Client fällt bei unbekanntem Wert ohnehin auf detectRegion() zurück, daher
 // genügt eine Formprüfung statt einer festen Liste.
-const VALID_REGION = /^(custom|[a-z]{2}-[A-Z]{2})$/;
+//
+// Der Sprachteil darf zwei oder drei Buchstaben haben: BCP-47 kennt beides und
+// "fil-PH" (Filipino) wäre mit der alten {2}-Prüfung als ungültige Region
+// abgewiesen worden, obwohl der Client sie anbietet.
+const VALID_REGION = /^(custom|[a-z]{2,3}-[A-Z]{2})$/;
 const DEFAULT_TIME_FORMAT = '24h';
 
 // Standard-Termindauer (Minuten): setzt das Ende neuer Kalender-Termine relativ
@@ -55,6 +72,25 @@ const MAX_CALENDAR_DURATION = 1440;
 // analog MAX_REMINDERS_PER_ENTITY in server/routes/reminders.js.
 const VALID_REMINDER_OFFSETS = [0, 15, 60, 1440, 2880, 10080, 20160];
 const MAX_DEFAULT_REMINDERS = 5;
+
+// Standard-Sync-Ziel für eigene neue Termine (#620, per-user). Gespeichert wird
+// exakt die Kennung, die das Event-Modal ohnehin führt: '' (lokal speichern),
+// 'google:<calendarId>' oder 'caldav:<accountId>|<calendarUrl>'. Geprüft wird mit
+// parseSyncTargetValue aus dem geteilten Util - dieselbe Funktion, mit der das
+// Frontend die Kennung baut und liest, damit Server und Client nicht getrennte
+// Vorstellungen vom Format entwickeln.
+//
+// Geprüft wird nur die FORM, nicht die Existenz. Ein Kalender kann deaktiviert,
+// gelöscht oder auf nur-lesend gestellt werden, lange nachdem jemand ihn hier
+// gewählt hat; eine Existenzprüfung beim Speichern würde das nicht verhindern,
+// aber einen Google-API-Aufruf in jeden Einstellungs-Save ziehen. Stattdessen
+// entscheidet das Modal beim Öffnen: steht das Ziel nicht mehr in der Liste,
+// bleibt die Vorauswahl auf "Lokal" (siehe applyDefaultSyncTarget).
+//
+// Per-user, kein Admin-Gate: die Nachbarschlüssel calendar_default_reminders und
+// calendar_default_assign_me liegen aus demselben Grund pro Nutzer (#497/#498) -
+// wer welchen Kalender bespielt, ist eine persönliche Entscheidung.
+const MAX_CALENDAR_TARGET_LENGTH = 500;
 
 // Standard-Punktwert für neue Aufgaben (#578, haushaltweit). 0 = kein Standard,
 // das Punktefeld bleibt wie bisher leer. Obergrenze spiegelt MAX_POINTS in
@@ -266,6 +302,12 @@ router.get('/', (req, res) => {
         time_format: timeFormat,
         week_start: weekStart,
         region: cfgGet('region') || null,
+        // Drei Sichten auf dieselbe Einstellung, weil drei verschiedene Fragen
+        // dahinterstecken: was ist gewählt (Select-Zustand), was gilt gerade
+        // (API-Konsument), und was ergäbe die Automatik (Label der ersten Option).
+        language: isSupportedLocale(cfgGet('language')) ? cfgGet('language') : null,
+        language_effective: resolveHouseholdLocale(db.get()),
+        language_auto: resolveHouseholdLocale(db.get(), { ignoreExplicit: true }),
         app_name: appName,
         dashboard_widgets: dashboardWidgets,
         disabled_modules: disabledModules,
@@ -277,10 +319,12 @@ router.get('/', (req, res) => {
         // Standardwerte für neue Termine (per-user, #497/#498).
         calendar_default_reminders: parseDefaultReminders(cfgUserGet('calendar_default_reminders', req.authUserId)),
         calendar_default_assign_me: cfgUserGet('calendar_default_assign_me', req.authUserId) === '1',
+        calendar_default_target: cfgUserGet('calendar_default_target', req.authUserId) || '',
         // Modul-Feature-Schalter (haushaltweit). Default an: fehlender Wert =>
         // Feature aktiv, damit Bestandshaushalte ihr Verhalten behalten.
         health_cycle_enabled: cfgGet('health_cycle_enabled') !== '0',
         rewards_require_approval: cfgGet('rewards_require_approval') !== '0',
+        tasks_subtasks_expanded: cfgGet('tasks_subtasks_expanded') === '1',
         tasks_default_points: parseTaskDefaultPoints(cfgGet('tasks_default_points')),
         weather_provider: cfgGet('weather_provider') ?? null,
         weather_lat:      cfgGet('weather_lat')      ?? null,
@@ -314,7 +358,7 @@ router.get('/', (req, res) => {
 
 router.put('/', (req, res) => {
   try {
-    const { visible_meal_types, currency, date_format, time_format, week_start, region, app_name, dashboard_widgets, disabled_modules, module_order, mobile_nav_order, housekeeping_payment_tasks, budget_mode, calendar_default_duration, calendar_default_reminders, calendar_default_assign_me, health_cycle_enabled, rewards_require_approval, tasks_default_points, weather_provider, weather_lat, weather_lon, weather_city, weather_units, weather_auto_locate, weather_user, holiday_country, holiday_subdivision, holiday_group, holiday_show_public, holiday_show_school, holiday_public_color, holiday_school_color } = req.body;
+    const { visible_meal_types, currency, date_format, time_format, week_start, region, language, app_name, dashboard_widgets, disabled_modules, module_order, mobile_nav_order, housekeeping_payment_tasks, budget_mode, calendar_default_duration, calendar_default_reminders, calendar_default_assign_me, calendar_default_target, health_cycle_enabled, rewards_require_approval, tasks_subtasks_expanded, tasks_default_points, weather_provider, weather_lat, weather_lon, weather_city, weather_units, weather_auto_locate, weather_user, holiday_country, holiday_subdivision, holiday_group, holiday_show_public, holiday_show_school, holiday_public_color, holiday_school_color } = req.body;
 
     if (visible_meal_types !== undefined) {
       if (!Array.isArray(visible_meal_types)) {
@@ -367,14 +411,36 @@ router.put('/', (req, res) => {
       cfgSet('budget_mode', budget_mode);
     }
 
-    // Reine Anzeige-Hilfe: welche Region-Vorlage der Nutzer gewählt hat. Nötig,
-    // weil sich mehrere Regionen dasselbe currency/date/time-Triple teilen und
-    // der Dropdown sonst nach dem Speichern auf die falsche Region springt (#486).
+    // Welche Region-Vorlage der Nutzer gewählt hat. Nötig, weil sich mehrere
+    // Regionen dasselbe currency/date/time-Triple teilen und der Dropdown sonst
+    // nach dem Speichern auf die falsche Region springt (#486).
+    //
+    // Seit die Datensprache aus der Region abgeleitet wird, ist das keine reine
+    // Anzeige-Hilfe mehr: eine Region schiebt die Sprache, in der Geburtstags-
+    // Termine gespeichert werden. Deshalb dasselbe Admin-Gate wie bei `language`
+    // - sonst wäre der dortige Schutz über diesen Umweg zu umgehen. Die Oberfläche
+    // behandelte die Region ohnehin immer als Admin-Feld, nur die Route nicht.
     if (region !== undefined) {
+      if (req.authRole !== 'admin') {
+        return res.status(403).json({ error: 'Admin access required.', code: 403 });
+      }
       if (region !== null && (typeof region !== 'string' || !VALID_REGION.test(region))) {
         return res.status(400).json({ error: 'Ungültige Region.', code: 400 });
       }
       cfgSet('region', region ?? '');
+    }
+
+    // Datensprache — haushaltweite Grundsatzentscheidung wie Region und Währung,
+    // deshalb nur Admin. null/'' stellt auf "automatisch" zurück (aus der Region).
+    if (language !== undefined) {
+      if (req.authRole !== 'admin') {
+        return res.status(403).json({ error: 'Admin access required.', code: 403 });
+      }
+      if (language !== null && language !== '' && !isSupportedLocale(language)) {
+        return res.status(400).json({ error: `Ungültige Sprache. Erlaubt: ${VALID_LANGUAGES.join(', ')}`, code: 400 });
+      }
+      if (language === null || language === '') cfgDelete('language');
+      else cfgSet('language', language);
     }
 
     if (app_name !== undefined) {
@@ -463,6 +529,24 @@ router.put('/', (req, res) => {
       cfgUserSet('calendar_default_assign_me', req.authUserId, calendar_default_assign_me ? '1' : '0');
     }
 
+    // Standard-Sync-Ziel für eigene neue Termine (#620, per-user).
+    if (calendar_default_target !== undefined) {
+      if (calendar_default_target !== null && typeof calendar_default_target !== 'string') {
+        return res.status(400).json({ error: 'calendar_default_target muss ein String sein', code: 400 });
+      }
+      const target = (calendar_default_target ?? '').trim();
+      if (target.length > MAX_CALENDAR_TARGET_LENGTH) {
+        return res.status(400).json({ error: `calendar_default_target: maximal ${MAX_CALENDAR_TARGET_LENGTH} Zeichen`, code: 400 });
+      }
+      // Leer = "Lokal speichern" und damit das ausdrückliche Abwählen eines
+      // zuvor gesetzten Ziels. parseSyncTargetValue liefert dafür {kind:'local'},
+      // also einen gültigen Wert, und null nur bei echtem Formfehler.
+      if (parseSyncTargetValue(target) === null) {
+        return res.status(400).json({ error: 'calendar_default_target: erwartet "google:<id>" oder "caldav:<kontoId>|<url>"', code: 400 });
+      }
+      cfgUserSet('calendar_default_target', req.authUserId, target);
+    }
+
     // Haushaltweite Modul-Feature-Schalter — nur Admins.
     if (health_cycle_enabled !== undefined) {
       if (req.authRole !== 'admin') {
@@ -482,6 +566,16 @@ router.put('/', (req, res) => {
         return res.status(400).json({ error: 'rewards_require_approval must be a boolean', code: 400 });
       }
       cfgSet('rewards_require_approval', rewards_require_approval ? '1' : '0');
+    }
+
+    if (tasks_subtasks_expanded !== undefined) {
+      if (req.authRole !== 'admin') {
+        return res.status(403).json({ error: 'Admin access required.', code: 403 });
+      }
+      if (typeof tasks_subtasks_expanded !== 'boolean') {
+        return res.status(400).json({ error: 'tasks_subtasks_expanded must be a boolean', code: 400 });
+      }
+      cfgSet('tasks_subtasks_expanded', tasks_subtasks_expanded ? '1' : '0');
     }
 
     // Standard-Punktwert für neue Aufgaben (#578). 0 schaltet den Standard ab.
@@ -697,6 +791,9 @@ router.put('/', (req, res) => {
         time_format: savedTimeFormat,
         week_start: savedWeekStart,
         region: cfgGet('region') || null,
+        language: isSupportedLocale(cfgGet('language')) ? cfgGet('language') : null,
+        language_effective: resolveHouseholdLocale(db.get()),
+        language_auto: resolveHouseholdLocale(db.get(), { ignoreExplicit: true }),
         app_name: savedAppName,
         dashboard_widgets: savedWidgets,
         disabled_modules: savedDisabledModules,
@@ -707,8 +804,10 @@ router.put('/', (req, res) => {
         calendar_default_duration: Number(cfgGet('calendar_default_duration')) || DEFAULT_CALENDAR_DURATION,
         calendar_default_reminders: parseDefaultReminders(cfgUserGet('calendar_default_reminders', req.authUserId)),
         calendar_default_assign_me: cfgUserGet('calendar_default_assign_me', req.authUserId) === '1',
+        calendar_default_target: cfgUserGet('calendar_default_target', req.authUserId) || '',
         health_cycle_enabled: cfgGet('health_cycle_enabled') !== '0',
         rewards_require_approval: cfgGet('rewards_require_approval') !== '0',
+        tasks_subtasks_expanded: cfgGet('tasks_subtasks_expanded') === '1',
         tasks_default_points: parseTaskDefaultPoints(cfgGet('tasks_default_points')),
         weather_provider: cfgGet('weather_provider') ?? null,
         weather_lat:      cfgGet('weather_lat')      ?? null,
@@ -730,6 +829,28 @@ router.put('/', (req, res) => {
   } catch (err) {
     log.error('PUT /', err);
     res.status(500).json({ error: 'Interner Fehler', code: 500 });
+  } finally {
+    // Gespeicherte Geburtstags-Termine an die geltende Datensprache angleichen.
+    //
+    // Unbedingt statt nur bei erkannter Verschiebung: retitleBirthdayEvents
+    // vergleicht ohnehin pro Zeile und schreibt nur, was abweicht. Ein Vergleich
+    // vorher/nachher wäre ein zweiter Ort, an dem alle Wege zur Datensprache
+    // (language, region, date_format) vollständig aufgezählt sein müssten.
+    //
+    // Im finally, weil der Handler schreibt und validiert, während er durch die
+    // Felder läuft: ein Batch aus gültiger `language` und einem später
+    // abgelehnten Feld verlässt ihn über ein `return res.status(400)`, hat die
+    // Sprache aber schon geschrieben. Am Ende des try-Blocks bliebe der Haushalt
+    // dann auf einer neuen Sprache mit alten Titeln sitzen.
+    //
+    // Fehler beenden die Anfrage nicht: die Antwort ist zu diesem Zeitpunkt
+    // längst gesendet, und die Präferenzen sind geschrieben. Der nächste PUT
+    // versucht es erneut - der Lauf ist idempotent.
+    try {
+      db.transaction(() => retitleBirthdayEvents(db.get()));
+    } catch (err) {
+      log.error('PUT / - Geburtstags-Termine konnten nicht umbenannt werden', err);
+    }
   }
 });
 

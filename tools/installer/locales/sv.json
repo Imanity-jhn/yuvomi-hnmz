@@ -4,7 +4,7 @@
     "continue": "Fortsätt",
     "back": "Tillbaka",
     "generate": "Generera",
-    "generating": "…",
+    "generating": "Genererar…",
     "optional": "Valfritt",
     "stepCounter": "Steg {{n}} av {{total}}",
     "toggleVisibility": "Visa eller dölj värdet",
@@ -48,8 +48,8 @@
     "unitsMetric": "Metriskt (°C)",
     "unitsImperial": "Imperialt (°F)",
     "errCoords": "Latitud och longitud krävs.",
-    "errLat": "Ogiltig latitud (–90 till 90).",
-    "errLon": "Ogiltig longitud (–180 till 180)."
+    "errLat": "Ogiltig latitud (-90 till 90).",
+    "errLon": "Ogiltig longitud (-180 till 180)."
   },
   "calendar": {
     "title": "Kalendersynkronisering",
@@ -101,19 +101,26 @@
   "docker": {
     "title": "Startar Yuvomi",
     "subtitle": "Hämtar avbildningen och startar Docker-containern.",
-    "starting": "Startar containern …",
     "elapsed": "{{n}} s förflutna",
     "running": "Containern är frisk och körs",
     "failed": "Det gick inte att starta containern",
     "unknownError": "Okänt fel",
     "toAdmin": "Fortsätt till administratörsinställning",
-    "retry": "Försök igen"
+    "retry": "Försök igen",
+    "phasePull": "Hämtar avbild",
+    "phaseBoot": "Containern startar",
+    "phaseHealth": "Hälsokontroll pågår",
+    "firstRunHint": "Första gången kan det ta flera minuter.",
+    "stalled": "Det här tar längre tid än vanligt. Loggen nedan visar varför.",
+    "showLogs": "Visa logg",
+    "hideLogs": "Dölj logg",
+    "timedOut": "Inget svar efter 15 minuter. Kontrollera loggen och försök igen."
   },
   "admin": {
     "title": "Skapa administratörskonto",
     "subtitle": "Konfigurera din första inloggning. Detta konto har full åtkomst till Yuvomi.",
     "userLabel": "Användarnamn",
-    "userHint": "3–64 tecken: bokstäver, siffror, . - _",
+    "userHint": "3-64 tecken: bokstäver, siffror, . - _",
     "nameLabel": "Visningsnamn",
     "passLabel": "Lösenord",
     "passPlaceholder": "Minst 8 tecken",
@@ -121,7 +128,7 @@
     "creating": "Skapar …",
     "create": "Skapa konto",
     "errAll": "Alla fält är obligatoriska.",
-    "errUser": "Ogiltigt format på användarnamn (3–64 tecken, bokstäver/siffror/._-).",
+    "errUser": "Ogiltigt format på användarnamn (3-64 tecken, bokstäver/siffror/._-).",
     "errPass": "Lösenordet måste vara minst 8 tecken.",
     "errMatch": "Lösenorden matchar inte.",
     "errCreate": "Det gick inte att skapa administratörskontot."
@@ -190,7 +197,17 @@
     "documentGoogleDriveReuseHint": "Lämna båda fälten tomma för att återanvända OAuth-uppgifterna för Google Kalender. För egna uppgifter skapar du dem i Google Cloud Console (som i Kalender-steget).",
     "documentGoogleDriveRedirectLabel": "Omdirigerings-URI",
     "errDocumentGoogleDrivePair": "Klient-ID och klienthemlighet för Google Drive måste antingen anges båda eller lämnas tomma.",
-    "errDocumentGoogleDriveCredentials": "Google Drive kräver antingen ett eget klient-ID och en egen klienthemlighet eller konfigurerade uppgifter för Google Kalender."
+    "errDocumentGoogleDriveCredentials": "Google Drive kräver antingen ett eget klient-ID och en egen klienthemlighet eller konfigurerade uppgifter för Google Kalender.",
+    "dataDirLabel": "Datamapp på värden",
+    "dataDirHint": "Var databasen och appdata ligger på servern. Lämna tomt för ./data bredvid compose-filen.",
+    "documentLocalDirLabel": "Mapp på värden",
+    "documentLocalDirHint": "Mappen på servern som monteras in i containern. Lämna tomt för ./documents.",
+    "documentWebdavPrivateNetwork": "Tillåt ett WebDAV-mål i ditt hemnätverk",
+    "documentWebdavPrivateNetworkHint": "Krävs för ett Nextcloud i ditt eget nätverk. Upphäver SSRF-skyddet för detta mål.",
+    "icsPrivateNetwork": "Tillåt kalenderprenumerationer från ditt hemnätverk",
+    "icsPrivateNetworkHint": "Krävs för ICS-flöden från enheter i ditt eget nätverk. Upphäver SSRF-skyddet för kalenderprenumerationer.",
+    "oidcTrustEmail": "Lita på e-post utan verified-claim",
+    "oidcTrustEmailHint": "Aktivera bara om din leverantör inte skickar email_verified och du litar på den."
   },
   "welcome": {
     "title": "Välkommen till Yuvomi",

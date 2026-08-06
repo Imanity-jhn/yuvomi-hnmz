@@ -522,6 +522,181 @@ test('GET zinsfreies Darlehen: remaining_principal == remaining_amount', async (
   assert.equal(r.body.data.summary.remaining_principal, r.body.data.summary.remaining_amount);
 });
 
+// --------------------------------------------------------------------------
+// Richtung der Rate (#638)
+//
+// Die Lücke, durch die der Bug kam: bis hierher prüfte KEIN Test das Vorzeichen
+// des erzeugten budget_entries-Eintrags. Das Modul wurde für verliehenes Geld
+// gebaut (Rate = Einnahme); mit den Zinsfeldern aus #569 kam der aufgenommene
+// Kredit dazu, und eine Hypothekenrate landete als Einnahme in der Monatsbilanz.
+// --------------------------------------------------------------------------
+
+/** Buchung, die eine Rate im Budget erzeugt hat. */
+function bookingOf(loanId) {
+  return db.prepare(`
+    SELECT b.amount, b.category, b.subcategory, b.account_id
+    FROM budget_loan_payments p JOIN budget_entries b ON b.id = p.budget_entry_id
+    WHERE p.loan_id = ? ORDER BY p.installment_number ASC
+  `).all(loanId);
+}
+
+/** Kategorietyp laut Stammdaten - stats.js liest den Typ zwar am Vorzeichen ab,
+ *  aber eine Ausgabe unter einer income-Kategorie wäre trotzdem falsch. */
+function categoryType(key) {
+  return db.prepare('SELECT type FROM budget_categories WHERE key = ?').get(key)?.type;
+}
+
+async function createDirectedLoan(body) {
+  setMode('shared');
+  setBudgetCurrency('EUR');
+  const r = await call('POST', '/loans', {
+    as: AA,
+    body: { borrower: 'Bank', title: 'Darlehen', start_month: '2026-01', total_amount: 1200, installment_count: 12, ...body },
+  });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  return r.body.data.id;
+}
+
+test('POST ohne direction: Default bleibt lent (Bestandsverhalten)', async () => {
+  const id = await createDirectedLoan({});
+  assert.equal(db.prepare('SELECT direction FROM budget_loans WHERE id = ?').get(id).direction, 'lent');
+});
+
+test('lent: Rate ist eine Einnahme (positiv, income-Kategorie)', async () => {
+  const id = await createDirectedLoan({ direction: 'lent' });
+  await call('POST', `/loans/${id}/payments`, { as: AA, body: { installment_number: 1, amount: 100, paid_date: '2026-01-15' } });
+
+  const [entry] = bookingOf(id);
+  assert.equal(entry.amount, 100, 'verliehenes Geld kommt zurück: positiver Betrag');
+  assert.equal(categoryType(entry.category), 'income', 'und eine income-Kategorie');
+});
+
+test('borrowed: Rate ist eine Ausgabe (negativ, expense-Kategorie) - #638', async () => {
+  const id = await createDirectedLoan({ direction: 'borrowed', borrower: 'Sparkasse' });
+  await call('POST', `/loans/${id}/payments`, { as: AA, body: { installment_number: 1, amount: 916.67, paid_date: '2026-01-15' } });
+
+  const [entry] = bookingOf(id);
+  assert.equal(entry.amount, -916.67, 'die Hypothekenrate verlässt den Haushalt');
+  assert.equal(entry.category, 'financial_other');
+  assert.equal(entry.subcategory, 'loans_interest');
+  assert.equal(categoryType(entry.category), 'expense',
+    'Vorzeichen und Kategorietyp müssen zusammenpassen, sonst steht eine Ausgabe unter einer income-Kategorie');
+});
+
+test('borrowed: die Rate zählt in der Monatsbilanz als Ausgabe, nicht als Einnahme', async () => {
+  const id = await createDirectedLoan({ direction: 'borrowed' });
+  await call('POST', `/loans/${id}/payments`, { as: AA, body: { installment_number: 1, amount: 500, paid_date: '2026-02-10' } });
+
+  // Dieselbe Formel wie in stats.js: der Typ hängt am Vorzeichen.
+  const totals = db.prepare(`
+    SELECT COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) AS income,
+           COALESCE(SUM(CASE WHEN amount < 0 THEN amount ELSE 0 END), 0) AS expenses
+    FROM budget_entries WHERE date BETWEEN '2026-02-01' AND '2026-02-28'
+  `).get();
+  assert.equal(totals.income, 0, 'keine Einnahme');
+  assert.equal(totals.expenses, -500);
+});
+
+test('borrowed + Fremdwährung: Kurs und Vorzeichen greifen zusammen', async () => {
+  const id = await createDirectedLoan({ direction: 'borrowed', currency: 'USD', exchange_rate: 0.92 });
+  await call('POST', `/loans/${id}/payments`, { as: AA, body: { installment_number: 1, amount: 100, paid_date: '2026-01-15' } });
+
+  const payment = db.prepare('SELECT amount FROM budget_loan_payments WHERE loan_id = ?').get(id);
+  assert.equal(payment.amount, 100, 'die Rate bleibt positiv in Darlehenswährung');
+  assert.equal(bookingOf(id)[0].amount, -92, '100 USD * 0.92, dann gespiegelt');
+});
+
+test('PUT lent -> borrowed: bereits gebuchte Raten werden mit umgebucht', async () => {
+  const id = await createDirectedLoan({ direction: 'lent' });
+  await call('POST', `/loans/${id}/payments`, { as: AA, body: { installment_number: 1, amount: 100, paid_date: '2026-01-15' } });
+  await call('POST', `/loans/${id}/payments`, { as: AA, body: { installment_number: 2, amount: 100, paid_date: '2026-02-15' } });
+  assert.deepEqual(bookingOf(id).map((e) => e.amount), [100, 100]);
+
+  const r = await call('PUT', `/loans/${id}`, { as: AA, body: { direction: 'borrowed' } });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+
+  // Der Reparaturweg für Bestandsdaten aus #638: die Migration setzt alles auf
+  // 'lent', ein Umstellen muss die falsch gebuchten Raten mitziehen.
+  const entries = bookingOf(id);
+  assert.deepEqual(entries.map((e) => e.amount), [-100, -100], 'beide Raten gespiegelt');
+  assert.ok(entries.every((e) => e.category === 'financial_other' && e.subcategory === 'loans_interest'),
+    'Kategorie zieht mit, sonst steht eine Ausgabe unter einer income-Kategorie');
+});
+
+test('PUT borrowed -> lent: Rückweg bucht ebenfalls um', async () => {
+  const id = await createDirectedLoan({ direction: 'borrowed' });
+  await call('POST', `/loans/${id}/payments`, { as: AA, body: { installment_number: 1, amount: 100, paid_date: '2026-01-15' } });
+  assert.equal(bookingOf(id)[0].amount, -100);
+
+  await call('PUT', `/loans/${id}`, { as: AA, body: { direction: 'lent' } });
+  const [entry] = bookingOf(id);
+  assert.equal(entry.amount, 100);
+  assert.equal(categoryType(entry.category), 'income');
+});
+
+test('PUT ohne direction: Richtung bleibt, Raten werden nicht angefasst', async () => {
+  const id = await createDirectedLoan({ direction: 'borrowed' });
+  await call('POST', `/loans/${id}/payments`, { as: AA, body: { installment_number: 1, amount: 100, paid_date: '2026-01-15' } });
+
+  await call('PUT', `/loans/${id}`, { as: AA, body: { notes: 'nur eine Notiz' } });
+  assert.equal(db.prepare('SELECT direction FROM budget_loans WHERE id = ?').get(id).direction, 'borrowed');
+  assert.equal(bookingOf(id)[0].amount, -100, 'ein Teil-Update darf nicht stumm zurückbuchen');
+});
+
+test('PUT über den Zins-Pfad: direction überlebt den Feldsatz', async () => {
+  const id = await createDirectedLoan({
+    direction: 'borrowed', interest_mode: 'fixed', principal: 200000, fixed_rate: 3.5, initial_repayment_rate: 2,
+  });
+  const r = await call('PUT', `/loans/${id}`, {
+    as: AA,
+    body: { interest_mode: 'fixed', principal: 200000, fixed_rate: 4, initial_repayment_rate: 2 },
+  });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(db.prepare('SELECT direction FROM budget_loans WHERE id = ?').get(id).direction, 'borrowed');
+});
+
+test('unbekannte Richtung -> 400', async () => {
+  setMode('shared');
+  const r = await call('POST', '/loans', {
+    as: AA,
+    body: { borrower: 'X', title: 'X', start_month: '2026-01', total_amount: 100, installment_count: 1, direction: 'sideways' },
+  });
+  assert.equal(r.status, 400);
+});
+
+// --------------------------------------------------------------------------
+// Konto an der Rate (#638): vorher hatte der Raten-Eintrag nie eine account_id,
+// eine Rate konnte also kein Konto belasten.
+// --------------------------------------------------------------------------
+
+test('account_id: die Rate belastet das Konto des Darlehens', async () => {
+  const acct = db.prepare(`
+    INSERT INTO budget_accounts (name, type, starting_balance, created_by) VALUES ('Giro', 'checking', 1000, ?)
+  `).run(A).lastInsertRowid;
+
+  const id = await createDirectedLoan({ direction: 'borrowed', account_id: acct });
+  await call('POST', `/loans/${id}/payments`, { as: AA, body: { installment_number: 1, amount: 250, paid_date: '2026-01-15' } });
+
+  const [entry] = bookingOf(id);
+  assert.equal(entry.account_id, acct, 'ohne Zuordnung könnte eine Rate kein Konto belasten');
+  assert.equal(entry.amount, -250);
+
+  const balance = db.prepare(`
+    SELECT starting_balance + COALESCE((SELECT SUM(amount) FROM budget_entries WHERE account_id = a.id), 0) AS v
+    FROM budget_accounts a WHERE a.id = ?
+  `).get(acct).v;
+  assert.equal(balance, 750, 'der Kontosaldo folgt der Rate');
+});
+
+test('account_id: unbekanntes Konto -> 400', async () => {
+  setMode('shared');
+  const r = await call('POST', '/loans', {
+    as: AA,
+    body: { borrower: 'X', title: 'X', start_month: '2026-01', total_amount: 100, installment_count: 1, account_id: 999999 },
+  });
+  assert.equal(r.status, 400);
+});
+
 test('teardown: Server schließen', async () => {
   await new Promise((r) => server.close(r));
 });

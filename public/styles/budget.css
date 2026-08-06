@@ -18,13 +18,15 @@
 .budget-page {
   display: flex;
   flex-direction: column;
-  height: calc(100dvh - var(--safe-area-inset-top) - var(--nav-bottom-height) - var(--safe-area-inset-bottom));
+  height: 100%;
   /* Full-bleed-Root (Issue #577): Content-Spalte über --page-inline-pad auf den
    * direkten Kindern, damit das Chrome des Kopfes bis zur Shell-Kante läuft. */
   overflow: hidden;
-  /* Freiraum am Ende jeder Scroll-Region, damit der schwebende FAB die letzte
-   * Zeile (Kategorie/Transaktion) nicht verdeckt — primär ein Mobil-Problem. */
-  --budget-fab-clearance: calc(var(--target-lg) + var(--space-6) + var(--space-4));
+  /* Der Freiraum für den FAB liegt nicht mehr hier: sieben Scroll-Regionen
+   * dieses Moduls trugen ihn als `padding-bottom: var(--budget-fab-clearance)`,
+   * einer eigenen Formel, die --nav-bottom-height nicht mitzählte und mobil
+   * deshalb zu klein war. Er kommt jetzt als Marge an .app-content
+   * (layout.css) und gilt damit bei jedem Scrollstand statt nur am Listenende. */
 }
 
 /* Inhaltsfläche unter der Monats-Nav.
@@ -56,7 +58,6 @@
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding-bottom: var(--budget-fab-clearance);
 }
 
 .budget-page--split-active #budget-prev,
@@ -67,7 +68,7 @@
 }
 
 @media (min-width: 1024px) {
-  .budget-page { height: 100dvh; }
+  .budget-page { height: 100%; }
 }
 
 /* --------------------------------------------------------
@@ -81,8 +82,8 @@
 }
 
 /* [hidden] durchsetzen: die Icon-Buttons (.btn) setzen display:flex mit gleicher
- * Spezifität wie [hidden] und blieben so trotz hidden=true sichtbar. Betrifft die
- * Monats-Pfeile, die in Tabs ohne Monatsbezug (Konten/Darlehen/…) ausgeblendet werden. */
+ * Spezifität wie [hidden] und blieben so trotz hidden=true sichtbar. Betrifft den
+ * Stepper und den Kontexttext, die sich je Tab gegenseitig ablösen. */
 .budget-nav__month [hidden] { display: none !important; }
 
 .budget-nav__label {
@@ -110,6 +111,24 @@
 .budget-nav__today:hover {
   background: color-mix(in srgb, var(--module-accent, var(--color-accent)) 9%, transparent);
   border-color: var(--module-accent, var(--color-accent));
+}
+
+/* Kontexttext für Tabs ohne Zeitbezug: hält den Kopf-Slot besetzt, ohne sich als
+ * Bedienelement anzubieten. Bewusst leiser als das Monatslabel - er beantwortet
+ * eine Frage („welcher Zeitraum gilt hier?"), er stellt keine. */
+.budget-nav__note {
+  flex: 1;
+  text-align: center;
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+/* Ohne Stepper trägt der Slot nur diesen Text und schrumpfte auf dessen Breite -
+ * der Kontext klebte dann am Titel, statt dort zu stehen, wo auf den anderen
+ * Tabs der Monat steht. `:has()` fragt den Zustand ab, statt eine zweite Klasse
+ * zu verlangen, die das JS synchron halten müsste. */
+.budget-nav__month:has(.budget-nav__note:not([hidden])) {
+  flex: 1 1 0;
 }
 
 .budget-tabs {
@@ -161,6 +180,52 @@
   white-space: nowrap;
 }
 
+/* Erwartete, noch nicht bestätigte Buchung (#637). Teilt die Pillen-Grammatik
+ * des Haushalt-Badges, färbt aber in der Warn-Rolle: die Zeile steht in der
+ * Liste, zählt aber in keiner Summe mit, und dieser Unterschied darf nicht auf
+ * derselben Farbe liegen wie eine bloße Zuordnung. */
+.budget-badge--pending {
+  display: inline-block;
+  vertical-align: middle;
+  margin-inline-start: var(--space-1);
+  padding: var(--space-px) var(--space-2);
+  border-radius: var(--radius-full);
+  font-size: var(--text-2xs);
+  font-weight: var(--font-weight-semibold);
+  line-height: 1.5;
+  color: color-mix(in srgb, var(--color-warning) 72%, var(--color-text-primary));
+  background: color-mix(in srgb, var(--color-warning) 14%, transparent);
+  white-space: nowrap;
+}
+
+/* Der Betrag einer erwarteten Buchung wird zurückgenommen: er ist eine Ansage,
+ * keine Tatsache. Nur der Betrag - Titel und Datum bleiben voll lesbar, sonst
+ * wäre die Zeile schwerer zu erfassen als die daneben. */
+.budget-entry--pending .budget-entry__amount {
+  opacity: 0.65;
+}
+
+.budget-entry--pending .budget-entry__indicator {
+  background: repeating-linear-gradient(
+    135deg,
+    var(--color-warning) 0,
+    var(--color-warning) var(--space-1),
+    transparent var(--space-1),
+    transparent var(--space-2)
+  );
+}
+
+/* Was diesen Monat noch aussteht, direkt unter den Karten - die Zahl fehlt in
+ * allen dreien. */
+.budget-pending-note {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
 /* Scroll-Affordance der Tab-Leiste: geteilte has-fade-*-Masken aus
  * filter-chip.css, verdrahtet via wireScrollFade (utils/ux.js, Audit F-06). */
 
@@ -195,37 +260,49 @@
   }
 }
 
+/* --------------------------------------------------------
+ * Panel-Baustein: die Fläche, auf der jeder Untertab rendert.
+ *
+ * Vorher setzte jeder Tab Padding und Scroll-Achse selbst: drei Padding-Werte
+ * (0 / 12px / 16px) und drei Scroll-Achsen (hidden / visible / auto) über sieben
+ * Tabs (Critique 2026-07-30, P0). Beides gehört zur Fläche, nicht zum Inhalt -
+ * hier steht es einmal. Abweichungen sind benannte Modifier, keine stillen
+ * Sonderregeln auf einzelnen Tabs.
+ * -------------------------------------------------------- */
 .budget-tab-panel {
   flex: 1;
   min-height: 0;
+  overflow-y: auto;
+  padding-block-start: var(--space-3);
 }
 
+/* Der Budget-Tab hält seine eigene Scroll-Region: Zusammenfassung und
+ * Kategoriebalken bleiben stehen, nur die Transaktionsliste scrollt. Das Panel
+ * selbst scrollt deshalb nicht, und sein Abstand kommt aus .budget-summary-bar. */
 .budget-tab-panel--budget {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  padding-block-start: 0;
 }
 
-.budget-tab-panel--loans {
-  overflow-y: auto;
-  padding-top: var(--space-3);
-  padding-bottom: var(--budget-fab-clearance);
-}
-
-.budget-tab-panel--subscriptions {
-  overflow-y: auto;
-  padding-bottom: var(--budget-fab-clearance);
+/* Lesespalte für formularartige Tabs (Plan). Als Modifier statt als stille
+ * max-width auf einem einzigen Tab: so ist die Ausnahme benannt und für den
+ * nächsten Formular-Tab wiederverwendbar. */
+.budget-panel--reading {
+  max-width: 640px;
+  margin-inline: auto;
+  width: 100%;
 }
 
 /* --------------------------------------------------------
- * Konten (#495)
+ * Kopfleiste des Panels.
+ *
+ * Vier Klassennamen für dieselbe Rolle (budget-list-header,
+ * budget-accounts__header, subscriptions-toolbar, budget-loans__header) waren
+ * vier Gelegenheiten, sie unterschiedlich zu bauen. Eine Klasse, ein Verhalten.
  * -------------------------------------------------------- */
-.budget-tab-panel--accounts {
-  overflow-y: auto;
-  padding-block: var(--space-3) var(--budget-fab-clearance);
-}
-
-.budget-accounts__header {
+.budget-panel-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -234,12 +311,86 @@
   margin-bottom: var(--space-4);
 }
 
-.budget-accounts__header-actions {
+.budget-panel-head__actions {
   display: flex;
   align-items: center;
   gap: var(--space-2);
   flex-wrap: wrap;
 }
+
+/* Sektionsüberschrift des Panels. Eine Auszeichnung für alle Tabs statt der
+ * bisherigen sechs (__eyebrow, __section-title, blankes h2, blankes h3, span).
+ * Größe, Gewicht, Laufweite und Versalsatz kommen aus der app-weiten
+ * Eyebrow-Klasse in typography.css - hier steht nur die Farbe. */
+.budget-panel-head__title {
+  color: var(--color-text-secondary);
+}
+
+/* --------------------------------------------------------
+ * Umschalter-Leiste des Moduls
+ *
+ * EINE Optik für jede Leiste, die zwischen wenigen Zuständen umschaltet:
+ * Zeitraum (Berichte), Darlehensstatus, Gruppenstatus, Kontofarbe. Vorher waren
+ * es vier Optiken - getönte Kapsel, eckig gefülltes Rechteck in gerundetem
+ * Container, weiße Kachel, umrandete Pille -, sodass derselbe Zustand pro Tab
+ * anders aussah (Critique 2026-07-30, P1). Extrahiert aus dem Statistik-
+ * Umschalter, der sauberste der vier.
+ *
+ * Das Touch-Maß kommt aus --target-base (44px Zeiger / 48px Finger); die
+ * abgelösten Leisten lagen bei 40px bzw. 28px Höhe.
+ * -------------------------------------------------------- */
+.budget-segmented {
+  display: inline-flex;
+  gap: var(--space-1);
+  padding: var(--space-0h);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-2);
+}
+
+.budget-segmented__item {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  min-height: var(--target-base);
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  font-weight: var(--font-weight-medium);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color var(--transition-fast), color var(--transition-fast);
+}
+
+.budget-segmented__item:hover:not(.is-active) {
+  color: var(--color-text-primary);
+}
+
+/* Erhabene Kachel statt Vollton-Akzent: der aktive Zustand muss sich vom
+ * Primärbutton daneben unterscheiden, sonst liest er sich als Aktion. */
+.budget-segmented__item.is-active {
+  background: var(--color-surface);
+  color: var(--color-text-primary);
+  box-shadow: var(--shadow-sm);
+}
+
+.budget-segmented__item i {
+  width: 14px;
+  height: 14px;
+}
+
+.budget-segmented__item:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
+}
+
+/* --------------------------------------------------------
+ * Konten (#495)
+ * -------------------------------------------------------- */
 
 .budget-accounts__toggle {
   display: inline-flex;
@@ -256,28 +407,10 @@
 }
 
 .budget-accounts__toggle:hover { color: var(--color-text-primary); background: var(--color-surface-hover); }
-.budget-accounts__toggle:focus-visible { outline: 2px solid var(--module-accent); outline-offset: 2px; }
+.budget-accounts__toggle:focus-visible { outline: var(--focus-ring-width) solid var(--focus-ring-color); outline-offset: var(--focus-ring-offset); }
 
-.budget-networth {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
-
-.budget-networth__label {
-  font-size: var(--text-xs);
-  color: var(--color-text-secondary);
-  text-transform: uppercase;
-  letter-spacing: var(--tracking-label);
-}
-
-.budget-networth__amount {
-  font-size: var(--text-xl);
-  font-weight: 700;
-}
-
-.budget-networth--positive .budget-networth__amount { color: var(--color-success); }
-.budget-networth--negative .budget-networth__amount { color: var(--color-danger); }
+/* .budget-networth ist entfallen: das Nettovermögen ist jetzt eine
+ * .budget-summary-card wie jede andere Kennzahl im Modul. */
 
 .budget-accounts__list {
   display: grid;
@@ -323,20 +456,29 @@
 
 .budget-account__main:hover { background: var(--color-surface-hover); }
 .budget-account__main:active { background: var(--color-surface-hover); }
+/* AUSNAHME vom Fokusring-Token: die Zeile trägt die Farbe IHRES Kontos, nicht
+ * die des Moduls - das ist die Information, die sie transportiert. Nur die
+ * Farbe weicht ab, Breite und Offset kommen aus den Tokens. */
 .budget-account__main:focus-visible {
-  outline: 2px solid var(--account-accent);
-  outline-offset: -2px;
+  --focus-ring-color: var(--account-accent);
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset-inset);
 }
 
+/* Konto-Kachel: dieselbe Regel wie beim Abo-Monogramm — die Kontofarbe trägt
+ * Fläche und Rahmen, das Icon kommt aus dem Text-Token. Vorher kamen Icon und
+ * Grund aus derselben Nutzerfarbe; das Verhältnis hing damit an der Datenlage
+ * und fiel bei hellen Kontofarben unter die 3:1 für nicht-textuelle Inhalte. */
 .budget-account__icon {
   display: grid;
   place-items: center;
   flex: 0 0 auto;
   width: 40px;
   height: 40px;
+  border: 1px solid color-mix(in srgb, var(--account-accent) 45%, transparent);
   border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--account-accent) 14%, transparent);
-  color: var(--account-accent);
+  color: var(--color-text-primary);
 }
 
 .budget-account__body {
@@ -375,6 +517,17 @@
 .budget-account__type {
   font-size: var(--text-xs);
   color: var(--color-text-secondary);
+}
+
+/* Bank und verfügbarer Rahmen einer Kreditkarte (#541). Einzeilig mit Ellipse:
+   ein langer Herausgebername darf die Karte nicht in die Höhe ziehen. */
+.budget-account__meta {
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 
 .budget-account__figures {
@@ -421,7 +574,8 @@
 }
 
 .budget-account__edit:hover { color: var(--account-accent); background: var(--color-surface-hover); }
-.budget-account__edit:focus-visible { outline: 2px solid var(--account-accent); outline-offset: -2px; }
+/* AUSNAHME wie .budget-account__main: Konto-Farbe statt Modul-Akzent. */
+.budget-account__edit:focus-visible { --focus-ring-color: var(--account-accent); outline: var(--focus-ring-width) solid var(--focus-ring-color); outline-offset: var(--focus-ring-offset-inset); }
 
 .budget-entry__account {
   display: inline-flex;
@@ -447,7 +601,7 @@
 }
 
 .budget-account-chip:hover { background: color-mix(in srgb, var(--module-accent) 20%, transparent); }
-.budget-account-chip:focus-visible { outline: 2px solid var(--module-accent); outline-offset: 2px; }
+.budget-account-chip:focus-visible { outline: var(--focus-ring-width) solid var(--focus-ring-color); outline-offset: var(--focus-ring-offset); }
 
 /* Farbwahl im Konto-Modal */
 .budget-color-picker {
@@ -467,7 +621,11 @@
 }
 
 .budget-color-swatch:hover { transform: scale(1.1); }
-.budget-color-swatch:focus-visible { outline: 2px solid var(--color-text-primary); outline-offset: 2px; }
+/* AUSNAHME vom Fokusring-Token: die Swatch IST eine beliebige Farbe, auch der
+ * Modulakzent selbst. Ein Ring im Akzent wäre auf genau der Swatch unsichtbar,
+ * die gerade gewählt werden soll - deshalb der Textkontrast, der gegen jeden
+ * Untergrund steht. */
+.budget-color-swatch:focus-visible { --focus-ring-color: var(--color-text-primary); outline: var(--focus-ring-width) solid var(--focus-ring-color); outline-offset: var(--focus-ring-offset); }
 .budget-color-swatch.is-active {
   border-color: var(--color-text-primary);
   box-shadow: 0 0 0 2px var(--color-surface-elevated), 0 0 0 4px var(--swatch);
@@ -479,11 +637,14 @@
 /* Horizontal bewusst ohne eigenen Wert: die Content-Spalte liegt bereits auf
  * #budget-body. Ein zusätzliches --space-4 hier addierte sich darauf und stellte
  * die Karten 16px neben den Kopf-Titel (Issue #577). */
+/* Die Kennzahl-Zeile. Die Kartenzahl kommt über --summary-cards, damit alle
+ * Untertabs dieselbe Zeile benutzen können statt je ein eigenes Raster:
+ * Budget 3, Abos 4, Aufteilen 3, „Nur Ausgaben" 1. */
 .budget-summary {
   display: grid;
-  /* Immer eine Dreier-Zeile: der frühere Mobil-Stapel (3 volle Karten,
+  /* Immer eine volle Zeile: der frühere Mobil-Stapel (3 volle Karten,
    * ~600px) schob jeden Inhalt unter den Fold (Audit A2-06). */
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(var(--summary-cards, 3), minmax(0, 1fr));
   gap: var(--space-2);
   padding-block: var(--space-3);
   flex-shrink: 0;
@@ -492,7 +653,18 @@
 /* „Nur Ausgaben" (#504): die einzelne Ausgaben-Karte trägt die volle Breite,
    statt in einer 1/3-Spalte eingeklemmt zu bleiben. */
 .budget-summary--expenses-only {
-  grid-template-columns: 1fr;
+  --summary-cards: 1;
+}
+
+/* Vierer-Zeile (Abos). */
+.budget-summary--quad { --summary-cards: 4; }
+
+/* Vier Karten passen auf schmalen Containern nicht nebeneinander (unter ~170px
+ * je Karte bricht jedes Label). Zwei mal zwei statt einer gequetschten Zeile.
+ * Container- statt Viewport-Query: die ausgeklappte Sidebar zieht rund 345px ab,
+ * eine Media-Query bei 720px hielte die Zeile dort fälschlich vierspaltig. */
+@container budget-page (max-width: 719px) {
+  .budget-summary--quad { --summary-cards: 2; }
 }
 
 /* Anzeige-Umschalter über der Zusammenfassung. Der Toggle steht rechtsbündig,
@@ -532,8 +704,8 @@
 }
 
 .budget-expenses-toggle:focus-visible {
-  outline: 2px solid var(--module-accent, var(--color-accent));
-  outline-offset: 2px;
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
 }
 
 @container budget-page (min-width: 480px) {
@@ -542,15 +714,30 @@
   }
 }
 
+/* Die Kennzahlkarte des Moduls. EINE Bauart für alle sieben Untertabs.
+ *
+ * Vorher gab es fünf (budget, subscriptions, split-expenses, Nettovermögen,
+ * Darlehensstatistik) - die Kennzahlzeile ist das Erste, was auf jedem Tab
+ * gelesen wird, und fünf Bauarten hießen fünfmal neu lernen, wo die Zahl steht
+ * (Critique 2026-07-30, P0).
+ *
+ * Linksbündig statt zentriert: die Mehrheit der abgelösten Varianten war es
+ * bereits, lange Labels und Fußnoten brechen sauberer, und in einer Reihe
+ * beginnt jede Zahl an derselben x-Position - bei Geld ein echter Lesevorteil. */
 .budget-summary-card {
   /* Arbeitsfläche = opak (Brief: Glass bleibt den Overlays/Modals vorbehalten,
-   * Inhalt muss auf einen Blick lesbar sein). */
+   * Inhalt muss auf einen Blick lesbar sein). Gilt modulweit: subscriptions.css
+   * und split-expenses.css hatten hier Glass und widersprachen damit dieser
+   * Zeile im selben Modul. */
   background-color: var(--color-surface);
   border: 1px solid var(--color-border-subtle);
   border-radius: var(--radius-glass-card);
   padding: var(--space-3);
   box-shadow: var(--shadow-sm);
-  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-0h);
+  min-width: 0;
   position: relative;
 }
 
@@ -570,14 +757,21 @@
 
 .budget-summary-card__label,
 .budget-summary-card__amount,
-.budget-summary-card__trend {
+.budget-summary-card__trend,
+.budget-summary-card__note,
+.budget-summary-card__progress {
   position: relative;
   z-index: 1;
 }
 
+/* Größe, Gewicht und Versalsatz kommen aus der geteilten Eyebrow-Klasse in
+ * typography.css - hier stehen nur Farbe und Umbruchverhalten. */
 .budget-summary-card__label {
   color: var(--color-text-secondary);
-  margin-bottom: var(--space-1);
+  /* min-width:0 + Umbruch: „Nächstes Fälligkeitsdatum" und die längeren
+   * Übersetzungen sprengen sonst die schmalste Spalte der Vierer-Zeile. */
+  min-width: 0;
+  overflow-wrap: break-word;
 }
 
 .budget-summary-card__amount {
@@ -585,6 +779,53 @@
   font-weight: var(--font-weight-bold);
   font-variant-numeric: tabular-nums;
 }
+
+/* Fußnote unter dem Betrag: „7 aktiv", „121% des Budgets genutzt", „EUR".
+ * Löst die frühere <small>-Sonderbehandlung in subscriptions.css ab. */
+.budget-summary-card__note {
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
+.budget-summary-card__note--danger { color: var(--color-danger); }
+
+/* Fortschritt in der Karte (Monatsbudget der Abos). Der Balken ist der
+ * Zweitkanal zur Zahl, nicht ihr Ersatz - über 100% färbt er sich um, statt
+ * stumm bei voller Breite stehen zu bleiben. */
+.budget-summary-card__progress {
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--color-surface-2);
+  overflow: hidden;
+  margin-top: var(--space-1);
+}
+
+/* Füllstand über --fill (0..1) als transform, nicht als width: eine Breiten-
+ * Animation wirft bei jedem Renderdurchlauf das Layout neu. Der Parent clippt
+ * die Ecken, der Balken braucht deshalb keinen eigenen Radius. */
+.budget-summary-card__progress > span {
+  display: block;
+  height: 100%;
+  width: 100%;
+  transform: scaleX(var(--fill, 0));
+  transform-origin: left center;
+  background: var(--module-accent, var(--color-accent));
+  transition: transform var(--transition-base);
+}
+
+.budget-summary-card__progress--over > span { background: var(--color-danger); }
+
+@media (prefers-reduced-motion: reduce) {
+  .budget-summary-card__progress > span { transition: none; }
+}
+
+/* Tonwerte aus utils/money.js: der Formatierer entscheidet Vorzeichen und Farbe
+ * gemeinsam und liefert die passende Modifier-Klasse gleich mit. */
+.budget-summary-card--positive .budget-summary-card__amount { color: var(--color-success); }
+.budget-summary-card--negative .budget-summary-card__amount { color: var(--color-danger); }
+.budget-summary-card--neutral  .budget-summary-card__amount { color: var(--color-text-primary); }
 
 .budget-summary-card--income   .budget-summary-card__amount { color: var(--color-success); }
 .budget-summary-card--expenses .budget-summary-card__amount { color: var(--color-danger);  }
@@ -597,12 +838,9 @@
 
 .budget-summary-card__trend {
   font-size: var(--text-xs);
-  margin-top: var(--space-1);
-  /* Icon und Text bilden eine zentrierte Zeile: der Karteninhalt ist zentriert,
-   * ein reines Inline-Icon würde sonst an den linken Kartenrand rutschen. */
+  /* Icon und Text bilden eine Zeile an der Fluchtlinie von Label und Betrag. */
   display: flex;
   align-items: center;
-  justify-content: center;
   gap: var(--space-1);
 }
 
@@ -701,17 +939,18 @@
 /* --------------------------------------------------------
  * Empréstimos
  * -------------------------------------------------------- */
+/* Sub-Page-Wrapper ohne eigene Kartenfläche: der Darlehen-Tab rahmte sich als
+ * einzige der sieben Tabs komplett als Karte ein. Seit die Kennzahlen echte
+ * .budget-summary-card sind, wären das Karten in einer Karte - und der Tab
+ * setzte sich beim Wechsel als anderer Ort ab (Critique 2026-07-30, P0). */
 .budget-loans {
-  margin: 0 var(--space-4) var(--space-3);
-  padding: var(--space-3);
-  background-color: var(--color-surface);
-  border: 1px solid var(--color-border-subtle);
-  border-radius: var(--radius-glass-card);
-  box-shadow: var(--shadow-sm);
+  margin-bottom: var(--space-3);
   flex-shrink: 0;
 }
 
-.budget-loans__header,
+/* .budget-loans__header trägt jetzt .budget-panel-head (geteilte Panel-
+ * Kopfleiste). Hier bleibt nur die Kartenfußzeile, die dieselbe Anordnung
+ * braucht, aber eine andere Rolle hat. */
 .budget-loan-card__footer {
   display: flex;
   align-items: center;
@@ -719,13 +958,8 @@
   gap: var(--space-3);
 }
 
-.budget-loans__eyebrow {
-  font-size: var(--text-sm);
-  font-weight: var(--font-weight-semibold);
-  color: var(--color-text-secondary);
-  text-transform: uppercase;
-  letter-spacing: var(--tracking-label);
-}
+/* .budget-loans__eyebrow ist entfallen: die Sektionsüberschrift ist jetzt
+ * .budget-panel-head__title und gilt für alle Tabs. */
 
 .budget-loans__summary {
   font-size: var(--text-sm);
@@ -733,54 +967,15 @@
   margin-top: var(--space-0h);
 }
 
-.budget-loans__filters {
-  display: flex;
-  gap: var(--space-1);
-  padding: var(--space-0h);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface-2);
-}
+/* .budget-loans__filter* ist entfallen: der Statusfilter läuft jetzt über den
+ * geteilten .budget-segmented-Baustein. Die eigene Optik war die auffälligste
+ * der vier - ein eckig mit Vollton-Akzent gefülltes Rechteck in einem gerundeten
+ * Container, das sich wie ein Rendering-Fehler las statt wie ein Zustand.
+ * .budget-loans__filters bleibt nur als Verdrahtungs-Hook im Markup. */
 
-.budget-loans__filter {
-  min-height: var(--target-lg);
-  padding: 0 var(--space-2);
-  border: 0;
-  border-radius: var(--radius-xs);
-  background: transparent;
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  font-size: var(--text-xs);
-  font-weight: var(--font-weight-medium);
-}
+/* .budget-loans__stats ist entfallen: die Darlehenskennzahlen laufen jetzt über
+ * die geteilte .budget-summary-Zeile wie in jedem anderen Untertab. */
 
-.budget-loans__filter i {
-  width: 14px;
-  height: 14px;
-  margin-right: var(--space-1);
-  vertical-align: -2px;
-}
-
-.budget-loans__filter--active {
-  background: var(--module-accent, var(--color-accent));
-  color: var(--color-ink-on-vivid);
-}
-
-.budget-loans__stats {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: var(--space-2);
-  margin-top: var(--space-3);
-}
-
-.budget-loans__stats > div {
-  min-width: 0;
-  padding: var(--space-2);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface-2);
-}
-
-.budget-loans__stats span,
 .budget-loan-card__amounts span,
 .budget-loan-card__meta,
 .budget-loan-card__footer > span {
@@ -789,7 +984,6 @@
   color: var(--color-text-secondary);
 }
 
-.budget-loans__stats strong,
 .budget-loan-card__amounts strong {
   display: block;
   font-size: var(--text-base);
@@ -842,7 +1036,10 @@
 
 .budget-loan-card:hover {
   border-color: var(--module-accent, var(--color-accent));
-  background-color: var(--glass-bg-card-hover);
+  /* Opak wie jede Arbeitsfläche im Modul - dieselbe Regel, die
+   * .tasks-page .task-card:hover und .contacts-page .contact-item:hover in
+   * glass.css schon länger befolgen. */
+  background-color: var(--color-surface-raised);
 }
 
 .budget-loan-card__main {
@@ -976,7 +1173,11 @@
   text-align: right;
 }
 
-.loan-report__hero {
+/* Der Darlehensbericht existiert ausschliesslich als Modal-Inhalt
+ * (openLoanReport -> openSharedModal). Über .modal-panel gescopt, damit der
+ * Selektor sagt, wo er lebt: Glass ist hier legitim, weil es ein Overlay ist,
+ * und der Guard „Arbeitsflächen sind opak" liest das am Selektor ab. */
+.modal-panel .loan-report__hero {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -1004,7 +1205,7 @@
 
 .loan-report__status--active {
   background: var(--color-info);
-  color: var(--color-text-on-accent);
+  color: var(--color-ink-on-vivid);
 }
 
 .loan-report__status--paid {
@@ -1043,10 +1244,6 @@
   .budget-loan-card__footer {
     align-items: stretch;
     flex-direction: column;
-  }
-
-  .budget-loans__stats {
-    grid-template-columns: 1fr;
   }
 
   .budget-loan-card {
@@ -1127,7 +1324,6 @@
   min-height: 0;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
-  padding-bottom: var(--budget-fab-clearance);
 }
 
 .budget-list,
@@ -1169,12 +1365,16 @@
 }
 
 .budget-entry:hover {
-  background-color: var(--glass-bg-card-hover);
+  /* Datenzeile, also opak - dieselbe Regel, die .tasks-page .task-card:hover,
+   * .shopping-page .shopping-item:hover und .contacts-page .contact-item:hover
+   * in glass.css schon befolgen. Das Budget-Modul war davon bisher nicht
+   * erfasst (Critique 2026-07-30). */
+  background-color: var(--color-surface-raised);
 }
 
 .budget-entry:focus-visible {
-  outline: 2px solid var(--module-accent);
-  outline-offset: -2px;
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset-inset);
 }
 
 .budget-entry__indicator {
@@ -1235,7 +1435,6 @@
   .budget-tab-panel--budget {
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
-    padding-bottom: var(--budget-fab-clearance);
   }
 
   .budget-tab-panel--budget .budget-list-section,
@@ -1297,7 +1496,8 @@
 }
 
 .modal-panel .js-entry-field[hidden],
-.modal-panel #bm-loan-fields[hidden] {
+.modal-panel #bm-loan-fields[hidden],
+.modal-panel #am-credit-fields[hidden] {
   display: none !important;
 }
 
@@ -1369,13 +1569,10 @@
 /* --------------------------------------------------------
  * Statistik-Tab (Task 10)
  * -------------------------------------------------------- */
-.budget-stats__controls { display:flex; flex-wrap:wrap; gap:var(--space-3); align-items:center; justify-content:space-between; margin-bottom:var(--space-4); }
-.budget-stats__ranges { display:inline-flex; gap:var(--space-1); background:var(--color-surface-2); border-radius:var(--radius-md); padding:var(--space-1); }
-.budget-stats__range { border:none; background:transparent; color:var(--color-text-secondary); font-size:var(--text-sm); padding:var(--space-1) var(--space-3); min-height:var(--target-md); border-radius:var(--radius-sm); cursor:pointer; }
-.budget-stats__range.is-active { background:var(--color-surface); color:var(--color-text-primary); box-shadow:var(--shadow-sm); }
-.budget-stats__range:focus-visible { outline:2px solid var(--active-module-accent, var(--color-accent)); outline-offset:2px; }
-.budget-stats__stepper { display:inline-flex; align-items:center; gap:var(--space-2); }
-.budget-stats__period { font-size:var(--text-sm); color:var(--color-text-secondary); }
+/* .budget-stats__range* und __stepper/__period sind entfallen: die Auflösung
+ * läuft über .budget-segmented (aus genau dieser Leiste extrahiert), der
+ * Zeitraum über den geteilten Kopf-Stepper des Moduls. */
+.budget-stats__controls { display:flex; flex-wrap:wrap; gap:var(--space-3); align-items:center; margin-bottom:var(--space-4); }
 .budget-stats__trend { width:100%; height:auto; display:block; }
 
 /* Achsenbeschriftung der Trendkurve: Skalen-Maximum oben, Zeitraumgrenzen unten.
@@ -1433,8 +1630,8 @@
 }
 .budget-stats__point.is-active::after { opacity:0.55; }
 .budget-stats__point:focus-visible {
-  outline:2px solid var(--active-module-accent, var(--color-accent));
-  outline-offset:-2px;
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset-inset);
   border-radius:var(--radius-sm);
 }
 .budget-stats__readout {
@@ -1477,18 +1674,12 @@
 /* --------------------------------------------------------
  * Budgetplan (geplantes/geschätztes Budget, #468)
  * -------------------------------------------------------- */
-.budget-tab-panel--plan {
-  overflow-y: auto;
-  padding-block: var(--space-4) var(--budget-fab-clearance);
-}
-
+/* Padding und Scroll-Achse kommen aus .budget-tab-panel; die Lesespalte trägt
+ * jetzt der benannte Modifier .budget-panel--reading am selben Element. */
 .budget-plan {
   display: flex;
   flex-direction: column;
   gap: var(--space-5);
-  max-width: 640px;
-  margin: 0 auto;
-  width: 100%;
 }
 
 /* Sparziel-Karte */
@@ -1509,8 +1700,8 @@
 }
 .budget-plan-savings:hover { box-shadow: var(--shadow-md); transform: translateY(-1px); }
 .budget-plan-savings:focus-visible {
-  outline: 2px solid var(--module-accent, var(--color-accent));
-  outline-offset: 2px;
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
 }
 .budget-plan-savings--tone-under { --plan-tone-color: var(--color-success); }
 .budget-plan-savings--tone-near  { --plan-tone-color: var(--color-warning); }
@@ -1604,8 +1795,8 @@
 }
 .budget-plan-row:hover { box-shadow: var(--shadow-sm); border-color: var(--color-border); }
 .budget-plan-row:focus-visible {
-  outline: 2px solid var(--module-accent, var(--color-accent));
-  outline-offset: 2px;
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
 }
 .budget-plan-row--tone-near { --plan-tone-color: var(--color-warning); }
 .budget-plan-row--tone-over { --plan-tone-color: var(--color-danger);  }

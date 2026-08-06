@@ -12,8 +12,11 @@ services:
       - ${BACKUP_DIR:-./backups}:/backups
       # Drop Yuvomi modules into ./modules, or set MODULES_DIR=/path/to/modules.
       - ${MODULES_DIR:-./modules}:/app/modules
-      # Optional local documents folder: mount a host directory to /documents inside the container
-      - ${DOCUMENT_STORAGE_LOCAL_DIR:-./documents}:/documents
+      # Optional local documents folder. BOTH ends come from the .env: the app
+      # writes to DOCUMENT_STORAGE_LOCAL_PATH, so mounting at a fixed /documents
+      # would send uploads into the container layer as soon as anyone changes
+      # that path - and they would be gone on the next pull && up -d.
+      - ${DOCUMENT_STORAGE_LOCAL_DIR:-./documents}:${DOCUMENT_STORAGE_LOCAL_PATH:-/documents}
     env_file:
       - .env
     environment:

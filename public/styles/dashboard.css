@@ -607,9 +607,12 @@
   box-shadow: var(--shadow-xs);
 }
 
+/* AUSNAHME vom Fokusring-Token: der Slot trägt die Farbe seines Mahlzeit-Typs,
+ * die ihn auf der Übersicht überhaupt erst unterscheidbar macht. */
 .meal-slot:focus-visible {
-  outline: 2px solid var(--slot-color, var(--color-accent));
-  outline-offset: 2px;
+  --focus-ring-color: var(--slot-color, var(--color-accent));
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
 }
 
 /* Meal-Typ-Farben aus tokens.css */
@@ -1045,6 +1048,50 @@ svg.weather-forecast__icon {
   opacity: 0.85;
 }
 
+/* ── Uhr (#651) ──────────────────────────────────────────────────────────
+ * Gebaut für den Fall, der sie erst nötig macht: ein Wandtablet ohne
+ * Systemleiste, aus mehreren Metern Abstand gelesen. Die Zeit skaliert
+ * deshalb mit der Kachelbreite (cqw im bestehenden `dashboard-widget`-
+ * Container) statt auf einer festen Größe zu stehen - „variabel in der Größe"
+ * ist der Kern des Wunsches. Die Obergrenze hängt an der Zeilenzahl, nicht an
+ * der Breite: eine einzeilige Kachel ist mindestens 132px hoch, eine Ziffer
+ * von 6.5rem risse Zeit und Datum darin auseinander. */
+.clock-widget {
+  --clock-time-max: var(--text-5xl);
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  padding: var(--space-4);
+  text-align: center;
+}
+
+.widget-size--1x2 > .clock-widget,
+.widget-size--2x2 > .clock-widget,
+.widget-size--1x3 > .clock-widget,
+.widget-size--2x3 > .clock-widget,
+.widget-size--1x4 > .clock-widget,
+.widget-size--2x4 > .clock-widget {
+  --clock-time-max: var(--text-6xl);
+}
+
+.clock-widget__time {
+  /* tabular-nums: sonst wandert die Uhr bei jedem Minutenwechsel seitlich,
+     weil proportionale Ziffern unterschiedlich breit sind. */
+  font-variant-numeric: tabular-nums;
+  font-size: clamp(var(--text-3xl), 18cqw, var(--clock-time-max));
+  font-weight: var(--font-weight-semibold);
+  line-height: 1;
+  letter-spacing: var(--tracking-tight);
+  color: var(--color-text-primary);
+}
+
+.clock-widget__date {
+  margin: 0;
+  font-size: clamp(var(--text-xs), 4cqw, var(--text-lg));
+  color: var(--color-text-secondary);
+  text-wrap: balance;
+}
+
 /* Tiny weather keeps the current conditions readable instead of forcing
  * forecast rows into a 1x1 tile. */
 .widget-size--1x1 > .weather-widget .weather-widget__meta,
@@ -1261,8 +1308,13 @@ svg.weather-forecast__icon {
   align-items: center;
   justify-content: center;
   cursor: pointer;
+  /* Zwei Bewegungen teilten sich hier eine Kurve, obwohl sie Gegensätzliches
+     verlangen. Der Grundzustand gehört dem Druck-Feedback (:active): das muss
+     unmittelbar antworten, und eine Feder ließe den Knopf beim Loslassen über
+     seine Ausgangsgröße hinausschießen. Die Feder sitzt jetzt dort, wo sie
+     etwas aussagt - an der Drehung zum X (siehe .fab-main--open). */
   transition:
-    transform 350ms cubic-bezier(0.34, 1.56, 0.64, 1),
+    transform var(--duration-2xs) ease-out,
     background-color var(--transition-fast);
   border: none;
   flex-shrink: 0;
@@ -1286,6 +1338,10 @@ svg.weather-forecast__icon {
 
 .fab-main--open {
   transform: rotate(45deg);
+  /* Plus wird zum X: hier ist das Nachfedern die Aussage, nicht Zierrat - sie
+     quittiert den Zustandswechsel. Über das Token statt als Literal, damit die
+     Kurve eine benannte Entscheidung bleibt (tokens.css §g). */
+  transition: transform var(--transition-glass);
   background-color: var(--neutral-600);
 }
 
@@ -1381,8 +1437,8 @@ svg.weather-forecast__icon {
 }
 
 .fab-action:focus-visible .fab-action__btn {
-  outline: 2px solid var(--active-module-accent, var(--color-accent));
-  outline-offset: 2px;
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
 }
 
 /* --------------------------------------------------------
@@ -1432,8 +1488,8 @@ svg.weather-forecast__icon {
 }
 
 .widget-restore-chip:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 2px;
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
 }
 
 .widget-restore-chip__icon {
@@ -2191,8 +2247,8 @@ svg.weather-forecast__icon {
 }
 
 .widget-size-btn:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 2px;
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
 }
 
 /* Edit-Mode-Controls sind auf dem Desktop bewusst kompakt (40px = --target-md,

@@ -15,7 +15,7 @@
 .notes-page {
   display: flex;
   flex-direction: column;
-  height: calc(100dvh - var(--safe-area-inset-top) - var(--nav-bottom-height) - var(--safe-area-inset-bottom));
+  height: 100%;
   /* Full-bleed-Root (Issue #577): die Content-Spalte entsteht über
    * --page-inline-pad auf den direkten Kindern, damit der Akzentstreifen des
    * Kopfes bis zur Shell-Kante läuft statt in der Fläche zu enden. */
@@ -51,7 +51,7 @@
 }
 
 @media (min-width: 1024px) {
-  .notes-page { height: 100dvh; }
+  .notes-page { height: 100%; }
 }
 
 /* --------------------------------------------------------

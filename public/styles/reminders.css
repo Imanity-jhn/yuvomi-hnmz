@@ -17,7 +17,10 @@
   padding: 0 var(--space-1);
   border-radius: var(--radius-full, 9999px);
   background: var(--color-priority-urgent);
-  color: var(--color-text-on-accent);
+  /* Dieselbe Falle wie beim Akzent: --color-priority-urgent ist im Light ein
+   * tiefes Rot, im Dark ein helles Rosé. Weiss trug dort 1,90:1 auf der Zahl
+   * im Badge. */
+  color: var(--color-ink-on-vivid);
   font-size: var(--text-xs);
   font-weight: var(--font-weight-bold);
   line-height: 18px;

@@ -15,7 +15,7 @@
  *   → bypassCacheUntil (in-memory + Cache API für SW-Restart-Robustheit)
  */
 
-const APP_RELEASE   = '1.59.0';
+const APP_RELEASE   = '1.87.0';
 const SHELL_CACHE   = `yuvomi-shell-${APP_RELEASE}`;
 const PAGES_CACHE   = `yuvomi-pages-${APP_RELEASE}`;
 const LOCALES_CACHE = `yuvomi-locales-${APP_RELEASE}`;
@@ -63,7 +63,61 @@ const APP_SHELL = [
   '/styles/settings.css',
   '/styles/recipes.css',
   '/styles/pantry.css',
+  '/styles/detail-view.css',
   '/components/yuvomi-install-prompt.js',
+  // Geteilte Module. Sie werden von Shell UND Seitenmodulen importiert und
+  // müssen deshalb zusammen mit der Shell erneuert werden: der Browser bindet
+  // ein einmal geladenes Modul für die Lebensdauer des Dokuments, ein neues
+  // Seitenmodul träfe sonst auf die alte Fassung (#616). Sortierung wie im
+  // Dateisystem; Fetch-Routing für diese Pfade → SHELL_CACHE (isMutableAppResource).
+  '/nav-icons.js',
+  '/permissions.js',
+  '/components/detail-view.js',
+  '/components/document-attach.js',
+  '/components/modal.js',
+  '/components/user-multi-select.js',
+  '/utils/birthday-event.js',
+  '/utils/category-labels.js',
+  '/utils/color.js',
+  '/utils/contact-name.js',
+  '/utils/contrast.js',
+  '/utils/date.js',
+  '/utils/document-preview.js',
+  '/utils/empty-state.js',
+  '/utils/fab.js',
+  '/utils/health-activity.js',
+  '/utils/health-cycle.js',
+  '/utils/health-labs.js',
+  '/utils/health-meds.js',
+  '/utils/health-overview.js',
+  '/utils/health-tabs.js',
+  '/utils/health-vitals.js',
+  '/utils/help.js',
+  '/utils/html.js',
+  '/utils/ingredient-row.js',
+  '/utils/kitchen-tabs.js',
+  '/utils/kitchen-transfer.js',
+  '/utils/money.js',
+  '/utils/page-search.js',
+  '/utils/pantry-locations.js',
+  '/utils/pantry-status.js',
+  '/utils/pantry-units.js',
+  '/utils/phone.js',
+  '/utils/popover-menu.js',
+  '/utils/pwa-install.js',
+  '/utils/recipe-meal-types.js',
+  '/utils/recipe-to-meal.js',
+  '/utils/recurrence-scope.js',
+  '/utils/reminder-offset.js',
+  '/utils/scroll-restore.js',
+  '/utils/shopping-categories.js',
+  '/utils/skeleton.js',
+  '/utils/sub-tabs.js',
+  '/utils/sync-target.js',
+  '/utils/tablist.js',
+  '/utils/ux.js',
+  '/utils/vcard.js',
+  '/utils/version.js',
   '/offline.html',
   '/manifest.json',
   '/favicon.ico',
@@ -83,6 +137,7 @@ const APP_LOCALES = [
   '/locales/en.json',
   '/locales/es.json',
   '/locales/fa.json',
+  '/locales/fil.json',
   '/locales/fr.json',
   '/locales/hi.json',
   '/locales/hu.json',
@@ -119,7 +174,12 @@ const PAGE_MODULES = [
   '/pages/login.js',
   '/pages/recipes.js',
   '/pages/pantry.js',
+  '/pages/budget-plans.js',
+  '/pages/budget-stats.js',
+  '/pages/split-expenses.js',
+  '/pages/subscriptions.js',
   '/components/category-manager.js',
+  '/components/tag-manager.js',
   '/utils/sortable.js',
   '/vendor/sortablejs/sortable.esm.min.js',
   // libphonenumber-js: lazy im Kontaktmodul, aber vorab gecacht → Telefon-
@@ -130,6 +190,11 @@ const PAGE_MODULES = [
   '/settings/shell.js',
   '/settings/components.js',
   '/settings/module-order.js',
+  '/settings/cron-label.js',
+  '/settings/currency.js',
+  '/settings/preferences-cache.js',
+  '/settings/region-presets.js',
+  '/settings/weather-location.js',
   '/settings/pages/personal-account.js',
   '/settings/pages/personal-appearance.js',
   '/settings/pages/personal-device.js',
@@ -151,6 +216,10 @@ const PAGE_MODULES = [
   '/settings/pages/admin-weather.js',
   '/settings/pages/admin-system.js',
 ];
+
+// Routing-Nachschlag für den fetch-Handler: hält Precache-Liste und
+// Cache-Zuordnung an einer Quelle (siehe Kommentar im PAGES_CACHE-Zweig).
+const PAGE_MODULE_SET = new Set(PAGE_MODULES);
 
 // --------------------------------------------------------
 // Bypass-Flag: nach SW-Update einmalig alles frisch vom Netz laden.
@@ -304,17 +373,17 @@ function dispatchFetch(request, url) {
   }
 
   // Lazy geladene Seiten-Module liegen in PAGES_CACHE. Neben /pages/ gehören dazu
-  // die Settings-Leaves unter /settings/, die Kategorie-Manager-Komponente sowie
-  // der lazy nachgeladene Sortable-Wrapper und sein Vendor-Bundle — ohne diesen
-  // Zweig würden sie via SHELL_CACHE bedient und offline (vor dem ersten Online-
-  // Besuch) als index.html statt als JS-Modul ausgeliefert.
+  // die Settings-Leaves unter /settings/ sowie einzelne lazy nachgeladene Module
+  // (Kategorie-Manager, Sortable-Wrapper samt Vendor-Bundle, libphonenumber) -
+  // ohne diesen Zweig würden sie via SHELL_CACHE bedient und offline (vor dem
+  // ersten Online-Besuch) als index.html statt als JS-Modul ausgeliefert.
+  // Die Einzelfälle kommen aus PAGE_MODULES selbst statt aus einer zweiten,
+  // von Hand gepflegten Aufzählung: sonst driftet das Routing vom Precache ab
+  // und ein neu aufgenommenes Modul liegt im falschen Cache.
   if (
     url.pathname.startsWith('/pages/') ||
     url.pathname.startsWith('/settings/') ||
-    url.pathname === '/components/category-manager.js' ||
-    url.pathname === '/utils/sortable.js' ||
-    url.pathname === '/vendor/sortablejs/sortable.esm.min.js' ||
-    url.pathname.startsWith('/vendor/libphonenumber/')
+    PAGE_MODULE_SET.has(url.pathname)
   ) {
     return networkFirst(request, PAGES_CACHE);
   }

@@ -54,6 +54,12 @@
  */
 .kitchen-list {
   flex: 1;
+  /* Ohne min-height: 0 schrumpft ein Flex-Item nicht unter seine Inhaltshöhe -
+   * die Liste blieb so hoch wie ihre Zeilen (1500px im Vorrat), statt auf den
+   * verfügbaren Platz zu fallen. Sichtbar war das nicht, weil .pantry-page
+   * `overflow: hidden` trägt; die Höhe propagierte aber nach oben und machte
+   * .app-content zu einem zweiten Scroller neben der Liste. */
+  min-height: 0;
   overflow-y: auto;
   /* Gruppen stapeln über gap, nicht über margin-bottom am Gruppen-Element: der
    * Einkauf trug die Marge an .item-category, der Vorrat das gap an der Liste -
@@ -61,22 +67,13 @@
   display: grid;
   gap: var(--space-5);
   align-content: start;
-  /* Beide Küchen-Checklisten zeigen eine Liste benannter Dinge mit einem
-   * Steuerelement am Ende und teilen deshalb das Lesemaß. Linksbündig, nicht
-   * zentriert: der Listentitel im Kopf darüber steht an derselben Kante. */
-  max-width: var(--content-max-width-narrow);
-  /* content-box, nicht das globale border-box: die Kappung soll die LESESPALTE
-   * messen, nicht die Spalte plus Polster.
-   *
-   * Sonst zahlt der Tab, der den Spalten-Träger selbst trägt, den Gutter zwei
-   * Mal: gemessen 718px im Einkauf (Träger ist #list-content darüber) gegen
-   * 654px im Vorrat und in den Rezepten (Träger ist die Liste selbst) - gleiche
-   * linke Kante bei x=252, aber 64px Unterschied an der rechten. Mit content-box
-   * ergeben beide Wege dieselbe Spalte 252..972. */
-  box-sizing: content-box;
-  /* Auslauf unter der letzten Zeile: ohne ihn liegt die Bedienung des letzten
-   * Eintrags dauerhaft unter dem FAB. */
-  padding-block-end: var(--fab-clearance);
+  /* KEIN max-width hier (mehr). Der Scroller selbst muss die volle verfügbare
+   * Breite einnehmen, sonst reicht sein eigener Trefferbereich für
+   * Mausrad-Scrollen nur bis zur Lesespalten-Kante - rechts davon (auf einem
+   * breiten Desktop-Fenster spürbar viel Fläche) griff das Rad ins Leere.
+   * Die Kappung aufs Lesemaß trägt jetzt .kitchen-rows selbst (und bei
+   * gruppierten Tabs zusätzlich .kitchen-group, siehe dort): das Kind bleibt
+   * schmal und linksbündig, der Scroller drumherum reicht bis zum Fensterrand. */
   -webkit-overflow-scrolling: touch;
 }
 
@@ -140,6 +137,10 @@
 .kitchen-group {
   display: grid;
   gap: var(--space-2);
+  /* Trägt jetzt selbst das Lesemaß (.kitchen-list ist absichtlich unbegrenzt,
+   * siehe dort) - linksbündig, nicht zentriert: der Listentitel im Kopf
+   * darüber steht an derselben Kante. */
+  max-width: var(--content-max-width-narrow);
 }
 
 /* Label-Rolle, keine Titel-Rolle: die Überschrift ordnet, sie konkurriert nicht
@@ -186,6 +187,28 @@
   border: 1px solid var(--color-border-subtle);
   border-radius: var(--radius-md);
   overflow: hidden;
+  /* Trägt das Lesemaß direkt, für den Fall, dass keine .kitchen-group darüber
+   * liegt (Rezepte: .kitchen-rows ist dort direktes Kind von .kitchen-list).
+   * Bei gruppierten Tabs kappt schon .kitchen-group - dieselbe Zahl hier ist
+   * dann redundant, aber unschädlich (verengt nichts weiter). */
+  max-width: var(--content-max-width-narrow);
+  /* Ein Grid-Item von .kitchen-list dehnt sich per Default (align-items:
+   * stretch) auf die Höhe der verfügbaren Spur, statt auf seine Inhaltshöhe zu
+   * wachsen - unschädlich, solange mehrere kurze Gruppen dieselbe Spur teilen
+   * (Einkauf/Vorrat im Normalfall). Sobald aber EINE Gruppe allein in ihrer
+   * Spur steht und mehr Zeilen hat, als in den sichtbaren Bereich passen (jede
+   * Rezepteliste: keine Gruppen, ein einziges .kitchen-rows; Vorrat unter einem
+   * Filter, der auf eine flache Liste ohne Lagerort-Gruppierung reduziert),
+   * dehnt sich die Gruppe auf die verfügbare Höhe UND schneidet den Rest über
+   * dieses `overflow: hidden` (für Eckenradien gedacht) still ab - der
+   * eigentliche Scroller (.kitchen-list) bekommt den Überlauf nie zu sehen,
+   * weil sein Kind schon vorher gekappt wurde. Gemessen an Rezepten mit 50
+   * gespiegelten Einträgen: scrollHeight 3249px, aber clientHeight 657px, kein
+   * Scrollbalken, keine Möglichkeit an die übrigen Zeilen zu kommen.
+   * `align-self: start` lässt jede Gruppe auf ihre Inhaltshöhe wachsen, sodass
+   * .kitchen-list (flex:1, overflow-y:auto) den echten Überlauf sieht und
+   * scrollt - unabhängig davon, ob sie allein oder neben anderen Gruppen steht. */
+  align-self: start;
   /* Abfragbarer Container für die Zeilen darin.
    *
    * WARUM HIER UND NICHT AN DER ZEILE: ein Container kann sich selbst nicht
@@ -282,8 +305,8 @@
 }
 
 .kitchen-row__main--interactive:focus-visible {
-  outline: 2px solid var(--module-accent);
-  outline-offset: 2px;
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
   border-radius: var(--radius-xs);
 }
 
@@ -318,6 +341,41 @@
   color: var(--color-text-secondary);
   min-width: 0;
   overflow-wrap: break-word;
+}
+
+/* --------------------------------------------------------
+   Gespiegelte VTODO-CATEGORIES einer Zeile (#586)
+   Anzeige, keine Bedienung: die Etiketten gehören der CalDAV-Quellliste.
+   Optisch leiser als der Name, damit sie die Zeile ordnen und nicht führen.
+   -------------------------------------------------------- */
+
+.kitchen-row__tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+}
+
+.item-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--space-0h) var(--space-2);
+  border: var(--space-px) solid var(--color-border-subtle);
+  border-radius: var(--radius-full);
+  background: var(--color-surface-2);
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  /* Ein sehr langer Fremd-Tag darf die Zeile nicht sprengen. */
+  max-width: 12rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Abgehakte Posten treten insgesamt zurück - die Etiketten mit. */
+.shopping-item--checked .item-tag {
+  opacity: 0.6;
 }
 
 /* --------------------------------------------------------
@@ -365,6 +423,74 @@
  *    knappen Artikeln; läge er ohne Platzhalter in der Bedienzone, wäre diese je
  *    Zeile anders breit und die Stepper stünden pro Zeile woanders.
  */
+
+/* --------------------------------------------------------
+   Sortiergriff (#678)
+
+   Erbt .row-action und bleibt damit im Maß der Bedienzone. Anders als der Griff
+   im Kategorie-Manager ist er ein echter Button: die Pfeiltasten am fokussierten
+   Griff SIND hier der Tastaturpfad, es gibt kein Auf/Ab-Paar daneben.
+   -------------------------------------------------------- */
+
+.kitchen-row__drag {
+  cursor: grab;
+  /* Ohne das übernimmt der Browser die vertikale Geste als Seiten-Scroll und der
+     Zug am Griff endet, bevor er beginnt. */
+  touch-action: none;
+
+  /* SCHMAL, ABER HOCH - wie im Kategorie-Manager (category-manager.css).
+     Als 48er-Quadrat der .row-action-Grammatik kostete der Griff auf einem
+     375px-Gerät 52px Namensbreite: „Vollkorn-Dinkelbrot mit
+     Sonnenblumenkernen" wuchs damit von zwei auf vier Zeilen (64px → 112px
+     Zeilenhöhe, gemessen 2026-08-06). Die Zieh-Achse ist vertikal, also braucht
+     der Griff seine Fläche in der Höhe, nicht in der Breite: align-self:stretch
+     nimmt die volle Zeilenhöhe als Greifzone, min-height sichert das Touch-Ziel
+     auch in der kürzesten Zeile. */
+  width: auto;
+  min-width: 0;
+  align-self: stretch;
+  min-height: var(--target-md);
+  padding-inline: var(--space-2);
+}
+
+.swipe-row.sortable-chosen .kitchen-row__drag {
+  cursor: grabbing;
+}
+
+/* Eine einzelne Zeile in einer Kategorie hat keine Reihenfolge. Der Griff
+   verschwindet dann, statt eine folgenlose Handlung anzubieten - über
+   :only-child, damit die Regel ohne Zutun des Renderers gilt (auch nach dem
+   Löschen der vorletzten Zeile, das die Liste nicht neu aufbaut). */
+.kitchen-rows > .swipe-row:only-child .kitchen-row__drag {
+  display: none;
+}
+
+/* Abgehaktes sortiert sich nicht: es steht am Ende seiner Kategorie, ein Zug
+   daran wäre folgenlos. Sichtbar bleibt der Griff trotzdem, sonst wechselte die
+   Bedienzone beim Abhaken ihre Breite. */
+.kitchen-row__drag[disabled] {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.kitchen-row__drag[disabled]:hover {
+  background: transparent;
+  color: var(--color-text-tertiary);
+}
+
+.swipe-row.sortable-ghost {
+  opacity: 0.4;
+}
+
+.swipe-row.sortable-chosen .kitchen-row {
+  background: color-mix(in srgb, var(--active-module-accent, var(--color-accent)) 10%, var(--color-surface));
+}
+
+.swipe-row.sortable-drag .kitchen-row {
+  background: var(--color-surface-elevated);
+  box-shadow: var(--shadow-md);
+  border-radius: var(--radius-glass-inner);
+}
 
 @media (prefers-reduced-motion: reduce) {
   .kitchen-row {

@@ -2,7 +2,7 @@
  * Calendar structure guard.
  *
  * Sichert die modulare Aufteilung von server/routes/calendar.js: der Orchestrator
- * muss dieselbe {Methode, Pfad}-Routentabelle wie vor dem Split ergeben (45
+ * muss dieselbe {Methode, Pfad}-Routentabelle wie vor dem Split ergeben (46
  * Routen), und die Cluster-Router müssen zusammen exakt diese Routen ergeben
  * (keine verlorene/doppelte Route). Zusätzlich wird die extern konsumierte
  * Re-Export-Fläche (__test.googleTarget, genutzt von test:google-multi) gepinnt.
@@ -15,7 +15,7 @@
  * test:caldav, test:caldav-event-target); dieser Guard pinnt nur die Struktur.
  *
  * Reihenfolge-Vertrag: Die spezifischen Pfade (/google, /apple, /subscriptions,
- * /feed, /holidays, /upcoming, /search) werden im Orchestrator vor dem CRUD-Router
+ * /feed, /holidays, /upcoming, /search, /sync-targets) werden im Orchestrator vor dem CRUD-Router
  * (mit /:id) gemountet, sonst würde /:id sie verschlucken. Dieser Guard prüft
  * zusätzlich, dass GET /:id NACH allen kollisionsgefährdeten GET-Pfaden steht.
  */
@@ -36,6 +36,7 @@ const { default: subscriptionsRouter } = await import('../server/routes/calendar
 const { default: feedRouter } = await import('../server/routes/calendar/feed.js');
 const { default: crudRouter } = await import('../server/routes/calendar/crud.js');
 const { default: caldavRouter } = await import('../server/routes/calendar/caldav.js');
+const { default: syncTargetsRouter } = await import('../server/routes/calendar/sync-targets.js');
 
 /** Sammelt geordnet alle {METHOD path}-Paare eines Express-Routers (inkl. gemounteter Sub-Router). */
 function collectRoutes(router) {
@@ -91,6 +92,8 @@ const EXPECTED = [
   'POST /feed/regenerate',
   'DELETE /feed',
   'GET /holidays',
+  // sync-targets (Auswahlliste des Event-Modals, #618)
+  'GET /sync-targets',
   // crud (/:id-Familie)
   'GET /:id',
   'POST /',
@@ -113,15 +116,16 @@ const EXPECTED = [
   'GET /caldav/reminders/status',
 ];
 
-test('Orchestrator ergibt exakt die erwartete Routentabelle (45 Routen)', () => {
+test('Orchestrator ergibt exakt die erwartete Routentabelle (46 Routen)', () => {
   const actual = collectRoutes(calendarRouter).sort();
   assert.deepEqual(actual, [...EXPECTED].sort());
-  assert.equal(actual.length, 45);
+  assert.equal(actual.length, 46);
 });
 
 test('die Cluster-Router zusammen ergeben genau die Orchestrator-Routen (keine verlorene/doppelte Route)', () => {
   const perModule = [
     readRouter, googleRouter, appleRouter, subscriptionsRouter, feedRouter, crudRouter, caldavRouter,
+    syncTargetsRouter,
   ].flatMap(collectRoutes);
   // keine Route kommt in mehr als einem Cluster-Router vor
   const seen = new Set();
@@ -138,7 +142,7 @@ test('GET /:id wird nach allen kollisionsgefährdeten GET-Pfaden gemountet', () 
   assert.ok(idxCatchAll >= 0, 'GET /:id fehlt');
   // Jede spezifische GET-Route mit genau einem Pfadsegment (die /:id verschlucken
   // könnte) muss vor GET /:id registriert sein.
-  const collisionProne = ['GET /upcoming', 'GET /search', 'GET /holidays'];
+  const collisionProne = ['GET /upcoming', 'GET /search', 'GET /holidays', 'GET /sync-targets'];
   for (const route of collisionProne) {
     const idx = ordered.indexOf(route);
     assert.ok(idx >= 0, `${route} fehlt`);

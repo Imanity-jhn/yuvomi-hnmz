@@ -4,11 +4,10 @@
  */
 
 import { api } from '/api.js';
-import { closeModal, confirmModal, openModal, advancedSection, reportFieldError } from '/components/modal.js';
+import { closeModal, confirmModal, confirmOverModal, openModal, advancedSection, reportFieldError } from '/components/modal.js';
 import {
   formatDate,
   getLocale,
-  getNumberFormat,
   isDateInputValid,
   parseDateInput,
   t,
@@ -16,6 +15,7 @@ import {
 import { esc } from '/utils/html.js';
 import { renderSkeletonList } from '/utils/skeleton.js';
 import { toLocalDateKey } from '/utils/date.js';
+import { formatMoney, amountPlaceholder, amountStep, applyAmountFormat, amountIsSavable, smallestUnitLabel } from '/utils/money.js';
 
 let state = {
   subscriptions: [],
@@ -31,9 +31,14 @@ let state = {
   user: null,
 };
 let container = null;
+// Muss mit VALID_CURRENCIES in server/routes/preferences.js übereinstimmen,
+// sonst ist die Haushaltswährung hier nicht wählbar (per Test abgesichert).
 const CURRENCIES = [
-  'AED', 'AUD', 'BRL', 'CAD', 'CHF', 'CLP', 'CNY', 'CZK', 'DKK', 'EUR', 'GBP', 'HUF',
-  'INR', 'JPY', 'KZT', 'NOK', 'PLN', 'RUB', 'SAR', 'SEK', 'TRY', 'UAH', 'USD', 'ZAR',
+  'AED', 'ARS', 'AUD', 'BBD', 'BOB', 'BRL', 'BSD', 'BZD', 'CAD', 'CHF', 'CLP',
+  'CNY', 'COP', 'CRC', 'CUP', 'CZK', 'DKK', 'DOP', 'EUR', 'GBP', 'GTQ', 'GYD',
+  'HNL', 'HTG', 'HUF', 'IDR', 'INR', 'IRR', 'JMD', 'JPY', 'KRW', 'KZT', 'MXN',
+  'MYR', 'NIO', 'NOK', 'NZD', 'PAB', 'PEN', 'PHP', 'PLN', 'PYG', 'RUB', 'SAR',
+  'SEK', 'SRD', 'TRY', 'TTD', 'UAH', 'USD', 'UYU', 'VES', 'XCD', 'ZAR',
 ];
 const DEFAULT_CATEGORY_LABELS = {
   Entertainment: 'budget.subcatSubscriptionEntertainment',
@@ -49,9 +54,13 @@ function setHtml(element, html) {
   element.insertAdjacentHTML('afterbegin', html);
 }
 
+// Format aus utils/money.js - EINE Quelle für das ganze Budget-Modul. Vorher
+// hatte jede der drei Page-Dateien einen eigenen Formatierer, sodass dieselbe
+// Zahl in zwei Untertabs verschieden geschrieben sein konnte (Critique P0).
+// Abo-Beträge tragen die Rolle `plain`: Rechnungsbeträge ohne Kontorichtung,
+// also kein Vorzeichen und keine Ampelfarbe.
 function money(amount, currency = state.summary?.base_currency || state.settings.base_currency) {
-  const value = Number(amount || 0);
-  return getNumberFormat({ style: 'currency', currency }).format(value);
+  return formatMoney(amount, currency);
 }
 
 function categoryLabel(category) {
@@ -359,29 +368,34 @@ function renderSummary() {
   const realPercentage = hasBudget ? Math.round((used / budget) * 100) : 0;
   const percentage = Math.min(100, realPercentage);
   const isOverBudget = hasBudget && summary.remaining_budget < 0;
+  // Geteilte Kennzahl-Zeile und -Karte des Budget-Moduls (budget.css). Die
+  // frühere eigene .subscriptions-summary-card war die zweite von fünf
+  // Bauarten im selben Modul (Critique 2026-07-30, P0).
+  // Rolle `plain`: Abo-Kosten sind Rechnungsbeträge ohne Kontorichtung.
   return `
-    <section class="subscriptions-summary">
-      <article class="subscriptions-summary-card">
-        <span>${t('subscriptions.monthlyCost')}</span>
-        <strong>${money(used)}</strong>
-        <small>${t('subscriptions.activeCount', { count: summary.active_count })}</small>
+    <section class="budget-summary budget-summary--quad">
+      <article class="budget-summary-card">
+        <div class="budget-summary-card__label">${t('subscriptions.monthlyCost')}</div>
+        <div class="budget-summary-card__amount">${money(used)}</div>
+        <div class="budget-summary-card__note">${t('subscriptions.activeCount', { count: summary.active_count })}</div>
       </article>
-      <article class="subscriptions-summary-card">
-        <span>${t('subscriptions.monthlyBudget')}</span>
-        <strong>${money(budget)}</strong>
-        <div class="subscriptions-budget-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percentage}" aria-valuetext="${realPercentage}%">
-          <span style="width:${percentage}%"></span>
+      <article class="budget-summary-card">
+        <div class="budget-summary-card__label">${t('subscriptions.monthlyBudget')}</div>
+        <div class="budget-summary-card__amount">${money(budget)}</div>
+        <div class="budget-summary-card__progress${isOverBudget ? ' budget-summary-card__progress--over' : ''}"
+             role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percentage}" aria-valuetext="${realPercentage}%">
+          <span style="--fill:${percentage / 100}"></span>
         </div>
       </article>
-      <article class="subscriptions-summary-card ${isOverBudget ? 'subscriptions-summary-card--danger' : ''}">
-        <span>${hasBudget ? (isOverBudget ? t('subscriptions.overBudget') : t('subscriptions.remainingBudget')) : t('subscriptions.noBudgetLimit')}</span>
-        <strong>${hasBudget ? money(Math.abs(summary.remaining_budget)) : t('subscriptions.unlimited')}</strong>
-        <small>${hasBudget ? `${realPercentage}% ${t('subscriptions.budgetUsed')}` : t('subscriptions.setBudgetHint')}</small>
+      <article class="budget-summary-card${isOverBudget ? ' budget-summary-card--negative' : ''}">
+        <div class="budget-summary-card__label">${hasBudget ? (isOverBudget ? t('subscriptions.overBudget') : t('subscriptions.remainingBudget')) : t('subscriptions.noBudgetLimit')}</div>
+        <div class="budget-summary-card__amount">${hasBudget ? money(Math.abs(summary.remaining_budget)) : t('subscriptions.unlimited')}</div>
+        <div class="budget-summary-card__note${isOverBudget ? ' budget-summary-card__note--danger' : ''}">${hasBudget ? `${realPercentage}% ${t('subscriptions.budgetUsed')}` : t('subscriptions.setBudgetHint')}</div>
       </article>
-      <article class="subscriptions-summary-card">
-        <span>${t('subscriptions.yearlyProjection')}</span>
-        <strong>${money(used * 12)}</strong>
-        <small>${summary.base_currency}</small>
+      <article class="budget-summary-card">
+        <div class="budget-summary-card__label">${t('subscriptions.yearlyProjection')}</div>
+        <div class="budget-summary-card__amount">${money(used * 12)}</div>
+        <div class="budget-summary-card__note">${esc(summary.base_currency)}</div>
       </article>
     </section>
   `;
@@ -463,7 +477,12 @@ function renderAreaChart(title, rows) {
 }
 
 function renderPieChart(title, rows) {
-  const colors = ['#6c3aed', '#0f766e', '#0969da', '#d97706', '#b91c1c', '#64748b'];
+  // Datenreihen-Tokens statt Hex-Literalen: tokens.css definiert die Serie im
+  // Dark Mode auf hellere Werte um, Literale machten das nicht mit - der Donut
+  // behielt dort seine Light-Mode-Sättigung, während der Statistik-Donut nebenan
+  // korrekt aufhellte (Critique 2026-07-30). conic-gradient und der Legenden-
+  // Hintergrund verarbeiten var() unverändert.
+  const colors = Array.from({ length: 6 }, (_, i) => `var(--chart-series-${i + 1})`);
   const total = rows.reduce((sum, row) => sum + row.amount, 0);
   let offset = 0;
   const gradient = total > 0
@@ -683,6 +702,10 @@ function wireCombobox(panel, id) {
     search.value = option.textContent.trim();
     options.forEach((item) => item.setAttribute('aria-selected', String(item === option)));
     close();
+    // Das Wertfeld ist ein verstecktes Input, das nur programmatisch gesetzt
+    // wird - ohne dieses Event erfährt niemand von der Auswahl. Die Betragsfelder
+    // hängen an der Währungs-Combobox und müssen dabei nachziehen.
+    value.dispatchEvent(new Event('change', { bubbles: true }));
   };
   const selectFromKeyboard = (option) => {
     select(option);
@@ -749,6 +772,9 @@ function wireCombobox(panel, id) {
 
 export function openSubscriptionModal(subscription = null) {
   const edit = Boolean(subscription);
+  // Jedes Abo trägt seine eigene Währung; das Betragsfeld richtet sich danach
+  // und wird beim Wechsel der Währungs-Combobox nachgezogen.
+  const formCurrency = subscription?.currency || state.settings.base_currency;
   const cycleItems = state.meta.billing_cycles.map((cycle) => ({
     value: cycle,
     label: t(`subscriptions.cycle.${cycle}`),
@@ -851,7 +877,11 @@ export function openSubscriptionModal(subscription = null) {
         <div class="subscription-form__billing-grid">
           <div class="form-group">
             <label class="form-label" for="subscription-amount">${t('subscriptions.amountLabel')}</label>
-            <input class="form-input" id="subscription-amount" type="number" min="0" step="0.01" inputmode="decimal" required value="${subscription?.amount ?? ''}">
+            <input class="form-input" id="subscription-amount" type="number"
+                   min="0"
+                   step="${amountStep(formCurrency, subscription?.amount ?? '')}"
+                   placeholder="${amountPlaceholder(formCurrency)}"
+                   inputmode="decimal" required value="${subscription?.amount ?? ''}">
           </div>
           ${comboboxMarkup({
             id: 'subscription-currency',
@@ -931,6 +961,12 @@ export function openSubscriptionModal(subscription = null) {
         }
       };
       wireCombobox(panel, 'subscription-currency');
+      // Ohne `required`: ein Abo darf 0 kosten (Gratis-Tarif, Server prüft
+      // amount >= 0), die Untergrenze bleibt also bei null statt bei einer
+      // kleinsten Einheit.
+      panel.querySelector('#subscription-currency').addEventListener('change', (event) => {
+        applyAmountFormat(panel.querySelector('#subscription-amount'), event.target.value);
+      });
       wireCombobox(panel, 'subscription-cycle');
       wireCombobox(panel, 'subscription-category');
       wireCombobox(panel, 'subscription-method');
@@ -1018,6 +1054,24 @@ async function saveSubscription(panel, existing, searchedLogoData = null) {
     }
     occurrenceCount = count;
   }
+  // Bei einem Bestandsbetrag neben dem Raster liefert amountStep "any", damit
+  // sich das vorhandene Abo überhaupt noch speichern lässt. Das gilt aber fürs
+  // ganze Feld: ohne diese Prüfung wäre aus 12,5 JPY anschliessend auch
+  // 12,555 JPY speicherbar, also mehr Bruch als die feste Schrittweite zuliess.
+  const amountInput = panel.querySelector('#subscription-amount');
+  const amountValue = Number(amountInput.value);
+  const targetCurrency = currencyInput.value.trim().toUpperCase();
+  if (!amountIsSavable(amountValue, targetCurrency, {
+    original: existing?.amount ?? null,
+    originalCurrency: existing?.currency ?? null,
+  })) {
+    reportFieldError(amountInput, t('common.amountPrecisionRequired', {
+      currency: targetCurrency,
+      step: smallestUnitLabel(targetCurrency),
+    }));
+    return;
+  }
+
   const submit = panel.querySelector('[type="submit"]');
   submit.disabled = true;
   try {
@@ -1159,7 +1213,8 @@ async function renewSubscription(subscription) {
 }
 
 async function deleteSubscription(subscription) {
-  const confirmed = await confirmModal(t('subscriptions.deleteConfirm', { name: subscription.name }), { danger: true });
+  const confirmed = await confirmModal(t('subscriptions.deleteConfirm', { name: subscription.name }),
+    { danger: true, detail: t('subscriptions.deleteConfirmDetail') });
   if (!confirmed) return;
   try {
     await api.delete(`/budget/subscriptions/${subscription.id}`);
@@ -1175,7 +1230,10 @@ async function openSettingsModal() {
     <form id="subscriptions-settings-form">
       <div class="form-group">
         <label class="form-label" for="subscriptions-budget">${t('subscriptions.monthlyBudgetLabel')}</label>
-        <input class="form-input" id="subscriptions-budget" type="number" min="0" step="0.01" value="${state.settings.monthly_budget}">
+        <input class="form-input" id="subscriptions-budget" type="number" min="0"
+               step="${amountStep(state.settings.base_currency, state.settings.monthly_budget)}"
+               placeholder="${amountPlaceholder(state.settings.base_currency)}"
+               value="${state.settings.monthly_budget}">
       </div>
       ${comboboxMarkup({
         id: 'subscriptions-base-currency',
@@ -1199,12 +1257,28 @@ async function openSettingsModal() {
     size: 'sm',
     onSave(panel) {
       wireCombobox(panel, 'subscriptions-base-currency');
+      panel.querySelector('#subscriptions-base-currency').addEventListener('change', (event) => {
+        applyAmountFormat(panel.querySelector('#subscriptions-budget'), event.target.value);
+      });
       panel.querySelector('#subscriptions-settings-cancel').addEventListener('click', closeModal);
       panel.querySelector('#subscriptions-settings-form').addEventListener('submit', async (event) => {
         event.preventDefault();
         const baseCurrency = panel.querySelector('#subscriptions-base-currency').value;
         if (!baseCurrency) {
           reportFieldError(panel.querySelector('#subscriptions-base-currency-search'), t('subscriptions.currencyRequired'));
+          return;
+        }
+        // Auch hier gilt: bei einem Bestandsbudget neben dem Raster steht das
+        // Feld auf step="any", die Prüfung muss also hier stattfinden.
+        const budgetInput = panel.querySelector('#subscriptions-budget');
+        if (!amountIsSavable(Number(budgetInput.value), baseCurrency, {
+          original: state.settings.monthly_budget ?? null,
+          originalCurrency: state.settings.base_currency ?? null,
+        })) {
+          reportFieldError(budgetInput, t('common.amountPrecisionRequired', {
+            currency: baseCurrency,
+            step: smallestUnitLabel(baseCurrency),
+          }));
           return;
         }
         try {
@@ -1406,19 +1480,31 @@ function openMetadataModal() {
           const item = state.meta[isCat ? 'categories' : 'payment_methods'].find((row) => row.id === id);
           const inUse = item?.usage_count || 0;
           const name = item ? (isCat ? categoryLabel(item) : item.name) : '';
-          // confirmModal ersetzt (kein Stacking) das Verwalten-Modal; danach neu öffnen.
-          const confirmed = await confirmModal(
+          // confirmOverModal parkt das Verwalten-Modal, statt es zu ersetzen:
+          // „Abbrechen" gibt es mitsamt Scrollposition und Fokus zurück. Nur
+          // nach echtem Löschen wird es neu aufgebaut - die Liste hat sich
+          // geändert.
+          // Der Folgentext haengt nicht daran, ob gerade ein Abo zugeordnet ist:
+          // bei einer Kategorie faellt die verknuepfte Budget-Unterkategorie in
+          // jedem Fall mit (routes/subscriptions.js). Frueher stand `detail` bei
+          // usage_count 0 auf null - dann nannte der Dialog gar keine Folge.
+          const warnung = inUse ? `${t('subscriptions.metaInUseWarning', { count: inUse })} ` : '';
+          const confirmed = await confirmOverModal(
             t(isCat ? 'subscriptions.deleteCategoryConfirm' : 'subscriptions.deletePaymentMethodConfirm', { name }),
-            { danger: true, detail: inUse ? t('subscriptions.metaInUseWarning', { count: inUse }) : null },
+            {
+              danger: true,
+              detail: isCat
+                ? `${warnung}${t('subscriptions.deleteCategoryConfirmDetail')}`
+                : `${warnung}${t('subscriptions.deletePaymentMethodConfirmDetail')}`,
+            },
           );
-          if (confirmed) {
-            try {
-              await api.delete(`/budget/subscriptions/${isCat ? 'categories' : 'payment-methods'}/${id}`);
-              await reload();
-              window.yuvomi?.showToast(t('subscriptions.metaDeletedToast'), 'success');
-            } catch (err) {
-              window.yuvomi?.showToast(err.data?.error || err.message || t('common.unknownError'), 'danger');
-            }
+          if (!confirmed) return;
+          try {
+            await api.delete(`/budget/subscriptions/${isCat ? 'categories' : 'payment-methods'}/${id}`);
+            await reload();
+            window.yuvomi?.showToast(t('subscriptions.metaDeletedToast'), 'success');
+          } catch (err) {
+            window.yuvomi?.showToast(err.data?.error || err.message || t('common.unknownError'), 'danger');
           }
           openMetadataModal();
         });

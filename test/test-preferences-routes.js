@@ -87,6 +87,7 @@ test('GET / liefert die dokumentierten Defaults', async () => {
   // Feature-Schalter default an (fehlender Wert => aktiv).
   assert.equal(body.data.health_cycle_enabled, true);
   assert.equal(body.data.rewards_require_approval, true);
+  assert.equal(body.data.tasks_subtasks_expanded, false);
 });
 
 // --------------------------------------------------------
@@ -259,6 +260,11 @@ test('PUT rewards_require_approval: Mitglied -> 403, Admin non-boolean 400, fals
   assert.equal((await put({ rewards_require_approval: false }, { role: 'member' })).status, 403);
   assert.equal((await put({ rewards_require_approval: 'no' }, { role: 'admin' })).status, 400);
   assert.equal((await put({ rewards_require_approval: false }, { role: 'admin' })).body.data.rewards_require_approval, false);
+});
+test('PUT tasks_subtasks_expanded: Mitglied -> 403, Admin non-boolean 400, true persist', async () => {
+  assert.equal((await put({ tasks_subtasks_expanded: true }, { role: 'member' })).status, 403);
+  assert.equal((await put({ tasks_subtasks_expanded: 'yes' }, { role: 'admin' })).status, 400);
+  assert.equal((await put({ tasks_subtasks_expanded: true }, { role: 'admin' })).body.data.tasks_subtasks_expanded, true);
 });
 
 // --------------------------------------------------------

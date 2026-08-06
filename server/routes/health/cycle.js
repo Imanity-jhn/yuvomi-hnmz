@@ -8,6 +8,14 @@
  *        Vorhersage-Logik (nächste Periode, Eisprung, fruchtbares Fenster) liegt
  *        bewusst rein clientseitig in public/utils/health-cycle.js - der Server
  *        speichert nur.
+ *
+ *        BEWUSSTE AUSNAHME von der Betreuung (#584): Wo Vitalwerte, Medikamente,
+ *        Laborbefunde und Aktivitäten `careAwareClause()` verwenden, bleibt es
+ *        hier bei `visibilityClause()`. Fieber messen und Medikamente geben ist
+ *        Fürsorge; das Zyklus-Tagebuch einer anderen Person mitzulesen ist es
+ *        nicht - und der Fall aus der Meldung (ein Elternteil trägt für ein Kind
+ *        ein) verlangt es an keiner Stelle. Wer den Zyklus teilen will, hat dafür
+ *        `visibility = 'family'`.
  */
 
 import express from 'express';

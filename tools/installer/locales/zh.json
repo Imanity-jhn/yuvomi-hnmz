@@ -4,7 +4,7 @@
     "continue": "继续",
     "back": "返回",
     "generate": "生成",
-    "generating": "…",
+    "generating": "生成中…",
     "optional": "可选",
     "stepCounter": "第 {{n}} 步，共 {{total}} 步",
     "toggleVisibility": "显示或隐藏值",
@@ -38,7 +38,7 @@
   },
   "weather": {
     "title": "天气小组件",
-    "subtitle": "在仪表板上显示实时天气 — 免费、无需账户、无需API密钥。",
+    "subtitle": "在仪表板上显示实时天气——免费、无需账户、无需 API 密钥。",
     "enable": "启用天气小组件",
     "latLabel": "纬度",
     "lonLabel": "经度",
@@ -48,8 +48,8 @@
     "unitsMetric": "公制 (°C)",
     "unitsImperial": "英制 (°F)",
     "errCoords": "纬度和经度为必填项。",
-    "errLat": "纬度无效（–90 至 90）。",
-    "errLon": "经度无效（–180 至 180）。"
+    "errLat": "纬度无效（-90 至 90）。",
+    "errLon": "经度无效（-180 至 180）。"
   },
   "calendar": {
     "title": "日历同步",
@@ -101,19 +101,26 @@
   "docker": {
     "title": "正在启动 Yuvomi",
     "subtitle": "正在拉取镜像并启动 Docker 容器。",
-    "starting": "正在启动容器 …",
     "elapsed": "已用时 {{n}} 秒",
     "running": "容器运行正常",
     "failed": "容器启动失败",
     "unknownError": "未知错误",
     "toAdmin": "继续进行管理员设置",
-    "retry": "重试"
+    "retry": "重试",
+    "phasePull": "正在下载镜像",
+    "phaseBoot": "容器正在启动",
+    "phaseHealth": "正在进行健康检查",
+    "firstRunHint": "首次运行可能需要几分钟。",
+    "stalled": "耗时比平常更久。下方日志会说明原因。",
+    "showLogs": "显示日志",
+    "hideLogs": "隐藏日志",
+    "timedOut": "15 分钟内没有响应。请查看日志后重试。"
   },
   "admin": {
     "title": "创建管理员账户",
     "subtitle": "设置您的首次登录。此账户拥有对 Yuvomi 的完全访问权限。",
     "userLabel": "用户名",
-    "userHint": "3–64 个字符：字母、数字、. - _",
+    "userHint": "3-64 个字符：字母、数字、. - _",
     "nameLabel": "显示名称",
     "passLabel": "密码",
     "passPlaceholder": "至少 8 个字符",
@@ -121,7 +128,7 @@
     "creating": "正在创建 …",
     "create": "创建账户",
     "errAll": "所有字段均为必填项。",
-    "errUser": "用户名格式无效（3–64 个字符，字母/数字/._-）。",
+    "errUser": "用户名格式无效（3-64 个字符，字母/数字/._-）。",
     "errPass": "密码必须至少为 8 个字符。",
     "errMatch": "两次输入的密码不一致。",
     "errCreate": "无法创建管理员账户。"
@@ -157,7 +164,7 @@
     "documentWebdav": "WebDAV 文档存储",
     "documentWebdavHint": "非空环境变量会覆盖数据库中对应的设置。",
     "documentWebdavEnable": "将新文档存储到 WebDAV",
-    "documentWebdavUrlLabel": "WebDAV URL",
+    "documentWebdavUrlLabel": "WebDAV 网址",
     "documentWebdavUsernameLabel": "用户名",
     "documentWebdavPasswordLabel": "密码",
     "documentWebdavPathLabel": "基础路径",
@@ -190,7 +197,17 @@
     "documentGoogleDriveReuseHint": "两项均留空可复用 Google 日历 OAuth 凭据。若要使用专用凭据，请在 Google Cloud Console 中创建（与日历步骤相同）。",
     "documentGoogleDriveRedirectLabel": "重定向 URI",
     "errDocumentGoogleDrivePair": "Google Drive 客户端 ID 和密钥必须同时填写或同时留空。",
-    "errDocumentGoogleDriveCredentials": "Google Drive 需要单独的客户端 ID 和密钥，或已配置的 Google 日历凭据。"
+    "errDocumentGoogleDriveCredentials": "Google Drive 需要单独的客户端 ID 和密钥，或已配置的 Google 日历凭据。",
+    "dataDirLabel": "主机数据文件夹",
+    "dataDirHint": "数据库和应用数据在服务器上的位置。留空则使用 compose 文件旁的 ./data。",
+    "documentLocalDirLabel": "主机文件夹",
+    "documentLocalDirHint": "服务器上挂载到容器中的文件夹。留空则使用 ./documents。",
+    "documentWebdavPrivateNetwork": "允许家庭网络中的 WebDAV 目标",
+    "documentWebdavPrivateNetworkHint": "连接自有网络中的 Nextcloud 时需要。会解除该目标的 SSRF 保护。",
+    "icsPrivateNetwork": "允许来自家庭网络的日历订阅",
+    "icsPrivateNetworkHint": "订阅自有网络设备的 ICS 源时需要。会解除日历订阅的 SSRF 保护。",
+    "oidcTrustEmail": "在没有 verified 声明时信任邮箱",
+    "oidcTrustEmailHint": "仅当你的提供方不发送 email_verified 且你信任它时才启用。"
   },
   "welcome": {
     "title": "欢迎使用 Yuvomi",

@@ -9,6 +9,9 @@ import { esc } from '/utils/html.js';
 import { prefersInkText } from '/utils/contrast.js';
 import { openModal, closeModal, confirmModal } from '/components/modal.js';
 import { createRetryState, toggleRowHtml } from '/settings/components.js';
+import {
+  renderUserMultiSelect, getSelectedUserIds, bindUserMultiSelect,
+} from '/components/user-multi-select.js';
 
 const FAMILY_ROLES = ['dad', 'mom', 'parent', 'child', 'grandparent', 'relative', 'other'];
 const AVATAR_COLORS = ['#007AFF', '#34C759', '#FF9500', '#FF3B30', '#AF52DE', '#FF2D55'];
@@ -208,6 +211,64 @@ function renderPage(container) {
           </div>
         </form>
       </div>
+
+      <div class="settings-card" id="invites-card">
+        <h3 class="settings-card__title">${t('settings.invites.title')}</h3>
+        <p class="form-hint">${t('settings.invites.intro')}</p>
+        <ul class="settings-members" id="invites-list"></ul>
+        <button class="btn btn--primary settings-add-btn" id="add-invite-btn" hidden>${t('settings.invites.add')}</button>
+      </div>
+
+      <div class="settings-card settings-card--hidden" id="add-invite-form-card">
+        <h3 class="settings-card__title">${t('settings.invites.submit')}</h3>
+        <form id="add-invite-form" class="settings-form">
+          <div class="form-group">
+            <label class="form-label" for="invite-username">${t('settings.usernameLabel')}</label>
+            <input class="form-input" type="text" id="invite-username" autocomplete="off" />
+            <p class="form-hint">${t('settings.invites.usernameHint')}</p>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="invite-display-name">${t('settings.displayNameLabel')}</label>
+            <input class="form-input" type="text" id="invite-display-name" maxlength="128" />
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="invite-family-role">${t('settings.familyRoleLabel')}</label>
+            <select class="form-input" id="invite-family-role">
+              ${buildFamilyRoleOptions()}
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="invite-email">${t('settings.memberEmailLabel')}</label>
+            <input class="form-input" type="email" id="invite-email" autocomplete="email" />
+          </div>
+          ${toggleRowHtml({
+            label: t('settings.invites.sendEmail'),
+            attrs: { id: 'invite-send-email' },
+          })}
+          ${toggleRowHtml({
+            label: t('settings.systemAdminLabel'),
+            attrs: { id: 'invite-system-admin' },
+          })}
+          <p class="form-hint">${t('settings.systemAdminHint')}</p>
+          <div id="invite-error" class="form-error" role="alert" hidden></div>
+          <div class="settings-form-actions">
+            <button type="submit" class="btn btn--primary">${t('settings.invites.submit')}</button>
+            <button type="button" class="btn btn--secondary" id="cancel-add-invite">${t('settings.cancelAddMember')}</button>
+          </div>
+        </form>
+        <div id="invite-link-output" class="settings-token-output" hidden>
+          <label class="form-label" for="invite-link-value">${t('settings.invites.linkTitle')}</label>
+          <div class="settings-token-output__row">
+            <input class="form-input" id="invite-link-value" type="text" readonly />
+            <button type="button" class="btn btn--secondary btn--sm" id="invite-link-copy">
+              <i data-lucide="copy" class="icon-sm" aria-hidden="true"></i>
+              ${t('settings.invites.copy')}
+            </button>
+          </div>
+          <p class="form-hint">${t('settings.invites.linkOnce')}</p>
+          <p class="form-hint" id="invite-email-note" hidden></p>
+        </div>
+      </div>
     </section>
   `);
 }
@@ -225,6 +286,190 @@ function renderMemberList(container, users, currentUserId) {
     list.insertAdjacentHTML('beforeend', users.map((u) => memberHtml(u, currentUserId)).join(''));
   }
   window.lucide?.createIcons({ el: list });
+}
+
+function inviteHtml(invite) {
+  // Eine Einladung muss weder Namen noch Adresse tragen: dann benennt sie die
+  // Familienrolle, damit die Zeile nicht namenlos in der Liste steht.
+  const roleLabel = familyRoleLabel(invite.family_role);
+  const primary = invite.display_name || invite.username || invite.email || roleLabel;
+  const meta = [
+    invite.username && invite.username !== primary ? `@${invite.username}` : '',
+    roleLabel === primary ? '' : roleLabel,
+    invite.role === 'admin' ? t('settings.systemAdminBadge') : '',
+  ].filter(Boolean).map(esc).join(' · ');
+  return `
+    <li class="settings-member" data-invite-id="${invite.id}">
+      <div class="settings-member__info">
+        <span class="settings-member__name">${esc(primary)}</span>
+        ${meta ? `<span class="settings-member__meta">${meta}</span>` : ''}
+        <span class="settings-member__meta">${esc(t('settings.invites.expires', { date: formatDate(invite.expires_at) }))}</span>
+      </div>
+      <button class="row-action row-action--danger" data-revoke-invite="${invite.id}" data-name="${esc(primary)}"
+        aria-label="${esc(primary)} ${t('settings.invites.revoke')}" title="${t('settings.invites.revoke')}">
+        <i data-lucide="trash-2" class="icon-md" aria-hidden="true"></i>
+      </button>
+    </li>
+  `;
+}
+
+function renderInviteList(container, invites) {
+  const list = container.querySelector('#invites-list');
+  if (!list) return;
+  list.replaceChildren();
+  if (!invites.length) {
+    const empty = document.createElement('p');
+    empty.className = 'form-hint';
+    empty.textContent = t('settings.invites.empty');
+    list.appendChild(empty);
+  } else {
+    list.insertAdjacentHTML('beforeend', invites.map(inviteHtml).join(''));
+  }
+  window.lucide?.createIcons({ el: list });
+}
+
+/**
+ * Kopiert den Link und meldet ehrlich, ob es geklappt hat. Ohne HTTPS gibt es
+ * navigator.clipboard gar nicht - dann bleibt das markierte Feld plus der alte
+ * execCommand-Weg, und genau das ist der Normalfall einer selbstgehosteten
+ * Instanz im Heimnetz.
+ */
+async function copyInviteLink(input) {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(input.value);
+      return true;
+    } catch { /* auf den Auswahl-Weg zurückfallen */ }
+  }
+  try {
+    input.focus();
+    input.select();
+    return document.execCommand('copy');
+  } catch {
+    return false;
+  }
+}
+
+function bindInviteEvents(container, initialInvites) {
+  const card = container.querySelector('#add-invite-form-card');
+  const form = container.querySelector('#add-invite-form');
+  const list = container.querySelector('#invites-list');
+  const addBtn = container.querySelector('#add-invite-btn');
+  if (!card || !form || !list || !addBtn) return;
+
+  let invites = [...initialInvites];
+  const output = container.querySelector('#invite-link-output');
+  const outputValue = container.querySelector('#invite-link-value');
+  const emailNote = container.querySelector('#invite-email-note');
+  const errorEl = container.querySelector('#invite-error');
+
+  addBtn.hidden = false;
+  addBtn.addEventListener('click', () => {
+    card.classList.remove('settings-card--hidden');
+    addBtn.hidden = true;
+    container.querySelector('#invite-username')?.focus();
+  });
+
+  container.querySelector('#cancel-add-invite')?.addEventListener('click', () => {
+    card.classList.add('settings-card--hidden');
+    addBtn.hidden = false;
+    form.reset();
+    errorEl.hidden = true;
+    output.hidden = true;
+  });
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    errorEl.hidden = true;
+    output.hidden = true;
+    const sendEmail = container.querySelector('#invite-send-email')?.checked === true;
+    const payload = {
+      username: container.querySelector('#invite-username').value.trim(),
+      display_name: container.querySelector('#invite-display-name').value.trim(),
+      email: container.querySelector('#invite-email').value.trim(),
+      family_role: container.querySelector('#invite-family-role').value,
+      system_admin: container.querySelector('#invite-system-admin')?.checked === true,
+      send_email: sendEmail,
+    };
+
+    const btn = form.querySelector('[type=submit]');
+    btn.disabled = true;
+    try {
+      const res = await auth.createInvite(payload);
+      invites.unshift(res.data.invite);
+      renderInviteList(container, invites);
+      form.reset();
+      // Der Klartext-Token kommt nur aus dieser einen Antwort. Die Karte bleibt
+      // deshalb offen: würde sie sich wie beim Mitglied-Anlegen schließen, wäre
+      // der Link im selben Moment weg, in dem er entsteht.
+      outputValue.value = `${window.location.origin}/join?token=${encodeURIComponent(res.data.token)}`;
+      output.hidden = false;
+      if (sendEmail) {
+        emailNote.textContent = res.data.email_sent
+          ? t('settings.invites.emailSent')
+          : t('settings.invites.emailNotSent');
+        emailNote.hidden = false;
+      } else {
+        emailNote.hidden = true;
+      }
+      window.lucide?.createIcons({ el: output });
+      outputValue.focus();
+      outputValue.select();
+      window.yuvomi?.showToast(t('settings.invites.created'), 'success');
+    } catch (err) {
+      showError(errorEl, err.message);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  container.querySelector('#invite-link-copy')?.addEventListener('click', async () => {
+    if (!outputValue.value) return;
+    const copied = await copyInviteLink(outputValue);
+    window.yuvomi?.showToast(
+      copied ? t('settings.invites.copied') : t('settings.invites.copyFailed'),
+      copied ? 'success' : 'danger',
+    );
+  });
+
+  list.addEventListener('click', async (event) => {
+    const btn = event.target.closest('[data-revoke-invite]');
+    if (!btn) return;
+    const id = Number(btn.dataset.revokeInvite);
+    if (!await confirmModal(t('settings.invites.revokeConfirm'), {
+      danger: true,
+      confirmLabel: t('settings.invites.revoke'),
+      detail: t('settings.invites.revokeConfirmDetail'),
+    })) return;
+    try {
+      await auth.revokeInvite(id);
+      invites = invites.filter((i) => i.id !== id);
+      renderInviteList(container, invites);
+      window.yuvomi?.showToast(t('settings.invites.revoked'), 'default');
+    } catch (err) {
+      window.yuvomi?.showToast(err.message || t('common.errorGeneric'), 'danger');
+    }
+  });
+}
+
+async function loadInvites(container) {
+  const list = container.querySelector('#invites-list');
+  if (!list) return;
+
+  let invites;
+  try {
+    const res = await auth.getInvites();
+    invites = res.data?.invites ?? [];
+  } catch (err) {
+    list.replaceChildren(createRetryState({
+      message: err.message || t('common.errorGeneric'),
+      onRetry: () => loadInvites(container),
+    }));
+    return;
+  }
+
+  renderInviteList(container, invites);
+  bindInviteEvents(container, invites);
 }
 
 function bindDeleteButtons(container) {
@@ -267,8 +512,24 @@ function bindEditButtons(container, currentUser, users) {
   });
 }
 
-function openEditMemberModal(member, currentUser, users, container) {
+/**
+ * Betreuende einer Person laden (#584). `null` heißt "nicht ermittelbar" und ist
+ * absichtlich von "niemand" unterschieden: bei einem Ladefehler blendet das
+ * Modal das Feld aus und rührt die gespeicherte Betreuung beim Speichern nicht
+ * an - ein leer gerendertes Feld würde sie sonst kommentarlos entziehen.
+ */
+async function loadCaregiverIds(memberId) {
+  try {
+    const res = await api.get('/health/caregivers');
+    return res?.data?.[memberId] ?? [];
+  } catch {
+    return null;
+  }
+}
+
+async function openEditMemberModal(member, currentUser, users, container) {
   const state = { avatarData: member.avatar_data ?? null };
+  const caregiverIds = await loadCaregiverIds(member.id);
   openModal({
     title: t('settings.editMemberTitle'),
     size: 'md',
@@ -299,6 +560,16 @@ function openEditMemberModal(member, currentUser, users, container) {
             ${buildFamilyRoleOptions(member.family_role)}
           </select>
         </div>
+        ${caregiverIds === null ? '' : `
+        <div class="form-group">
+          ${renderUserMultiSelect(
+            users.filter((u) => u.id !== member.id),
+            caregiverIds,
+            'member_caregivers',
+            'settings.healthCaregiversLabel',
+          )}
+          <p class="form-hint">${t('settings.healthCaregiversHint')}</p>
+        </div>`}
         <div class="modal-grid modal-grid--2">
           <div class="form-group">
             <label class="form-label" for="edit-member-phone">${t('settings.memberPhoneLabel')}</label>
@@ -366,6 +637,8 @@ function openEditMemberModal(member, currentUser, users, container) {
         });
       });
 
+      if (caregiverIds !== null) bindUserMultiSelect(panel, 'member_caregivers');
+
       panel.querySelector('#edit-member-cancel')?.addEventListener('click', closeModal);
       panel.querySelector('#edit-member-form')?.addEventListener('submit', async (event) => {
         event.preventDefault();
@@ -392,6 +665,13 @@ function openEditMemberModal(member, currentUser, users, container) {
             birth_date: parseDateInput(birthDateRaw) || null,
             ...(newPassword ? { password: newPassword } : {}),
           });
+          // Betreuung getrennt speichern: sie lebt im Gesundheitsmodul, nicht am
+          // Nutzerdatensatz (#584).
+          if (caregiverIds !== null) {
+            await api.put(`/health/caregivers/${member.id}`, {
+              caregiver_ids: getSelectedUserIds(panel, 'member_caregivers'),
+            });
+          }
           const idx = users.findIndex((u) => u.id === member.id);
           if (idx !== -1) users[idx] = res.user;
           if (currentUser?.id === member.id) Object.assign(currentUser, res.user);
@@ -506,5 +786,6 @@ async function loadMembers(container, currentUser) {
 export async function render(container, { user } = {}) {
   renderPage(container);
   await loadMembers(container, user || {});
+  await loadInvites(container);
   window.lucide?.createIcons({ el: container });
 }

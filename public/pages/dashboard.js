@@ -207,7 +207,7 @@ function maybeHintCustomize(container) {
 // Reihenfolge = Standard-Layout. Die primären Inhalte (tasks, calendar) führen,
 // damit sie beim Wieder-Einblenden oben stehen; das einzige passive Widget
 // (weather) steht bewusst am Ende, statt die sichtbare Grid-Spitze zu belegen.
-const WIDGET_IDS = ['tasks', 'calendar', 'meals', 'shopping', 'birthdays', 'budget', 'rewards', 'health', 'cycle', 'housekeeping', 'family', 'notes', 'weather'];
+const WIDGET_IDS = ['tasks', 'calendar', 'meals', 'shopping', 'birthdays', 'budget', 'rewards', 'health', 'cycle', 'housekeeping', 'family', 'notes', 'weather', 'clock'];
 
 // Vier kuratierte Formen statt sechs: über vier Auswahlmöglichkeiten pro Widget
 // (× bis zu 12 Widgets) kippt der Anpassen-Modus in Mikro-Entscheidungs-Overhead
@@ -248,7 +248,9 @@ function defaultWidgetSize(id) {
   // Zeile nicht per grid-auto ragged nachwächst (Critique P4). Budget stapelt
   // Saldo + Sparen + Einnahme/Ausgabe + Top-Ausgabe → 1×2.
   if (['tasks', 'calendar', 'rewards', 'budget'].includes(id)) return '1x2';
-  if (['weather', 'shopping', 'health', 'cycle', 'meals'].includes(id)) return '2x1';
+  // Die Uhr startet breit statt quadratisch: Uhrzeit und darunter der ausgeschriebene
+  // Wochentag brauchen Zeile, nicht Höhe - auf 1x1 bräche das Datum um (#651).
+  if (['weather', 'shopping', 'health', 'cycle', 'meals', 'clock'].includes(id)) return '2x1';
   if (id === 'notes') return '2x1';
   return '1x1';
 }
@@ -263,7 +265,10 @@ const COCKPIT_COVERED_WIDGETS = new Set(['tasks', 'calendar', 'shopping', 'meals
 // spezialisiert und nicht in jedem Haushalt aktiv — sie erscheinen als Opt-in im
 // „Anpassen"-Panel, statt frische Dashboards mit leeren Kacheln zu überladen
 // (PRODUCT.md: „Power wird auf Abruf enthüllt, nicht in einem Raster ausgebreitet").
-const DEFAULT_HIDDEN_WIDGETS = new Set([...COCKPIT_COVERED_WIDGETS, 'rewards', 'health', 'cycle', 'housekeeping']);
+// `clock` kommt dazu: auf einem Gerät mit Statusleiste ist eine zweite Uhr
+// Doppelung. Ihren Zweck erfüllt sie am Wandtablet ohne Systemleiste (#651) -
+// das ist ein bewusster Aufbau, kein Standardfall.
+const DEFAULT_HIDDEN_WIDGETS = new Set([...COCKPIT_COVERED_WIDGETS, 'rewards', 'health', 'cycle', 'housekeeping', 'clock']);
 
 function defaultWidgetVisible(id) {
   return !DEFAULT_HIDDEN_WIDGETS.has(id);
@@ -360,12 +365,13 @@ function widgetLabel(id) {
     cycle:    () => t('health.cycle.title'),
     housekeeping: () => t('nav.housekeeping'),
     family:   () => t('dashboard.familyMembers'),
+    clock:    () => t('dashboard.clock'),
   };
   return (map[id] ?? (() => id))();
 }
 
 function widgetIcon(id) {
-  const map = { tasks: 'check-square', calendar: 'calendar', birthdays: 'cake', budget: 'wallet', rewards: 'award', health: 'heart-pulse', cycle: 'calendar-heart', housekeeping: 'paintbrush', family: 'users', shopping: 'shopping-cart', meals: 'utensils', notes: 'pin', weather: 'cloud-sun' };
+  const map = { tasks: 'check-square', calendar: 'calendar', birthdays: 'cake', budget: 'wallet', rewards: 'award', health: 'heart-pulse', cycle: 'calendar-heart', housekeeping: 'paintbrush', family: 'users', shopping: 'shopping-cart', meals: 'utensils', notes: 'pin', weather: 'cloud-sun', clock: 'clock' };
   return map[id] ?? 'layout-dashboard';
 }
 
@@ -1323,6 +1329,7 @@ function renderDashboardLayout(cfg, data, weather, currency, { editing = false, 
     notes: () => renderPinnedNotes(data.pinnedNotes ?? []),
     shopping: () => renderShoppingLists(data.shoppingLists ?? []),
     weather: () => (weather ? renderWeatherWidget(weather) : ''),
+    clock: () => renderClockWidget(),
   };
 
   const tiles = cfg
@@ -1545,6 +1552,72 @@ function renderWeatherWidget(weather) {
         ${forecast.length ? `<div class="weather-forecast">${forecastHtml}</div>` : ''}
       </div>
     </div>`;
+}
+
+// --------------------------------------------------------
+// Uhr-Widget (#651)
+// --------------------------------------------------------
+
+/**
+ * Zeit und Datum für die Uhr. Beides folgt den Formatpräferenzen des Nutzers
+ * (12h/24h über formatTime, Datumsreihenfolge über formatDate); der Wochentag
+ * kommt aus der Locale davor, weil er auf einem Wandbildschirm die eigentliche
+ * Auskunft ist - „welcher Tag ist heute" fragt niemand nach der Ziffernfolge.
+ */
+function clockWidgetParts(now = new Date()) {
+  const weekday = new Intl.DateTimeFormat(getLocale(), { weekday: 'long' }).format(now);
+  return {
+    time: formatTime(now),
+    date: `${weekday}, ${formatDate(now)}`,
+    machineTime: `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`,
+  };
+}
+
+function renderClockWidget() {
+  const { time, date, machineTime } = clockWidgetParts();
+  return `
+    <div class="widget widget--clock clock-widget" id="clock-widget">
+      <time class="clock-widget__time" id="clock-widget-time" datetime="${esc(machineTime)}">${esc(time)}</time>
+      <p class="clock-widget__date" id="clock-widget-date">${esc(date)}</p>
+    </div>`;
+}
+
+/**
+ * Hält die Uhr aktuell. Minutentakt statt Sekunden: die Anzeige kennt keine
+ * Sekunden, ein Sekundentimer wäre 60-fache Arbeit für dasselbe Bild. Der
+ * Timeout zielt auf die nächste volle Minute, damit der Wechsel dann passiert,
+ * wenn er auch auf jeder anderen Uhr im Raum passiert.
+ *
+ * Der Ticker läuft unabhängig davon, ob das Widget gerade sichtbar ist: das
+ * Raster wird beim Anpassen neu aufgebaut, und ein Tick, der die Elemente nicht
+ * findet, kostet nichts - eine Anmeldung an jeden Umbau dagegen schon.
+ */
+function updateClockWidget(container) {
+  const timeEl = container.querySelector('#clock-widget-time');
+  if (!timeEl) return;
+  const { time, date, machineTime } = clockWidgetParts();
+  timeEl.textContent = time;
+  timeEl.setAttribute('datetime', machineTime);
+  const dateEl = container.querySelector('#clock-widget-date');
+  if (dateEl) dateEl.textContent = date;
+}
+
+function startClockTicker(container, signal) {
+  let timerId = null;
+
+  const tick = () => {
+    updateClockWidget(container);
+    schedule();
+  };
+
+  const schedule = () => {
+    const now = new Date();
+    const msToNextMinute = 60_000 - (now.getSeconds() * 1000 + now.getMilliseconds());
+    timerId = setTimeout(tick, msToNextMinute);
+  };
+
+  schedule();
+  signal.addEventListener('abort', () => clearTimeout(timerId));
 }
 
 // --------------------------------------------------------
@@ -2111,7 +2184,12 @@ export async function render(container, { user }) {
     }
     const dateEl  = container.querySelector('.dashboard-overview__date');
     if (dateEl)  dateEl.textContent = formatDate(new Date());
+    // Hintergrund-Tabs bekommen gedrosselte Timer: die Uhr könnte beim
+    // Zurückkehren Minuten nachhängen und muss sofort nachziehen (#651).
+    updateClockWidget(container);
   }, { signal: _fabController.signal });
+
+  startClockTicker(container, _fabController.signal);
 
   // 30-Minuten Auto-Refresh für Wetter (inkl. optionaler Standort-Aktualisierung)
   const refreshBtn = container.querySelector('#weather-refresh-btn');

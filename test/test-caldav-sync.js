@@ -935,3 +935,157 @@ describe('CalDAV: No-op-Syncs bleiben im Standard-Log-Level still', () => {
     }
   });
 });
+
+// --------------------------------------------------------
+// Bestandskonten: Aufgabenlisten fliegen aus der Kalenderauswahl (#617)
+// --------------------------------------------------------
+
+describe('CalDAV: eine Aufgabenliste bleibt kein Terminziel (#617)', () => {
+  const EVENT_URL = 'https://dav.example/termine/';
+  const TODO_URL  = 'https://dav.example/aufgaben/';
+
+  function buildDb() {
+    const d = new DatabaseSync(':memory:');
+    d.exec(`
+      CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, display_name TEXT);
+      INSERT INTO users (display_name) VALUES ('Owner');
+
+      CREATE TABLE caldav_accounts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT, caldav_url TEXT, username TEXT, password TEXT, last_sync TEXT
+      );
+      CREATE TABLE caldav_calendar_selection (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id INTEGER, calendar_url TEXT, calendar_name TEXT,
+        calendar_color TEXT, enabled INTEGER NOT NULL DEFAULT 1
+      );
+      CREATE TABLE external_calendars (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source TEXT NOT NULL, external_id TEXT NOT NULL, name TEXT, color TEXT,
+        default_assignee_user_id INTEGER,
+        UNIQUE(source, external_id)
+      );
+      CREATE TABLE calendar_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL, description TEXT,
+        start_datetime TEXT, end_datetime TEXT, all_day INTEGER NOT NULL DEFAULT 0,
+        location TEXT, color TEXT, recurrence_rule TEXT, tzid TEXT,
+        external_calendar_id TEXT, external_source TEXT,
+        calendar_ref_id INTEGER, created_by INTEGER,
+        user_modified INTEGER NOT NULL DEFAULT 0, assigned_to INTEGER,
+        target_caldav_account_id INTEGER, target_caldav_calendar_url TEXT,
+        outbound_dirty INTEGER NOT NULL DEFAULT 0,
+        outbound_attempts INTEGER NOT NULL DEFAULT 0,
+        outbound_move_to TEXT,
+        external_object_url TEXT
+      );
+      CREATE TABLE calendar_pending_deletions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source TEXT NOT NULL,
+        calendar_external_id TEXT NOT NULL,
+        event_external_id TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        object_url TEXT,
+        UNIQUE(source, calendar_external_id, event_external_id)
+      );
+      CREATE TABLE event_assignments (
+        event_id INTEGER, user_id INTEGER, UNIQUE(event_id, user_id)
+      );
+      CREATE TABLE calendar_event_exceptions (
+        event_id INTEGER NOT NULL, exception_date TEXT NOT NULL,
+        PRIMARY KEY (event_id, exception_date)
+      );
+
+      INSERT INTO caldav_accounts (name, caldav_url, username, password)
+        VALUES ('Radicale', 'https://dav.example/', 'u', 'p');
+      -- Beide Sammlungen aktiviert, wie ein vor dem Filter angelegtes Konto sie traegt.
+      INSERT INTO caldav_calendar_selection
+        (account_id, calendar_url, calendar_name, calendar_color, enabled)
+        VALUES (1, '${EVENT_URL}', 'Termine', '#4A90E2', 1),
+               (1, '${TODO_URL}',  'Aufgaben', '#4A90E2', 1);
+    `);
+    return d;
+  }
+
+  const client = async () => ({
+    fetchCalendars: async () => [
+      { url: EVENT_URL, displayName: 'Termine',  components: ['VEVENT'] },
+      { url: TODO_URL,  displayName: 'Aufgaben', components: ['VTODO'] },
+    ],
+    fetchCalendarObjects: async ({ calendar }) => (calendar.url === EVENT_URL ? [{
+      data: [
+        'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
+        'UID:evt-1@test', 'SUMMARY:Termin',
+        'DTSTART:20260101T100000Z', 'DTEND:20260101T110000Z',
+        'END:VEVENT', 'END:VCALENDAR',
+      ].join('\r\n'),
+    }] : []),
+    createCalendarObject: async () => ({}),
+  });
+
+  function enabledUrls(d) {
+    return d.prepare('SELECT calendar_url FROM caldav_calendar_selection WHERE enabled = 1 ORDER BY calendar_url')
+      .all().map(r => r.calendar_url);
+  }
+
+  it('nimmt eine Sammlung ohne VEVENT-Unterstuetzung aus der Auswahl', async () => {
+    // Der Filter beim Anlegen erreicht Bestandskonten nicht mehr: deren Zeilen
+    // stehen schon in der Tabelle, und bis jemand von Hand aktualisiert bliebe
+    // die Aufgabenliste ein Ziel fuer Termine.
+    const d = buildDb();
+    _setTestDatabase(d);
+    try {
+      await sync({ createClient: client });
+      assert.deepStrictEqual(enabledUrls(d), [EVENT_URL]);
+    } finally {
+      _resetTestDatabase();
+      d.close();
+    }
+  });
+
+  it('laesst die dort bereits gespiegelten Termine liegen', async () => {
+    // Abschalten heisst nicht wegwerfen: was Yuvomi frueher in die Aufgabenliste
+    // geschrieben hat, liegt weiter im Kalender des Nutzers.
+    const d = buildDb();
+    _setTestDatabase(d);
+    try {
+      d.prepare(`
+        INSERT INTO calendar_events (title, external_calendar_id, external_source, created_by)
+        VALUES ('Alter Termin aus der Aufgabenliste', ?, 'caldav', 1)
+      `).run(TODO_URL);
+
+      await sync({ createClient: client });
+
+      const row = d.prepare('SELECT title FROM calendar_events WHERE external_calendar_id = ?').get(TODO_URL);
+      assert.ok(row, 'der Prune darf eine abgeschaltete Sammlung nicht leerraeumen');
+    } finally {
+      _resetTestDatabase();
+      d.close();
+    }
+  });
+
+  it('laesst eine Sammlung in Ruhe, die keine Komponenten meldet', async () => {
+    // RFC 4791 5.2.3: ohne Angabe gilt alles als unterstuetzt. Ein strengerer
+    // Test wuerde funktionierende Setups abschalten.
+    const d = buildDb();
+    _setTestDatabase(d);
+    try {
+      const silent = async () => ({
+        fetchCalendars: async () => [
+          { url: EVENT_URL, displayName: 'Termine' },
+          { url: TODO_URL,  displayName: 'Aufgaben' },
+        ],
+        fetchCalendarObjects: async () => [],
+        createCalendarObject: async () => ({}),
+      });
+
+      await sync({ createClient: silent });
+      assert.deepStrictEqual(enabledUrls(d), [TODO_URL, EVENT_URL].sort());
+    } finally {
+      _resetTestDatabase();
+      d.close();
+    }
+  });
+});

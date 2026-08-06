@@ -8,7 +8,6 @@
 .rewards-page {
   --module-accent: var(--module-rewards);
   /* FAB-Freiraum wie im Budget: Listenende bleibt über dem FAB lesbar. */
-  --rw-fab-clearance: calc(var(--target-lg) + var(--space-6) + var(--space-4));
   /* Full-bleed-Root (Issue #577): Content-Spalte über --page-inline-pad auf den
    * direkten Kindern, damit das Chrome des Kopfes bis zur Shell-Kante läuft. */
   min-height: 100%;
@@ -33,7 +32,6 @@
    * --page-inline-pad hält ihn auf der gemeinsamen Fluchtlinie (Issue #577). */
   padding-inline: var(--page-inline-pad);
   padding-top: var(--space-6);
-  padding-bottom: var(--rw-fab-clearance);
 }
 
 /* --------------------------------------------------------
@@ -118,8 +116,8 @@
 }
 .rw-standing__id:hover .rw-standing__name { color: var(--module-accent); }
 .rw-standing__id:focus-visible {
-  outline: 2px solid var(--module-accent);
-  outline-offset: 2px;
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
 }
 .rw-standing__rank {
   flex: 0 0 auto;
@@ -320,7 +318,7 @@
 .rw-chip--active {
   background: var(--module-accent);
   border-color: var(--module-accent);
-  color: var(--color-text-on-accent);
+  color: var(--color-ink-on-vivid);
 }
 
 .rw-ledger { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }

@@ -6,6 +6,7 @@
 
 import { api } from '/api.js';
 import { openModal as openSharedModal, closeModal, advancedSection } from '/components/modal.js';
+import { openDetailView } from '/components/detail-view.js';
 import { stagger, vibrate, wireScrollFade, scheduleUndoableDelete } from '/utils/ux.js';
 import { t, formatDate } from '/i18n.js';
 import { esc } from '/utils/html.js';
@@ -15,6 +16,7 @@ import { parseVCards } from '/utils/vcard.js';
 import { composeDisplayName, contactSortKey, splitDisplayName } from '/utils/contact-name.js';
 import { getPhoneFormatter, createAsYouType, countryFromRegion } from '/utils/phone.js';
 import '/components/category-manager.js';
+import { findPageFab } from '/utils/fab.js';
 
 // --------------------------------------------------------
 // Konstanten
@@ -177,7 +179,7 @@ export async function render(container, { user }) {
     const open = e.target.closest('[data-open]');
     if (open) {
       const c = state.contacts.find((x) => x.id === parseInt(open.dataset.open, 10));
-      if (c) openContactModal({ mode: 'edit', contact: c });
+      if (c) openContactDetail(c);
     }
   });
   listEl.addEventListener('beforetoggle', onPanelBeforeToggle, true);
@@ -215,11 +217,13 @@ export async function render(container, { user }) {
   _container.querySelector('#contacts-manage-cats')
     ?.addEventListener('click', openContactCategoryManager);
 
-  // Deep-Link: ?open=<id> öffnet direkt das Edit-Modal
+  // Deep-Link: ?open=<id> öffnet die Detailansicht. Aus der globalen Suche
+  // kommend will man den Treffer zuerst sehen, nicht bearbeiten - derselbe
+  // Grund wie beim Antippen in der Liste.
   const openId = new URLSearchParams(window.location.search).get('open');
   if (openId) {
     const contact = state.contacts.find((c) => c.id === parseInt(openId, 10));
-    if (contact) openContactModal({ mode: 'edit', contact });
+    if (contact) openContactDetail(contact);
   }
 
   // Suche
@@ -249,7 +253,7 @@ export async function render(container, { user }) {
   // Neu
   const addHandler = () => openContactModal({ mode: 'create' });
   _container.querySelector('#contacts-add-btn').addEventListener('click', addHandler);
-  _container.querySelector('#fab-new-contact').addEventListener('click', addHandler);
+  findPageFab('fab-new-contact').addEventListener('click', addHandler);
 
   // Auswahl-Modus (opt-in): Toggle in der Toolbar + Aktionen in der Auswahl-Leiste.
   _container.querySelector('#contacts-select-btn').addEventListener('click', () => {
@@ -350,6 +354,7 @@ function openContactCategoryManager() {
         labelResolver: (item) => (item.label_key ? t(item.label_key) : (item.name || item.key)),
         titleKey: 'contacts.manageCategories',
         hintKey: 'category.manageHint',
+        deleteDetailKey: 'category.deleteConfirmDetail',
       });
     },
     onClose: () => manager?.removeEventListener('category-manager-changed', onChanged),
@@ -672,18 +677,263 @@ function onPanelToggle(e) {
 }
 
 // --------------------------------------------------------
+// Detailansicht
+// --------------------------------------------------------
+
+/**
+ * Mehrere antippbare Werte in einer Zeile.
+ *
+ * Bewusst eine Zeile je Gruppe statt eine je Wert: Icon und Beschriftung
+ * wiederholen sich sonst drei Mal untereinander, und der Blick verliert, wo die
+ * Telefonnummern aufhören und die Mails anfangen.
+ *
+ * Baut ausschließlich über die DOM-API - `textContent` statt Markup, damit
+ * Kontaktdaten aus CardDAV nirgends als HTML landen können.
+ */
+function contactLinksNode(entries) {
+  // Leere Gruppe → kein Knoten. detailRowEl wirft die Zeile dann selbst weg;
+  // ein leeres <div> wäre ein gültiges Element und ließe eine Zeile mit
+  // Beschriftung und ohne Wert stehen.
+  if (!entries.length) return null;
+
+  const wrap = document.createElement('div');
+  wrap.className = 'contact-detail__values';
+  entries.forEach(({ href, text, sub, phoneRaw, external }) => {
+    const line = document.createElement('div');
+    line.className = 'contact-detail__value';
+
+    const a = document.createElement('a');
+    a.className = 'contact-detail__link';
+    a.href = href;
+    a.textContent = text;
+    // enhancePhones() ersetzt danach nur den Anzeigetext; der Rohwert im href
+    // und im data-Attribut bleibt unberührt.
+    if (phoneRaw) a.dataset.phoneRaw = phoneRaw;
+    if (external) { a.target = '_blank'; a.rel = 'noopener'; }
+    line.appendChild(a);
+
+    if (sub) {
+      const s = document.createElement('span');
+      s.className = 'contact-detail__sub';
+      s.textContent = sub;
+      line.appendChild(s);
+    }
+    wrap.appendChild(line);
+  });
+  return wrap;
+}
+
+/** Strukturierte Adresse zu einer Zeile. Fehlende Teile fallen weg. */
+function formatAddress(a) {
+  if (typeof a === 'string') return a;
+  return [
+    a.street,
+    [a.postalCode, a.city].filter(Boolean).join(' '),
+    [a.state, a.country].filter(Boolean).join(', '),
+  ].filter(Boolean).join(', ');
+}
+
+// 'other' ist der neutrale Server-Default und trägt keine Information - als
+// Untertitel gelesen behauptet er eine Einordnung, die niemand vorgenommen hat.
+const mvSubLabel = (label) => (!label || label === 'other' ? '' : label);
+
+/**
+ * Die Leseansicht eines Kontakts.
+ *
+ * Führt bewusst ALLE Telefonnummern, Mails und Adressen auf, nicht nur die
+ * primären: Die Liste zeigt je genau einen Legacy-Einzelwert, ein Kontakt mit
+ * Dienst- und Mobilnummer bot also bisher nur eine davon zum Antippen an,
+ * obwohl die Zweitnummer längst gespeichert war.
+ *
+ * Organisation, Position, Website und Spitzname kommen über CardDAV herein und
+ * hatten in der App bislang überhaupt keine Anzeige - das Formular führt sie
+ * nicht. Sie stehen hier als reine Leseinformation.
+ */
+function renderContactDetail(contact) {
+  // Solange der Einzelabruf läuft, speist der Legacy-Einzelwert die Gruppe -
+  // besser eine Nummer sofort als drei nach dem Roundtrip.
+  const phones = contact.phones?.length
+    ? contact.phones
+    : (contact.phone ? [{ value: contact.phone, label: '' }] : []);
+  const emails = contact.emails?.length
+    ? contact.emails
+    : (contact.email ? [{ value: contact.email, label: '' }] : []);
+  const addresses = (contact.addresses?.length
+    ? contact.addresses.map((a) => ({ text: formatAddress(a), sub: mvSubLabel(a.label) }))
+    : (contact.address ? [{ text: contact.address, sub: '' }] : [])
+  ).filter((a) => a.text);
+
+  // Beschreibungs-Objekte, keine fertigen Zeilen: detailBodyEl schickt sie
+  // selbst durch detailRowEl und wirft dabei alles ohne Wert weg. Deshalb
+  // brauchen die Textzeilen hier keine Fallunterscheidung.
+  return [
+    {
+      icon: 'phone',
+      label: t('contacts.phoneLabel'),
+      node: contactLinksNode(phones.map((p) => ({
+        href: `tel:${p.value}`, text: p.value, sub: mvSubLabel(p.label), phoneRaw: p.value,
+      }))),
+    },
+    {
+      icon: 'mail',
+      label: t('contacts.emailLabel'),
+      node: contactLinksNode(emails.map((e) => ({
+        href: `mailto:${e.value}`, text: e.value, sub: mvSubLabel(e.label),
+      }))),
+    },
+    {
+      icon: 'map-pin',
+      label: t('contacts.addressLabel'),
+      node: contactLinksNode(addresses.map((a) => ({
+        href: `https://www.openstreetmap.org/search?query=${encodeURIComponent(a.text)}`,
+        text: a.text, sub: a.sub, external: true,
+      }))),
+    },
+    {
+      icon: 'building-2',
+      label: t('contacts.organizationLabel'),
+      value: [contact.organization, contact.job_title].filter(Boolean).join(' · '),
+    },
+    {
+      icon: 'cake',
+      label: t('contacts.birthdayLabel'),
+      value: contact.birthday ? formatDate(contact.birthday) : '',
+    },
+    {
+      icon: 'globe',
+      label: t('contacts.websiteLabel'),
+      node: contactLinksNode(contact.website
+        ? [{ href: contact.website, text: contact.website, external: true }]
+        : []),
+    },
+    { icon: 'quote',      label: t('contacts.nicknameLabel'), value: contact.nickname || '' },
+    { icon: 'folder',     label: t('contacts.categoryLabel'), value: catLabel(contact.category) || '' },
+    { icon: 'align-left', label: t('contacts.notesLabel'),    value: contact.notes || '', multiline: true },
+  ];
+}
+
+/**
+ * Antippen zeigt den Kontakt, bevor es ihn bearbeiten lässt.
+ *
+ * Kein Anker, also auch am Desktop ein zentriertes Panel: Adressen und mehrere
+ * Nummern passen nicht in die 320px eines verankerten Popovers.
+ *
+ * Die Ansicht erscheint sofort mit dem, was die Liste schon trägt; der
+ * Einzelabruf reicht Zweitnummern, Adressen und die CardDAV-Felder nach. Das
+ * `ready`-Promise sperrt solange den Wechsel ins Formular - und das ist keine
+ * Kosmetik: `buildContactForm` liest die Mehrfachwerte aus `contact.phones`
+ * und fällt ohne sie auf den Legacy-Einzelwert zurück. Ein Formular, das vor
+ * der Antwort entsteht, schriebe beim Speichern genau eine Nummer zurück und
+ * verlöre alle weiteren.
+ */
+function openContactDetail(contact) {
+  let full = contact;
+  // `view` wird weiter unten synchron zugewiesen, dieser Callback läuft
+  // frühestens im nächsten Microtask - der Optional-Chain ist trotzdem da,
+  // damit die Reihenfolge nicht stillschweigend zur Voraussetzung wird.
+  let view = null;
+  const ready = fetchFullContact(contact).then((loaded) => {
+    full = loaded;
+    if (view?.update(renderContactDetail(full))) enhanceDetailPhones();
+  });
+
+  const actions = [{
+    id: 'contact-detail-export',
+    label: t('contacts.exportLabel'),
+    variant: 'ghost',
+    icon: 'download',
+    onClick: () => window.open(`/api/v1/contacts/${contact.id}/vcard`, '_blank', 'noopener'),
+  }];
+
+  // Verknüpfte Familienmitglieder werden über die Familie verwaltet, nicht hier
+  // - die Liste blendet ihren Löschen-Eintrag aus demselben Grund aus.
+  if (!contact.family_user_id) {
+    actions.unshift({
+      id: 'contact-detail-delete',
+      label: t('common.delete'),
+      variant: 'danger-ghost',
+      icon: 'trash-2',
+      align: 'start',
+      // force + await wie überall in dieser Grammatik: Löschen entscheidet über
+      // die Eingaben mit, und das Formular bleibt beim Zurückwechseln versteckt
+      // im DOM stehen, zählt also weiter in den Dirty-Check.
+      onClick: async ({ close }) => {
+        await close({ force: true });
+        await deleteContact(contact.id);
+      },
+    });
+  }
+
+  view = openDetailView({
+    title: contact.name,
+    size: 'md',
+    sections: renderContactDetail(full),
+    actions,
+    edit: {
+      label: t('common.edit'),
+      title: t('contacts.editContact'),
+      ready,
+      mount: (panel, pane) => {
+        const form = buildContactForm({ mode: 'edit', contact: full });
+        pane.insertAdjacentHTML('beforeend', form.content);
+        form.wire(panel);
+      },
+    },
+  });
+
+  enhanceDetailPhones();
+  return view;
+}
+
+/**
+ * Nummern in der offenen Detailansicht lesbar formatieren - dieselbe
+ * AsYouType-Aufbereitung, die die Liste nutzt. Der gespeicherte Wert bleibt
+ * unberührt, ersetzt wird nur der Anzeigetext.
+ *
+ * Die Ansicht liegt ohne Anker immer im geteilten Modal-Overlay; ein Popover
+ * gäbe es nur mit `anchor`, den diese Seite bewusst nicht übergibt.
+ */
+function enhanceDetailPhones() {
+  enhancePhones(document.getElementById('shared-modal-overlay'));
+}
+
+// --------------------------------------------------------
 // Modal
 // --------------------------------------------------------
 
+/**
+ * Lädt die Felder nach, die nur der Einzelabruf führt: Mehrfach-Telefon und
+ * -Mail, Geburtstag und die CardDAV-Zusatzfelder. Die Listen-API kennt sie
+ * nicht - ohne Nachladen wären CardDAV-Zweitnummern unsichtbar (Audit R2,
+ * A2-11).
+ *
+ * Scheitert der Abruf, arbeiten Formular und Detailansicht mit den
+ * Listenfeldern weiter, statt leer dazustehen.
+ */
+async function fetchFullContact(contact) {
+  try { return (await api.get(`/contacts/${contact.id}`)).data ?? contact; }
+  catch { return contact; }
+}
+
 async function openContactModal({ mode, contact = null }) {
+  if (mode === 'edit') contact = await fetchFullContact(contact);
+  const form = buildContactForm({ mode, contact });
+  openSharedModal({ title: form.title, content: form.content, size: 'md', onSave: form.wire });
+}
+
+/**
+ * Baut Titel, Markup und Verdrahtung des Kontaktformulars in einem Stück.
+ *
+ * Eigene Funktion, weil dasselbe Formular an zwei Stellen entsteht: im
+ * regulären Modal (Neuanlage) und nachträglich gemountet im Formular-Pane der
+ * Detailansicht. Die Verdrahtung bleibt bewusst im selben Closure wie das
+ * Markup - sie liest `isEdit`, `hadStructure`, `orphanCat` und `mvRow`, und
+ * eine Trennung müsste die alle durchreichen.
+ *
+ * @returns {{title: string, content: string, wire: (panel: HTMLElement) => void}}
+ */
+function buildContactForm({ mode, contact = null }) {
   const isEdit = mode === 'edit';
-  // Telefon-/E-Mail-Mehrfachwerte und Geburtstag liefert nur der Einzelabruf;
-  // die Listen-API führt sie nicht. Ohne Nachladen wären CardDAV-Zweitnummern
-  // im Formular unsichtbar (Audit R2, A2-11).
-  if (isEdit) {
-    try { contact = (await api.get(`/contacts/${contact.id}`)).data ?? contact; }
-    catch { /* Offline/Fehler: Formular arbeitet mit den Listenfeldern weiter */ }
-  }
   const v      = (field) => esc(isEdit && contact[field] ? contact[field] : '');
 
   // Mehrwert-Zeilen: bestehende Arrays; sonst speist das Legacy-Einzelfeld die
@@ -816,11 +1066,10 @@ async function openContactModal({ mode, contact = null }) {
       </div>
     </div>`;
 
-  openSharedModal({
+  return {
     title: isEdit ? t('contacts.editContact') : t('contacts.newContact'),
     content,
-    size: 'md',
-    onSave(panel) {
+    wire(panel) {
       panel.querySelector('#cm-cancel').addEventListener('click', closeModal);
 
       // Mehrwert-Gruppen: Zeile ergänzen/entfernen (Telefon + E-Mail).
@@ -936,7 +1185,7 @@ async function openContactModal({ mode, contact = null }) {
         }
       });
     },
-  });
+  };
 }
 
 // --------------------------------------------------------

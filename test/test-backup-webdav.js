@@ -310,3 +310,52 @@ describe('WebDAV Backup — service module', async () => {
     process.env.WEBDAV_BACKUP_ENABLED = 'true';
   });
 });
+
+
+describe('env-Vorrang', () => {
+  it('behandelt leere env-Variablen als nicht gesetzt', async () => {
+    // Deploy-Descriptoren, die jede Variable von Hand aufzaehlen (Portainer,
+    // Unraid), reichen optionale Felder als LEEREN STRING durch. Der ist
+    // definiert und nicht nullish, gewann also gegen alles in der Datenbank:
+    // ein Haushalt konnte WebDAV-Backups in den Einstellungen einrichten, die
+    // UI nahm es an, und wirksam wurde nichts davon. Dasselbe Kriterium nutzt
+    // isEnvControlled() in services/email.js.
+    const keys = ['WEBDAV_BACKUP_ENABLED', 'WEBDAV_BACKUP_URL', 'WEBDAV_BACKUP_USERNAME',
+      'WEBDAV_BACKUP_PASSWORD', 'WEBDAV_BACKUP_PATH', 'WEBDAV_BACKUP_KEEP'];
+    const saved = Object.fromEntries(keys.map(k => [k, process.env[k]]));
+    for (const k of keys) process.env[k] = '';
+    try {
+      // Frischer Import: die env-Konstanten werden beim Modul-Load gelesen.
+      const mod = await import(`../server/services/backup-webdav.js?empty=${process.pid}`);
+      const cfg = mod.getConfig();
+      assert.equal(cfg.url, null, 'eine leere URL darf nicht als gesetzt gelten');
+      assert.equal(cfg.username, null);
+      assert.equal(cfg.password, null);
+      assert.equal(cfg.remotePath, '/yuvomi/backups/', 'der Default-Pfad muss greifen');
+      assert.equal(cfg.keep, 7, 'ein leeres KEEP darf nicht auf 0 fallen');
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k]; else process.env[k] = v;
+      }
+    }
+  });
+});
+
+describe('Zugangsdaten aus der Umgebung', () => {
+  it('erhaelt Leerzeichen am Rand eines Passworts', async () => {
+    // Getrimmt werden darf nur zur Erkennung "ist die Variable leer?". Wer den
+    // Wert selbst trimmt, macht aus einem gueltigen Passwort mit Rand-
+    // Leerzeichen ein ungueltiges - und das faellt erst beim naechsten Backup
+    // auf, nicht beim Speichern.
+    const saved = process.env.WEBDAV_BACKUP_PASSWORD;
+    process.env.WEBDAV_BACKUP_PASSWORD = ' pass mit rand ';
+    try {
+      const mod = await import(`../server/services/backup-webdav.js?pw=${process.pid}`);
+      assert.equal(mod.getConfig().password, ' pass mit rand ',
+        'das Passwort muss unveraendert durchgereicht werden');
+    } finally {
+      if (saved === undefined) delete process.env.WEBDAV_BACKUP_PASSWORD;
+      else process.env.WEBDAV_BACKUP_PASSWORD = saved;
+    }
+  });
+});

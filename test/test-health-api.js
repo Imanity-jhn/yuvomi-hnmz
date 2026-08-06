@@ -888,4 +888,151 @@ test('Labs: POST /results mit explizitem flag übernimmt diesen', async () => {
   assert.equal(r.body.data.flag, 'high', 'expliziter Flag überschreibt Ableitung');
 });
 
+// ========================================================
+// Betreuung: eine Person trägt für eine andere ein (#584)
+// ========================================================
+// userC ist das Kind, userA die betreuende Person. Die Beziehung wird über die
+// Admin-Route gesetzt, nicht per direktem INSERT - so deckt jeder Test hier auch
+// den Weg mit ab, über den sie im Betrieb entsteht.
+
+const userC = db.prepare(`INSERT INTO users (username, display_name, password_hash, role, family_role)
+  VALUES ('kid', 'Kid', '$2b$12$x', 'member', 'child')`).run().lastInsertRowid;
+
+function asAdmin() { session = { userId: userA, role: 'admin' }; }
+function asC() { session = { userId: userC, role: 'member' }; }
+
+test('Betreuung: nur Admins dürfen sie setzen', async () => {
+  asA();
+  const denied = await call('PUT', `/caregivers/${userC}`, { caregiver_ids: [userA] });
+  assert.equal(denied.status, 403);
+
+  asAdmin();
+  const ok = await call('PUT', `/caregivers/${userC}`, { caregiver_ids: [userA] });
+  assert.equal(ok.status, 200);
+  assert.deepEqual(ok.body.data.caregiver_ids, [userA]);
+});
+
+test('Betreuung: jede Person erfährt, für wen sie eintragen darf', async () => {
+  asA();
+  const mine = await call('GET', '/caregivers/me');
+  assert.equal(mine.status, 200);
+  assert.deepEqual(mine.body.data, [userC]);
+
+  asB();
+  const none = await call('GET', '/caregivers/me');
+  assert.deepEqual(none.body.data, [], 'ohne Betreuung eine leere Liste, kein Fehler');
+});
+
+test('Betreuung: Betreuer trägt einen Vitalwert für die betreute Person ein', async () => {
+  asA();
+  const res = await call('POST', '/vitals', {
+    type: 'temp', value_num: 39.1, unit: '°C', measured_at: '2026-08-01T20:00', user_id: userC,
+  });
+  assert.equal(res.status, 201);
+  assert.equal(res.body.data.user_id, userC, 'der Eintrag gehört dem Kind, nicht dem Elternteil');
+});
+
+// Der Kern des Wunsches: ohne Lesezugriff waere der eben eingetragene Wert fuer
+// die eintragende Person sofort unsichtbar - Schreiben allein reicht nicht.
+test('Betreuung: der eingetragene private Wert bleibt für den Betreuer sichtbar', async () => {
+  asA();
+  const list = await call('GET', `/vitals?user_id=${userC}`);
+  assert.equal(list.status, 200);
+  const temps = list.body.data.filter((r) => r.type === 'temp');
+  assert.equal(temps.length, 1);
+  assert.equal(temps[0].visibility, 'private');
+});
+
+test('Betreuung: Unbeteiligte sehen die privaten Werte weiterhin nicht', async () => {
+  asB();
+  const list = await call('GET', `/vitals?user_id=${userC}`);
+  assert.equal(list.status, 200);
+  assert.equal(list.body.data.filter((r) => r.type === 'temp').length, 0);
+});
+
+test('Betreuung: ohne Beziehung wird das Eintragen für Fremde mit 403 abgelehnt', async () => {
+  asB();
+  const res = await call('POST', '/vitals', {
+    type: 'temp', value_num: 38, unit: '°C', measured_at: '2026-08-01T21:00', user_id: userC,
+  });
+  assert.equal(res.status, 403);
+});
+
+test('Betreuung: Medikamente sind der zweite Alltagsfall aus der Meldung', async () => {
+  asA();
+  const med = await call('POST', '/medications', { name: 'Ibuprofen Saft', user_id: userC });
+  assert.equal(med.status, 201);
+  assert.equal(med.body.data.user_id, userC);
+
+  // Einnahme protokollieren: haengt am Medikament und erbt dessen Scoping.
+  const logRes = await call('POST', `/medications/${med.body.data.id}/logs`, {
+    scheduled_at: '2026-08-01T20:00', status: 'taken',
+  });
+  assert.equal(logRes.status, 201);
+});
+
+test('Betreuung: Betreuer darf einen Eintrag der betreuten Person korrigieren und löschen', async () => {
+  asA();
+  const created = await call('POST', '/vitals', {
+    type: 'weight', value_num: 30, unit: 'kg', measured_at: '2026-08-02T08:00', user_id: userC,
+  });
+  const id = created.body.data.id;
+
+  const patched = await call('PATCH', `/vitals/${id}`, { value_num: 31 });
+  assert.equal(patched.status, 200);
+  assert.equal(patched.body.data.value_num, 31);
+
+  asB();
+  const denied = await call('DELETE', `/vitals/${id}`);
+  assert.equal(denied.status, 404, 'ohne Betreuung bleibt der Eintrag unerreichbar');
+
+  asA();
+  assert.equal((await call('DELETE', `/vitals/${id}`)).status, 204);
+});
+
+// Die eine bewusste Ausnahme: Fuersorge deckt Fieber und Medikamente, nicht das
+// Zyklus-Tagebuch. Bricht dieser Test, ist cycle.js versehentlich mit umgestellt
+// worden.
+test('Betreuung: Zyklusdaten der betreuten Person bleiben verschlossen', async () => {
+  asC();
+  const own = await call('POST', '/cycle/periods', { start_date: '2026-08-01' });
+  assert.equal(own.status, 201);
+  assert.equal(own.body.data.visibility, 'private');
+
+  asA();
+  const list = await call('GET', `/cycle/periods?user_id=${userC}`);
+  assert.equal(list.status, 200);
+  assert.equal(list.body.data.length, 0, 'Betreuung öffnet den Zyklus-Tab nicht');
+});
+
+test('Betreuung: eine leere Liste entzieht sie wieder', async () => {
+  asAdmin();
+  const cleared = await call('PUT', `/caregivers/${userC}`, { caregiver_ids: [] });
+  assert.equal(cleared.status, 200);
+  assert.deepEqual(cleared.body.data.caregiver_ids, []);
+
+  asA();
+  assert.deepEqual((await call('GET', '/caregivers/me')).body.data, []);
+  const res = await call('POST', '/vitals', {
+    type: 'temp', value_num: 37, unit: '°C', measured_at: '2026-08-03T08:00', user_id: userC,
+  });
+  assert.equal(res.status, 403, 'nach dem Entzug ist der Weg sofort zu');
+});
+
+test('Betreuung: niemand wird sein eigener Betreuer, Unbekannte werden abgelehnt', async () => {
+  asAdmin();
+  const self = await call('PUT', `/caregivers/${userC}`, { caregiver_ids: [userC, userA] });
+  assert.equal(self.status, 200);
+  assert.deepEqual(self.body.data.caregiver_ids, [userA], 'die Person selbst fällt still heraus');
+
+  const unknown = await call('PUT', `/caregivers/${userC}`, { caregiver_ids: [999999] });
+  assert.equal(unknown.status, 400);
+
+  const noList = await call('PUT', `/caregivers/${userC}`, { caregiver_ids: 'alle' });
+  assert.equal(noList.status, 400);
+
+  // Aufräumen, damit die Reihenfolge späterer Tests keine Rolle spielt.
+  await call('PUT', `/caregivers/${userC}`, { caregiver_ids: [] });
+});
+
 test.after(() => { server.close(); });

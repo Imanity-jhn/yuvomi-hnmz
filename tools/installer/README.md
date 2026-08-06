@@ -70,16 +70,23 @@ dedicated `podman-compose.yml` (SELinux `:Z` labels).
    podman-compose.yml up -d` / `podman-compose -f podman-compose.yml up -d`)
 6. Polls the health endpoint until the container is ready
 7. Creates your first admin account via `POST /api/v1/auth/setup`
-8. Offers to download a copy of the written `.env` on the final screen — the
-   only backup of newly generated encryption keys, which cannot be recovered if
-   lost. Keys carried over from a previous run appear as a comment rather than a
-   value, since the browser never sees them; those are still in the `.env` on
-   disk and in its `.env.bak-<ISO>` copy
+8. Offers to download the written `.env` on the final screen — the only backup
+   of newly generated encryption keys, which cannot be recovered if lost. The
+   download is served from disk (`GET /api/env-file`), so it is the file itself,
+   including values carried over from a previous run and the two secrets the
+   wizard itself never sees. Same loopback guard as every other API route
 
 The local-folder document-storage fields are optional. Setting `DOCUMENT_STORAGE_LOCAL_ENABLED=true`
 writes new document files (including calendar attachments) to `DOCUMENT_STORAGE_LOCAL_PATH` (default
-`/documents`, a mounted host folder) instead of the database, and takes precedence over every selected
-backend. Mount that folder into the container (see `docker-compose.yml`); existing files are not migrated.
+`/documents`) instead of the database, and takes precedence over every selected backend. Existing
+files are not migrated.
+
+The two local-storage paths are the two ends of one mount and must not drift apart:
+`DOCUMENT_STORAGE_LOCAL_DIR` is the **host** folder, `DOCUMENT_STORAGE_LOCAL_PATH` the **container**
+path the app writes to. The Compose files derive both ends from the `.env`
+(`${DOCUMENT_STORAGE_LOCAL_DIR}:${DOCUMENT_STORAGE_LOCAL_PATH}`), because a mount fixed at
+`/documents` would send uploads into the container layer as soon as anyone changes the path — gone on
+the next image update, while the database keeps referencing them.
 
 The WebDAV document-storage fields are optional. Non-empty
 `DOCUMENT_STORAGE_WEBDAV_ENABLED`, `_URL`, `_USERNAME`, `_PASSWORD`, and `_PATH` values override
@@ -100,18 +107,33 @@ success alone never changes the upload destination.
 
 ## Localization
 
-The wizard is fully localized into all 23 languages supported by the app and
+The wizard is fully localized into all 24 languages supported by the app and
 detects the browser language automatically (`de` is the reference locale, `en`
 the fallback). Translations live in `tools/installer/locales/*.json` and are
 loaded by `i18n-mini.js`, which mirrors the app's locale resolution.
 
 The **CLI installer** (`install.sh` at the repo root) is localized into the same
-23 languages. It detects the language from the shell environment
+24 languages. It detects the language from the shell environment
 (`OIKOS_INSTALLER_LANG` > `LC_ALL` > `LC_MESSAGES` > `LANG`) and accepts a
 `--lang <code>` override. Its strings live in `tools/installer/locales/cli/<lang>.sh`
 — one sourced shell file per language that sets `MSG_*` variables; `en.sh` is the
-fallback base, the active language overlays it. Key parity across all 23 files is
-enforced by `test-installer-cli-i18n.js`.
+fallback base, the active language overlays it. Key parity across all 24 files is
+enforced by `test-installer-cli-i18n.js`, which also checks that every value is a
+`printf` format matching its call site (each value is passed to `printf` as the
+format string, so a stray `%` or a wrong `%s` count is a runtime bug).
+
+Unlike the wizard, the CLI installer writes `.env` from a fixed template. Every
+key it does **not** ask about is carried over from the previous file rather than
+dropped, so an installation configured by hand or through the wizard survives a
+re-run; the set of keys the dialog owns is the `MANAGED_KEYS` array in
+`install.sh`, and `test-installer-env-write.js` enforces that it matches the
+template in both directions. It asks for `BASE_URL` instead of deriving it,
+because behind a reverse proxy the public origin differs from the host and port
+the container listens on — and it reads `SESSION_SECURE` and `TRUST_PROXY` back
+out of that answer, since both server defaults are wrong for the other mode
+(no HSTS behind HTTPS; `X-Forwarded-For` trusted without a proxy in front,
+which is what the per-IP login rate limit counts). An existing value in `.env`
+wins over the derivation.
 
 ## Design
 

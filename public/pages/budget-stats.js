@@ -4,11 +4,13 @@
  */
 import { api } from '/api.js';
 import { t, formatDate, getLocale } from '/i18n.js';
-import { toLocalDateKey, parseLocalDateKey, addLocalDays } from '/utils/date.js';
 import { wireTablist } from '/utils/tablist.js';
 import { renderSkeletonList } from '/utils/skeleton.js';
 
-const view = { range: 'month', anchor: toLocalDateKey(new Date()), data: null, error: false, ctx: null, root: null };
+// Zeitraum und Anker gehören dem Modul (budget.js) und kommen über ctx herein.
+// Vorher hielt dieser View beides selbst - damit gab es zwei Zeitachsen im selben
+// Modul, die nie synchron waren (Critique 2026-07-30, P1).
+const view = { range: 'month', anchor: null, data: null, error: false, ctx: null, root: null };
 
 const RANGE_LABELS = {
   week: 'budget.statsRangeWeek',
@@ -19,6 +21,8 @@ const RANGE_LABELS = {
 export async function renderStats(panel, ctx) {
   view.ctx = ctx;
   view.root = panel;
+  view.range = ctx.range;
+  view.anchor = ctx.anchor;
   renderShell();
   await loadStats();
 }
@@ -55,20 +59,18 @@ function renderShell() {
   view.root.replaceChildren();
   view.root.insertAdjacentHTML('beforeend', `
     <div class="budget-stats">
+      <!-- Nur noch die Auflösung: der Zeitraum selbst wird über den geteilten
+           Kopf-Stepper des Moduls gewählt. Optik aus dem geteilten
+           .budget-segmented-Baustein. -->
       <div class="budget-stats__controls">
-        <div class="budget-stats__ranges" role="tablist" aria-label="${t('budget.statsRangeLabel')}">
+        <div class="budget-segmented budget-stats__ranges" role="tablist" aria-label="${t('budget.statsRangeLabel')}">
           ${['week', 'month', 'year'].map((r) => {
             const on = r === view.range;
             return `
-            <button type="button" role="tab" class="budget-stats__range${on ? ' is-active' : ''}"
+            <button type="button" role="tab" class="budget-segmented__item${on ? ' is-active' : ''}"
               data-tab-id="${r}" aria-selected="${on}" tabindex="${on ? '0' : '-1'}"
               aria-controls="budget-stats-body">${t(RANGE_LABELS[r])}</button>`;
           }).join('')}
-        </div>
-        <div class="budget-stats__stepper">
-          <button class="btn btn--icon" data-step="-1" aria-label="${t('budget.prevPeriod')}"><i data-lucide="chevron-left" aria-hidden="true"></i></button>
-          <span class="budget-stats__period" id="budget-stats-period"></span>
-          <button class="btn btn--icon" data-step="1" aria-label="${t('budget.nextPeriod')}"><i data-lucide="chevron-right" aria-hidden="true"></i></button>
         </div>
       </div>
       <div id="budget-stats-body" role="tabpanel" tabindex="0"></div>
@@ -82,27 +84,21 @@ function wire() {
   // Geteilte Tablist-Grammatik (Klick + Pfeiltasten/Home/End + Roving-Tabindex)
   // wie die Budget-Haupttabs — vorher trug der Container role="tablist", ohne
   // dass ein Kind role="tab" hatte, und Pfeiltasten taten nichts.
+  //
+  // Die Auflösung meldet das Modul zurück (onRangeChange), damit sie den
+  // Tabwechsel überlebt und der Kopf-Stepper in derselben Schrittweite läuft.
   wireTablist(view.root.querySelector('.budget-stats__ranges'), {
     activeId: view.range,
     activeClass: 'is-active',
-    onChange: (id) => { view.range = id; renderShell(); loadStats(); },
+    onChange: (id) => view.ctx.onRangeChange(id),
   });
-  view.root.querySelectorAll('[data-step]').forEach((b) =>
-    b.addEventListener('click', () => { stepAnchor(Number(b.dataset.step)); renderShell(); loadStats(); }));
-}
-
-function stepAnchor(dir) {
-  if (view.range === 'week') {
-    view.anchor = addLocalDays(view.anchor, 7 * dir);
-    return;
-  }
-  const d = parseLocalDateKey(view.anchor);
-  if (view.range === 'month') d.setMonth(d.getMonth() + dir);
-  else d.setFullYear(d.getFullYear() + dir);
-  view.anchor = toLocalDateKey(d);
 }
 
 function renderBodyContent(body) {
+  // Zuerst der Zeitraum: er gehört in den Kopf und muss auch dann stimmen, wenn
+  // der Zeitraum leer ist - sonst zeigte der Kopf beim Wochenwechsel in eine
+  // buchungsfreie Woche weiter den alten Bereich.
+  updatePeriodLabel();
   // Fehler beim Laden klar von „keine Daten" trennen: ein Netzwerk-/Serverfehler
   // darf der Familie nicht vortäuschen, ihre Finanzhistorie sei leer.
   if (view.error) {
@@ -152,7 +148,6 @@ function renderBodyContent(body) {
     <div id="budget-stats-donut"></div>
     <div class="budget-stats__export"></div>
   `);
-  updatePeriodLabel();
   renderTrendChart();
   renderCatBars();
   renderDonut();
@@ -421,7 +416,8 @@ function wireTrendPoints(host, series) {
   show(initial);
 }
 
+// Der Zeitraum steht im geteilten Kopf, nicht mehr im Panel. Gemeldet wird er
+// erst nach dem Laden, weil der Server die Wochengrenzen festlegt.
 function updatePeriodLabel() {
-  const el = view.root.querySelector('#budget-stats-period');
-  if (el && view.data) el.textContent = `${formatDate(view.data.from)} – ${formatDate(view.data.to)}`;
+  if (view.data) view.ctx.onPeriod({ from: view.data.from, to: view.data.to });
 }

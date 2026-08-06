@@ -13,6 +13,19 @@
   <meta name="theme-color" content="#fafaf8" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#1a1a18" media="(prefers-color-scheme: dark)">
   <link rel="canonical" href="https://yuvomi.cloud/impressum.html">
+  <meta name="color-scheme" content="light dark">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Yuvomi">
+  <meta property="og:locale" content="de_DE">
+  <meta property="og:title" content="Impressum - Yuvomi">
+  <meta property="og:description" content="Impressum und Anbieterkennzeichnung für yuvomi.cloud.">
+  <meta property="og:url" content="https://yuvomi.cloud/impressum.html">
+  <meta property="og:image" content="https://yuvomi.cloud/og-image.png">
+  <meta property="og:image:alt" content="Yuvomi - der selbstgehostete Familienplaner">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Impressum - Yuvomi">
+  <meta name="twitter:description" content="Impressum und Anbieterkennzeichnung für yuvomi.cloud.">
+  <meta name="twitter:image" content="https://yuvomi.cloud/twitter-image.png">
   <link rel="icon" type="image/svg+xml" href="logo.svg">
 
   <style>
@@ -110,6 +123,7 @@
     .nav-logo {
       display: inline-flex;
       align-items: center;
+      min-height: 44px;
       gap: 10px;
       font-weight: 700;
       font-size: 18px;
@@ -160,6 +174,12 @@
       color: var(--text-1);
     }
     h2:first-of-type { margin-top: 0; }
+    /* Every section carries an id, so "Haftung für Links" can be linked to
+       directly - datenschutz.html has had that since it grew a table of
+       contents, and this page had neither. No table of contents here on
+       purpose: nine short sections fit in about two screens, where a 9-entry
+       index is a second thing to read rather than a way past the first. */
+    main h2 { scroll-margin-top: 24px; }
 
     p { margin-bottom: 12px; color: var(--text-1); overflow-wrap: anywhere; }
 
@@ -222,6 +242,51 @@
     footer.bot a:hover { color: var(--accent); }
     footer.bot nav { display: flex; gap: 14px; flex-wrap: wrap; }
     footer.bot nav a { padding: 6px 2px; min-height: 44px; display: inline-flex; align-items: center; }
+  
+    /* These two pages relied on the UA default focus ring; match the other pages. */
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+
+    /* Skip link: index and install put 26 focusable nodes between the top of the
+       page and the content, so keyboard users need a way past the nav. */
+    .skip-link { position: absolute; left: -9999px; top: 0; z-index: 200; }
+    .skip-link:focus { left: 8px; top: 8px; padding: 12px 18px; display: inline-flex; align-items: center; min-height: 44px;
+      background: var(--surface); color: var(--text-1);
+      border: 1px solid var(--border); border-radius: var(--r-md); box-shadow: var(--shadow-md); font-weight: 600; }
+  
+    /* 14 dense legal sections with a table of contents at the very top and no way
+       back to it on a phone. Appears only once you are past the first screen. */
+    .to-top { position: fixed; right: 16px; bottom: 16px; z-index: 90;
+      display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 16px;
+      background: var(--surface); color: var(--text-1); border: 1px solid var(--border);
+      border-radius: var(--r-full); box-shadow: var(--shadow-md); font-size: 0.85rem; font-weight: 600;
+      opacity: 0; visibility: hidden; transform: translateY(8px); transition: opacity .2s, transform .2s, visibility .2s; }
+    .to-top.show { opacity: 1; visibility: visible; transform: none; }
+    .to-top:hover { text-decoration: none; border-color: var(--border-strong); }
+    .to-top svg { width: 15px; height: 15px; }
+  
+    /* These two pages had no reduced-motion guard at all. */
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+      }
+      .to-top { transition: none; }
+    }
+
+    /* Print. An Impressum is routinely printed or archived as a PDF, and it
+       printed with the floating "Nach oben" pill over the text and every
+       external reference as a bare underlined word. */
+    @media print {
+      html { scroll-behavior: auto; }
+      body { background: #fff; color: #000; }
+      .skip-link, .to-top, .back-link { display: none !important; }
+      header.top, .info-block { background: transparent; }
+      .info-block { break-inside: avoid; }
+      h2 { break-after: avoid; }
+      a[href^="http"]::after { content: " (" attr(href) ")"; font-size: 0.85em; word-break: break-all; }
+    }
   </style>
   <script>
     /* Honor the theme the visitor picked on the main pages (no toggle here). */
@@ -234,6 +299,7 @@
   </script>
 </head>
 <body>
+<a class="skip-link" href="#main-content">Zum Inhalt springen</a>
 
 <header class="top">
   <div class="wrap">
@@ -255,7 +321,7 @@
   </div>
 </header>
 
-<main>
+<main id="main-content" tabindex="-1">
   <div class="wrap">
 
     <h1>Impressum</h1>
@@ -275,7 +341,7 @@
       <a href="datenschutz.html">Privacy Policy</a>.
     </p>
 
-    <h2>Anbieter / Diensteanbieter</h2>
+    <h2 id="im-anbieter">Anbieter / Diensteanbieter</h2>
     <div class="info-block">
       <dl>
         <dt>Name</dt>
@@ -291,7 +357,7 @@
       </dl>
     </div>
 
-    <h2>Kontakt</h2>
+    <h2 id="im-kontakt">Kontakt</h2>
     <div class="info-block">
       <dl>
         <dt>E-Mail</dt>
@@ -305,7 +371,7 @@
       </dl>
     </div>
 
-    <h2>Umsatzsteuer</h2>
+    <h2 id="im-umsatzsteuer">Umsatzsteuer</h2>
     <div class="info-block">
       <p>
         Aufgrund der Kleinunternehmerregelung gemäß § 19 Umsatzsteuergesetz (UStG) wird keine
@@ -313,7 +379,7 @@
       </p>
     </div>
 
-    <h2>Verantwortlich für den Inhalt nach § 18 Abs. 2 MStV</h2>
+    <h2 id="im-verantwortlich">Verantwortlich für den Inhalt nach § 18 Abs. 2 MStV</h2>
     <div class="info-block">
       <dl>
         <dt>Name</dt>
@@ -323,19 +389,7 @@
       </dl>
     </div>
 
-    <h2>EU-Streitschlichtung</h2>
-    <div class="info-block">
-      <p>
-        Die Europäische Kommission stellt eine Plattform zur Online-Streitbeilegung (OS) bereit:
-        <a href="https://ec.europa.eu/consumers/odr/" target="_blank" rel="noopener">https://ec.europa.eu/consumers/odr/</a>.
-      </p>
-      <p class="small" style="margin-top:8px;">
-        Da yuvomi.cloud kein kostenpflichtiges Angebot enthält, ist diese Angabe formal nicht zwingend,
-        wird aber zur Vermeidung von Abmahnrisiken bereitgestellt.
-      </p>
-    </div>
-
-    <h2>Verbraucherstreitbeilegung / Universalschlichtungsstelle</h2>
+    <h2 id="im-verbraucherstreitbeilegung">Verbraucherstreitbeilegung / Universalschlichtungsstelle</h2>
     <div class="info-block">
       <p>
         Der Anbieter ist nicht bereit und nicht verpflichtet, an Streitbeilegungsverfahren vor einer
@@ -343,7 +397,7 @@
       </p>
     </div>
 
-    <h2>Haftung für Inhalte</h2>
+    <h2 id="im-haftung-inhalte">Haftung für Inhalte</h2>
     <p>
       Als Diensteanbieter ist der Betreiber gemäß § 7 Abs. 1 DDG für eigene Inhalte auf diesen Seiten
       nach den allgemeinen Gesetzen verantwortlich. Nach §§ 8 bis 10 DDG ist der Betreiber als
@@ -355,7 +409,7 @@
       Rechtsverletzungen werden diese Inhalte umgehend entfernt.
     </p>
 
-    <h2>Haftung für Links</h2>
+    <h2 id="im-haftung-links">Haftung für Links</h2>
     <p>
       Dieses Angebot enthält Links zu externen Websites Dritter (z. B. github.com), auf deren Inhalte
       der Betreiber keinen Einfluss hat. Deshalb kann für diese fremden Inhalte auch keine Gewähr
@@ -367,7 +421,7 @@
       Rechtsverletzungen werden derartige Links umgehend entfernt.
     </p>
 
-    <h2>Urheberrecht</h2>
+    <h2 id="im-urheberrecht">Urheberrecht</h2>
     <p>
       Die durch den Betreiber erstellten Inhalte und Werke auf diesen Seiten unterliegen dem deutschen
       Urheberrecht. Der Quellcode des Yuvomi-Projekts steht unter der
@@ -388,7 +442,7 @@
 <footer class="bot">
   <div class="wrap">
     <span>&copy; <span id="year">2026</span> Ulas Kalayci · Yuvomi</span>
-    <nav>
+    <nav aria-label="Fußzeile">
       <a href="index.html">Startseite</a>
       <a href="impressum.html">Impressum</a>
       <a href="datenschutz.html">Datenschutz</a>
@@ -401,5 +455,13 @@
   document.getElementById('year').textContent = new Date().getFullYear();
 </script>
 
+<a class="to-top" href="#main-content" id="toTop"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>Nach oben</a>
+<script>
+(function(){
+  var b = document.getElementById('toTop'); if (!b) return;
+  function sync(){ b.classList.toggle('show', scrollY > 600); }
+  addEventListener('scroll', sync, { passive: true }); sync();
+})();
+</script>
 </body>
 </html>

@@ -4,7 +4,7 @@
     "continue": "続ける",
     "back": "戻る",
     "generate": "生成",
-    "generating": "…",
+    "generating": "生成中…",
     "optional": "任意",
     "stepCounter": "ステップ {{n}} / {{total}}",
     "toggleVisibility": "値を表示または非表示にする",
@@ -48,8 +48,8 @@
     "unitsMetric": "メートル法 (°C)",
     "unitsImperial": "ヤード・ポンド法 (°F)",
     "errCoords": "緯度と経度は必須です。",
-    "errLat": "緯度が無効です（–90～90）。",
-    "errLon": "経度が無効です（–180～180）。"
+    "errLat": "緯度が無効です（-90～90）。",
+    "errLon": "経度が無効です（-180～180）。"
   },
   "calendar": {
     "title": "カレンダー同期",
@@ -101,13 +101,20 @@
   "docker": {
     "title": "Yuvomi を起動しています",
     "subtitle": "イメージを取得し、Docker コンテナを起動しています。",
-    "starting": "コンテナを起動しています …",
     "elapsed": "{{n}} 秒経過",
     "running": "コンテナは正常に稼働しています",
     "failed": "コンテナの起動に失敗しました",
     "unknownError": "不明なエラー",
     "toAdmin": "管理者セットアップに進む",
-    "retry": "再試行"
+    "retry": "再試行",
+    "phasePull": "イメージをダウンロード中",
+    "phaseBoot": "コンテナーを起動中",
+    "phaseHealth": "ヘルスチェック実行中",
+    "firstRunHint": "初回は数分かかることがあります。",
+    "stalled": "いつもより時間がかかっています。下のログに理由が表示されます。",
+    "showLogs": "ログを表示",
+    "hideLogs": "ログを隠す",
+    "timedOut": "15 分たっても応答がありません。ログを確認してもう一度お試しください。"
   },
   "admin": {
     "title": "管理者アカウントを作成",
@@ -144,7 +151,7 @@
     "proxyHint": "直接アクセスでは secure 限定の Cookie を無効にし、HTTPS なしでもログインできるようにします。",
     "oidc": "シングルサインオン (OIDC)",
     "oidcHint": "SSO を有効にするには 4 つすべての項目を入力するか、すべて空のままにしてください。",
-    "oidcIssuerLabel": "Issuer URL",
+    "oidcIssuerLabel": "発行者 URL",
     "oidcClientIdLabel": "クライアント ID",
     "oidcClientSecretLabel": "クライアントシークレット",
     "oidcRedirectLabel": "リダイレクト URI",
@@ -190,7 +197,17 @@
     "documentGoogleDriveReuseHint": "両方を空欄にすると、Google カレンダーの OAuth 認証情報を再利用します。専用の認証情報を使う場合は、Google Cloud Console で作成してください（カレンダーの手順と同様）。",
     "documentGoogleDriveRedirectLabel": "リダイレクト URI",
     "errDocumentGoogleDrivePair": "Google Drive のクライアント ID とクライアントシークレットは、両方を設定するか、両方とも空欄にしてください。",
-    "errDocumentGoogleDriveCredentials": "Google Drive には、専用のクライアント ID とクライアントシークレット、または設定済みの Google カレンダー認証情報が必要です。"
+    "errDocumentGoogleDriveCredentials": "Google Drive には、専用のクライアント ID とクライアントシークレット、または設定済みの Google カレンダー認証情報が必要です。",
+    "dataDirLabel": "ホストのデータフォルダー",
+    "dataDirHint": "サーバー上でデータベースとアプリデータを置く場所です。空欄のままにすると compose ファイルの隣の ./data を使います。",
+    "documentLocalDirLabel": "ホストのフォルダー",
+    "documentLocalDirHint": "コンテナーにマウントされるサーバー上のフォルダーです。空欄のままにすると ./documents を使います。",
+    "documentWebdavPrivateNetwork": "家庭内ネットワークの WebDAV 保存先を許可する",
+    "documentWebdavPrivateNetworkHint": "自宅ネットワークの Nextcloud に必要です。この保存先の SSRF 保護を解除します。",
+    "icsPrivateNetwork": "家庭内ネットワークからのカレンダー購読を許可する",
+    "icsPrivateNetworkHint": "自宅ネットワークの機器の ICS フィードに必要です。カレンダー購読の SSRF 保護を解除します。",
+    "oidcTrustEmail": "verified クレームなしでメールアドレスを信頼する",
+    "oidcTrustEmailHint": "プロバイダーが email_verified を送らず、かつ信頼できる場合のみ有効にしてください。"
   },
   "welcome": {
     "title": "Yuvomi へようこそ",

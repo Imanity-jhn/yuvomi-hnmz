@@ -4,7 +4,7 @@
     "continue": "Folytatás",
     "back": "Vissza",
     "generate": "Generálás",
-    "generating": "…",
+    "generating": "Generálás…",
     "optional": "Opcionális",
     "stepCounter": "{{n}}/{{total}} lépés",
     "toggleVisibility": "Érték megjelenítése vagy elrejtése",
@@ -48,8 +48,8 @@
     "unitsMetric": "Metrikus (°C)",
     "unitsImperial": "Imperiális (°F)",
     "errCoords": "Szélesség és hosszúság megadása kötelező.",
-    "errLat": "Érvénytelen szélesség (–90 és 90 között).",
-    "errLon": "Érvénytelen hosszúság (–180 és 180 között)."
+    "errLat": "Érvénytelen szélesség (-90 és 90 között).",
+    "errLon": "Érvénytelen hosszúság (-180 és 180 között)."
   },
   "calendar": {
     "title": "Naptár szinkronizálás",
@@ -101,19 +101,26 @@
   "docker": {
     "title": "Yuvomi indítása",
     "subtitle": "A kép letöltése és a Docker konténer indítása.",
-    "starting": "Konténer indítása …",
     "elapsed": "{{n}}s eltelt",
     "running": "A konténer egészséges és fut",
     "failed": "A konténer indítása sikertelen",
     "unknownError": "Ismeretlen hiba",
     "toAdmin": "Folytatás az adminisztrátor beállításához",
-    "retry": "Újrapróbálkozás"
+    "retry": "Újrapróbálkozás",
+    "phasePull": "Rendszerkép letöltése",
+    "phaseBoot": "A konténer indul",
+    "phaseHealth": "Állapotellenőrzés fut",
+    "firstRunHint": "Első alkalommal ez több percig is tarthat.",
+    "stalled": "A szokásosnál tovább tart. Az alábbi napló megmutatja, miért.",
+    "showLogs": "Napló megjelenítése",
+    "hideLogs": "Napló elrejtése",
+    "timedOut": "15 perc után sem érkezett válasz. Nézd meg a naplót, és próbáld újra."
   },
   "admin": {
     "title": "Adminisztrátor fiók létrehozása",
     "subtitle": "Állítsa be az első bejelentkezést. Ez a fiók teljes hozzáféréssel rendelkezik a Yuvomihoz.",
     "userLabel": "Felhasználónév",
-    "userHint": "3–64 karakter: betűk, számok, . - _",
+    "userHint": "3-64 karakter: betűk, számok, . - _",
     "nameLabel": "Megjelenítendő név",
     "passLabel": "Jelszó",
     "passPlaceholder": "Legalább 8 karakter",
@@ -121,7 +128,7 @@
     "creating": "Létrehozás …",
     "create": "Fiók létrehozása",
     "errAll": "Minden mező kitöltése kötelező.",
-    "errUser": "Érvénytelen felhasználónév formátum (3–64 karakter, betűk/számok/._-).",
+    "errUser": "Érvénytelen felhasználónév formátum (3-64 karakter, betűk/számok/._-).",
     "errPass": "A jelszónak legalább 8 karakter hosszúnak kell lennie.",
     "errMatch": "A jelszavak nem egyeznek.",
     "errCreate": "Nem sikerült létrehozni az adminisztrátor fiókot."
@@ -190,7 +197,17 @@
     "documentGoogleDriveReuseHint": "Hagyd mindkét mezőt üresen a Google Naptár OAuth-hitelesítő adatainak újrafelhasználásához. Saját adatokhoz hozd létre őket a Google Cloud Console-ban (mint a Naptár lépésben).",
     "documentGoogleDriveRedirectLabel": "Átirányítási URI",
     "errDocumentGoogleDrivePair": "A Google Drive kliensazonosítóját és titkos kulcsát vagy együtt kell megadni, vagy mindkettőt üresen kell hagyni.",
-    "errDocumentGoogleDriveCredentials": "A Google Drive használatához saját kliensazonosító és titkos kulcs, vagy beállított Google Naptár-hitelesítő adatok szükségesek."
+    "errDocumentGoogleDriveCredentials": "A Google Drive használatához saját kliensazonosító és titkos kulcs, vagy beállított Google Naptár-hitelesítő adatok szükségesek.",
+    "dataDirLabel": "Adatmappa a gazdagépen",
+    "dataDirHint": "Hol találhatók az adatbázis és az alkalmazás adatai a kiszolgálón. Hagyd üresen a ./data használatához a compose fájl mellett.",
+    "documentLocalDirLabel": "Mappa a gazdagépen",
+    "documentLocalDirHint": "A kiszolgáló mappája, amely a konténerbe csatolódik. Hagyd üresen a ./documents használatához.",
+    "documentWebdavPrivateNetwork": "WebDAV cél engedélyezése a helyi hálózaton",
+    "documentWebdavPrivateNetworkHint": "Saját hálózaton lévő Nextcloudhoz szükséges. Feloldja az SSRF védelmet ehhez a célhoz.",
+    "icsPrivateNetwork": "Naptár-feliratkozások engedélyezése a helyi hálózatról",
+    "icsPrivateNetworkHint": "Saját hálózaton lévő eszközök ICS hírcsatornáihoz szükséges. Feloldja az SSRF védelmet a naptár-feliratkozásokhoz.",
+    "oidcTrustEmail": "E-mail megbízhatónak tekintése verified claim nélkül",
+    "oidcTrustEmailHint": "Csak akkor kapcsold be, ha a szolgáltatód nem küld email_verified értéket, és megbízol benne."
   },
   "welcome": {
     "title": "Üdvözöl a Yuvomi",

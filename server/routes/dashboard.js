@@ -95,6 +95,10 @@ router.get('/', (req, res) => {
       FROM tasks t
       LEFT JOIN users u ON t.assigned_to = u.id
       WHERE t.status != 'done'
+        -- Abgelegtes gehört nicht in „Heute auf einen Blick" (#688): eine
+        -- archivierte Aufgabe ist aus dem Lauf genommen, und wer sie von hier aus
+        -- öffnete, fand sie in der Liste nicht wieder.
+        AND t.archived_at IS NULL
         AND ${visibilityWhere('t', 'task_assignments', 'task_id', '@me')}
       ORDER BY
         CASE WHEN __due_sort IS NOT NULL AND __due_sort < @now THEN 0 ELSE 1 END ASC,
@@ -216,13 +220,15 @@ router.get('/', (req, res) => {
         SUM(amount) AS balance,
         COUNT(*) AS entry_count
       FROM budget_entries
-      WHERE date BETWEEN ? AND ?${ownerClause}
+      -- Erwartete, noch unbestaetigte Buchungen zaehlen nicht mit (#637), wie in
+      -- Uebersicht, Statistik, Plan und Kontostand.
+      WHERE date BETWEEN ? AND ?${ownerClause} AND is_pending = 0
     `).get(from, to, ...ownerParams);
 
     const topExpense = d.prepare(`
       SELECT category, SUM(amount) AS amount
       FROM budget_entries
-      WHERE amount < 0 AND date BETWEEN ? AND ?${ownerClause}
+      WHERE amount < 0 AND date BETWEEN ? AND ?${ownerClause} AND is_pending = 0
       GROUP BY category
       ORDER BY ABS(SUM(amount)) DESC
       LIMIT 1

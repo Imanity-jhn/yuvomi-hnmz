@@ -542,6 +542,95 @@ export const schemas = {
             avatar_data: { type: ['string', 'null'], description: 'PNG, JPEG, or WebP data URL. Use null to remove.' },
           },
         },
+        Invite: {
+          type: 'object',
+          description: 'A pending invitation. The token hash is never returned.',
+          properties: {
+            id: { type: 'integer' },
+            email: { type: ['string', 'null'] },
+            username: { type: ['string', 'null'], description: 'Pre-assigned username. When null, the invited person picks one.' },
+            display_name: { type: ['string', 'null'] },
+            role: { type: 'string', enum: ['admin', 'member'] },
+            family_role: { type: 'string', enum: ['dad', 'mom', 'parent', 'child', 'grandparent', 'relative', 'other'] },
+            created_by: { type: ['integer', 'null'] },
+            expires_at: { type: 'integer', description: 'Unix epoch milliseconds. Invitations are valid for 7 days.' },
+            accepted_at: { type: ['string', 'null'], format: 'date-time' },
+            accepted_user_id: { type: ['integer', 'null'] },
+            revoked_at: { type: ['string', 'null'], format: 'date-time' },
+            created_at: { type: 'string', format: 'date-time' },
+          },
+          required: ['id', 'role', 'family_role', 'expires_at', 'created_at'],
+        },
+        InviteCreateRequest: {
+          type: 'object',
+          properties: {
+            username: { type: 'string', description: 'Optional. When set, the invited person cannot choose a different one.' },
+            display_name: { type: 'string' },
+            email: { type: 'string', description: 'Required when send_email is true.' },
+            family_role: { type: 'string', enum: ['dad', 'mom', 'parent', 'child', 'grandparent', 'relative', 'other'] },
+            system_admin: { type: 'boolean', description: 'Only true grants the admin role; the value is taken from the invitation, never from the accept request.' },
+            send_email: { type: 'boolean', description: 'Send the invitation by email. Requires SMTP and BASE_URL; check email_sent in the response.' },
+          },
+        },
+        InviteCreateResponse: {
+          type: 'object',
+          properties: {
+            data: {
+              type: 'object',
+              properties: {
+                invite: { $ref: '#/components/schemas/Invite' },
+                token: {
+                  type: 'string',
+                  description: 'Plaintext invite token. Returned here and only here - the database holds nothing but its hash, so a lost token cannot be recovered, only revoked and reissued.',
+                },
+                email_sent: {
+                  type: 'boolean',
+                  description: 'Whether the invitation email actually went out. False when send_email was not requested, SMTP or BASE_URL is missing, or delivery failed - the link must then be passed on by hand.',
+                },
+              },
+              required: ['invite', 'token', 'email_sent'],
+            },
+          },
+          required: ['data'],
+        },
+        InvitesResponse: {
+          type: 'object',
+          properties: {
+            data: {
+              type: 'object',
+              properties: {
+                invites: { type: 'array', items: { $ref: '#/components/schemas/Invite' } },
+              },
+              required: ['invites'],
+            },
+          },
+          required: ['data'],
+        },
+        InvitePreviewResponse: {
+          type: 'object',
+          properties: {
+            data: {
+              type: 'object',
+              properties: {
+                valid: { type: 'boolean' },
+                display_name: { type: ['string', 'null'] },
+                username: { type: ['string', 'null'] },
+              },
+              required: ['valid'],
+            },
+          },
+          required: ['data'],
+        },
+        InviteAcceptRequest: {
+          type: 'object',
+          properties: {
+            token: { type: 'string' },
+            password: { type: 'string', minLength: 8 },
+            username: { type: 'string', description: 'Ignored when the invitation already carries one.' },
+            display_name: { type: 'string', description: 'Ignored when the invitation already carries one.' },
+          },
+          required: ['token', 'password'],
+        },
         ApiToken: {
           type: 'object',
           properties: {

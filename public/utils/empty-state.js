@@ -22,6 +22,9 @@
  *                als Reaktion auf eine Nutzereingabe erscheint und angesagt
  *                werden muss. Sekundärer CTA (Zurücksetzen).
  *   'error'      Laden fehlgeschlagen. `role="alert"`. Primärer CTA (Erneut).
+ *
+ * Für die Variante 'error' ist `mountLoadError()` der richtige Einstieg, nicht
+ * `mountEmptyState({ variant: 'error' })` - siehe dort.
  */
 
 import { esc } from '/utils/html.js';
@@ -50,6 +53,16 @@ const VARIANTS = {
 export function emptyStateEl({ variant = 'empty', icon, title, description, hint, action } = {}) {
   const spec = VARIANTS[variant] ?? VARIANTS.empty;
 
+  // Alle Textfelder laufen durch plainText(). `esc()` würde ein durchgereichtes
+  // Objekt klaglos als „[object Object]" darstellen - genau das stand im
+  // Fehlerzustand des Vorrats auf dem Bildschirm, weil ein Aufrufer den rohen
+  // Fehler statt einer Meldung übergab (Critique P0, 2026-07-30). Ein Nicht-Text
+  // hier ist immer ein Aufruferfehler; ihn zu verschlucken ist besser, als ihn
+  // dem Nutzer zu zeigen.
+  title       = plainText(title);
+  description = plainText(description);
+  hint        = plainText(hint);
+
   const box = document.createElement('div');
   box.className = 'empty-state';
   if (spec.role) box.setAttribute('role', spec.role);
@@ -69,7 +82,7 @@ export function emptyStateEl({ variant = 'empty', icon, title, description, hint
   if (hint) parts.push(`<p class="empty-state__hint">${esc(hint)}</p>`);
   box.insertAdjacentHTML('beforeend', parts.join(''));
 
-  if (action?.label) {
+  if (plainText(action?.label)) {
     const cta = document.createElement('button');
     cta.type = 'button';
     cta.className = `btn btn--${action.tone || spec.tone} empty-state__cta`;
@@ -79,7 +92,7 @@ export function emptyStateEl({ variant = 'empty', icon, title, description, hint
     }
     // Label als Textknoten, nicht via textContent: sonst würde ein schon
     // eingefügtes Icon wieder entfernt.
-    cta.append(document.createTextNode(action.label));
+    cta.append(document.createTextNode(plainText(action.label)));
     if (typeof action.onClick === 'function') cta.addEventListener('click', action.onClick);
     box.appendChild(cta);
   }
@@ -104,4 +117,78 @@ export function mountEmptyState(target, opts) {
   target.replaceChildren(box);
   if (window.lucide) window.lucide.createIcons({ el: box });
   return box;
+}
+
+/**
+ * Fehlerzustand nach einem fehlgeschlagenen Ladevorgang.
+ *
+ * Der vierte Zustand jeder Liste. Für „leer", „gefüllt" und „ladend" gab es je
+ * einen geteilten Renderer, für „fehlgeschlagen" keinen - mit dem Ergebnis, dass
+ * die vier Küchen-Tabs bei HTTP 500 vier verschiedene Dinge taten: Einkauf und
+ * Essensplan zeigten ihren LEERZUSTAND samt anlegendem CTA (bei 31 vorhandenen
+ * Artikeln bzw. 28 geplanten Mahlzeiten), der Vorrat einen korrekten Fehler mit
+ * „[object Object]" als Erklärung, die Rezepte rissen die App in den globalen
+ * Fehlerbildschirm (Critique P0, 2026-07-30).
+ *
+ * Ein Leerzustand ist die schädlichste der vier Antworten: er behauptet
+ * Datenverlust und bietet als einzige Handlung eine an, die den Zustand
+ * tatsächlich verändert. Deshalb ist die Regel an den Aufrufstellen: den
+ * Leerzustand nur rendern, wenn die Antwort erfolgreich UND leer war.
+ *
+ * Diese Funktion erzwingt gegenüber `mountEmptyState({ variant: 'error' })` zwei
+ * Dinge, die einzeln immer wieder vergessen wurden:
+ *
+ *   1. **Einen Ausweg.** Ohne `onRetry` + `retryLabel` gibt es keinen CTA und
+ *      damit eine Sackgasse; der Aufruf ist dann unvollständig.
+ *   2. **Die technische Zeile.** Sie kommt aus dem Fehlerobjekt, nie aus einem
+ *      Servertext: `data.error` ist bei allen Routen ein unlokalisiertes
+ *      englisches „Internal server error." und hätte in einer deutschen
+ *      Oberfläche nichts verloren. Der Statuscode dagegen ist sprachneutral und
+ *      für den Selbsthoster - der hier oft der Nutzer selbst ist - die einzig
+ *      brauchbare Information.
+ *
+ * Bleibt i18n-frei wie der Rest der Datei: Aufrufer übergeben aufgelöste Strings.
+ *
+ * @param {HTMLElement} target
+ * @param {object}      opts
+ * @param {string}      opts.title        Aufgelöst, modulspezifisch („Vorrat
+ *                                        konnte nicht geladen werden").
+ * @param {string}      opts.description  Aufgelöst, was der Nutzer tun kann.
+ * @param {unknown}     [opts.error]      Das gefangene Fehlerobjekt. Nur der
+ *                                        Statuscode wird gelesen.
+ * @param {string}      opts.retryLabel   Aufgelöstes CTA-Label.
+ * @param {Function}    opts.onRetry      Wiederholt den Ladevorgang.
+ * @returns {HTMLDivElement|null}
+ */
+export function mountLoadError(target, { title, description, error, retryLabel, onRetry } = {}) {
+  return mountEmptyState(target, {
+    variant: 'error',
+    title,
+    description,
+    hint: errorDetail(error),
+    action: typeof onRetry === 'function'
+      ? { label: retryLabel, icon: 'refresh-cw', onClick: onRetry }
+      : undefined,
+  });
+}
+
+/**
+ * Sprachneutrale Kurzform der Ursache, oder `null`.
+ *
+ * `status === 0` ist in `api.js` der Netzfehler ohne Antwort - dafür gibt es
+ * keinen Code zu nennen, und „HTTP 0" wäre schlechter als nichts.
+ */
+function errorDetail(error) {
+  const status = Number(error?.status);
+  return Number.isInteger(status) && status > 0 ? `HTTP ${status}` : null;
+}
+
+/**
+ * Lässt nur echten Anzeigetext durch; alles andere wird zu `null`.
+ * Zahlen sind erlaubt (Zähler in Hinweisen), Objekte und Fehler nicht.
+ */
+function plainText(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (typeof value !== 'string') return null;
+  return value.trim() ? value : null;
 }

@@ -15,7 +15,7 @@ Specifically - the following will **not** be merged:
 - Frontend frameworks (React, Vue, Svelte, Angular, etc.)
 - Bundlers or transpilers (Webpack, Vite, Rollup, esbuild, TypeScript, etc.)
 - CSS libraries (Tailwind, Bootstrap, etc.)
-- External frontend dependencies of any kind (except Lucide Icons as self-hosted SVG sprite)
+- External frontend dependencies at runtime - no CDN loads, no npm frontend packages. Third-party frontend code is allowed only as hand-copied, committed vendoring under `public/vendor/` (currently PDF.js, SortableJS, libphonenumber - plus Lucide at `public/lucide.min.js`); each vendored package ships its license and a README with update steps
 
 Backend dependencies are evaluated case-by-case but must remain minimal. When in doubt, open an issue before writing code.
 
@@ -35,11 +35,16 @@ git clone https://github.com/ulsklyc/yuvomi.git
 cd yuvomi
 npm install
 cp .env.example .env
-# Set SESSION_SECRET - leave DB_ENCRYPTION_KEY empty to work on an unencrypted DB locally
+# Set SESSION_SECRET - and CLEAR the prefilled DB_ENCRYPTION_KEY line
+# (empty key = unencrypted dev DB; the placeholder would encrypt it with a
+# publicly known string)
 npm run dev
 ```
 
 `npm run dev` starts the server with `--watch` for automatic restarts on file changes.
+The app answers on [http://localhost:3000](http://localhost:3000). On the first visit it
+guides you through creating the admin account in the browser; headless setups can run
+`npm run setup` instead.
 
 ### Running tests
 
@@ -77,8 +82,11 @@ npm run test:docker-publish
 ```
 
 This is a representative selection - run `npm run` to see the full list of suites.
+Which suite guards which invariant is catalogued in [docs/test-suites.md](docs/test-suites.md).
 
-Tests use the Node.js built-in test runner with in-memory SQLite (`--experimental-sqlite`). No running server or database required — tests import route handlers directly.
+Tests run with plain Node and in-memory SQLite (`--experimental-sqlite`) — newer suites
+use the built-in `node --test` runner, older ones are plain assertion scripts. No running
+server or database required; tests import route handlers directly.
 
 ---
 
@@ -112,7 +120,7 @@ docs/                  # Product spec, screenshots
 - Every API route lives in `server/routes/` and follows the same `try/catch` → JSON response pattern
 - Every frontend page is an ES module in `public/pages/` that exports `render()`
 - All design values come from `tokens.css` - never hardcode colors, radii, or shadows
-- Database migrations are appended to the `migrations` array in `server/db.js` - never modify existing entries
+- Database migrations are appended to the `MIGRATIONS` array in `server/db.js` - never modify existing entries
 
 ---
 
@@ -149,7 +157,7 @@ git fetch upstream
 git rebase upstream/main
 ```
 
-Rebase before opening a PR. Merge commits will be squashed.
+Rebase before opening a PR and keep the branch conflict-free.
 
 ### 4. Commit
 
@@ -174,7 +182,7 @@ fix(calendar): handle timezone offset in recurring events
 docs(readme): add Apple CalDAV setup instructions
 refactor(auth): extract session validation into middleware
 test(budget): add CSV export edge cases
-chore: update express to 4.21
+chore: update helmet to 8.3
 ```
 
 **Rules:**
@@ -198,7 +206,12 @@ npm test              # All tests pass
 
 ### 6. Review and merge
 
-PRs are reviewed by the maintainer. Expect feedback within a few days. Once approved, PRs are squash-merged into `main`.
+PRs are reviewed by the maintainer. Expect feedback within a few days. Same-repo PRs
+additionally get an automated AI review comment (Claude Code) shortly after opening, and
+mentioning `@claude` in an issue or PR comment triggers an AI assistant — both are
+informational; the maintainer's review decides. PRs from forks are excluded from the
+automation. Once approved, PRs are merged by the maintainer, usually squashed into a
+single commit.
 
 ---
 
@@ -215,6 +228,12 @@ PRs are reviewed by the maintainer. Expect feedback within a few days. Once appr
 
 - Web Component prefix: `yuvomi-` (one component per file)
 - All UI text via i18n keys (`t('key')`) - never hardcode text in components. German (`de`) is the reference locale.
+- **Adding a new i18n key:** add it to **all** files in `public/locales/` (24 languages; a
+  non-German value may start as the English text). The JSON files are 4-space indented
+  and nested - edit them in place, never reserialize a whole file. A key interpolating a
+  numeric `count` needs an `_one` singular variant (`{{count}}` placeholder), otherwise
+  the UI shows "1 Aufgaben". `npm run test:i18n` and `npm run test:i18n-plural` guard all
+  of this and run in CI - a UI change without complete locales will not pass.
 - Date format: `DD.MM.YYYY` - Time format: `HH:MM` (24h)
 - CSS uses design tokens from `public/styles/tokens.css` - never hardcode values
 - Pages export a `render()` function, no side effects on import
@@ -223,8 +242,8 @@ PRs are reviewed by the maintainer. Expect feedback within a few days. Once appr
 
 - One route file per module in `server/routes/`
 - API responses: `{ data: ... }` on success, `{ error: string, code: number }` on failure
-- Database migrations: append to the `migrations` array in `server/db.js` - **never modify existing entries**
-- Every table: `id INTEGER PRIMARY KEY`, `created_at TEXT`, `updated_at TEXT` (ISO 8601)
+- Database migrations: append to the `MIGRATIONS` array in `server/db.js` - **never modify existing entries**
+- New entity tables: `id INTEGER PRIMARY KEY`, `created_at TEXT`, `updated_at TEXT` (ISO 8601). Key/value and join tables (`sync_config`, `task_tags`, …) deviate deliberately
 
 ### Testing
 
@@ -251,7 +270,7 @@ Format: imperative mood, one line per change, user-oriented language.
 
 ### Bugs
 
-[Open an issue](https://github.com/ulsklyc/yuvomi/issues/new) with:
+[Open an issue](https://github.com/ulsklyc/yuvomi/issues/new/choose) with:
 
 - What you expected vs. what happened
 - Steps to reproduce

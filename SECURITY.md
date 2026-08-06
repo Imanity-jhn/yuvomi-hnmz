@@ -13,7 +13,7 @@ Include:
 - Potential impact
 - Suggested fix (if you have one)
 
-You should receive an acknowledgment within 48 hours. Fixes for confirmed vulnerabilities will be released as soon as possible.
+You should typically receive an acknowledgment within a few days (this is a solo-maintained project). Fixes for confirmed vulnerabilities will be released as soon as possible.
 
 ## Scope
 
@@ -34,6 +34,7 @@ Vulnerabilities that require physical access to the host or root on the server a
   Double Submit Cookie pattern listed below and the `Secure` flag.)
 - CSRF protection via Double Submit Cookie on all state-changing requests
 - Passwords hashed with bcrypt v6 (cost factor 12). Passwords are Unicode-normalized to NFC before hashing and verification, so non-ASCII characters (umlauts, accents) authenticate identically regardless of how the browser normalizes the input. Hashes created before this normalization are still accepted and are silently re-hashed to NFC on the next successful login
+- Invite links store only a SHA-256 hash of the token, never the token itself, so a leaked database cannot be turned into working invitations. They expire after 7 days, are single-use, and can be revoked at any time. Redemption happens in the same transaction that creates the user, so one token can never produce two accounts. Role and family role are taken from the invitation the admin created and are ignored in the redeeming request, so an invited member cannot make themselves an admin. The two public invite routes are rate-limited
 - Login rate limiting (5 attempts/min per IP)
 - API rate limiting (300 requests/min per IP)
 - Content Security Policy via Helmet (`self`-only)
@@ -44,7 +45,7 @@ Vulnerabilities that require physical access to the host or root on the server a
 - Drive OAuth tokens, codes, folder IDs and raw Google responses are never returned by the API or intentionally logged. Disconnect deletes local Drive state without calling Google's revocation endpoint, so shared Calendar credentials are not revoked
 - Reconnection validates the candidate account and access to an existing Drive-backed file before atomically replacing working tokens. Disconnect is blocked while Drive is selected or referenced by documents; connecting Drive never activates it for uploads
 - Subscription logo discovery is SSRF-protected: only public HTTPS targets are fetched, every redirect is re-validated, and remote image responses are size/type constrained
-- No API endpoint accessible without session auth (except login)
+- No API endpoint is accessible without session auth, apart from the entry points that are unauthenticated by design: login and first-run setup, the OIDC handshake (`/oidc/config`, `/oidc/start`, `/oidc/callback`), self-service password reset (`/forgot-password`, `/reset-password`), invitation preview and acceptance, and the per-user ICS export feed, which authenticates with its own secret token instead of a session. Every one of them except the feed carries a dedicated rate limiter on top of the global API limit; the feed is polled by calendar clients on a schedule and is covered by the global limit alone
 - `SESSION_SECRET` is mandatory - server refuses to start if unset
 
 ## Authorization Model

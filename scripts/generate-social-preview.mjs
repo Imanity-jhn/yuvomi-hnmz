@@ -1,19 +1,22 @@
 /**
- * Generates docs/social-preview.png (1280×640) and docs/og-image.png (1200×630).
+ * Generates docs/social-preview.png (1280×640), docs/og-image.png (1200×630)
+ * and docs/twitter-image.png (1200×675) from one shared design, so the three
+ * assets can never drift apart again.
  *
  * Design "Editorial Violet" — a modern, professional split layout:
  *   left  → brand lockup, kicker, headline, feature chips (real Lucide icons), meta
  *   right → dashboard screenshot inside a macOS-style window frame with an
  *           ambient violet glow and premium shadow, bleeding off the right edge.
  *
- * Rendered via headless Chromium for pixel-perfect text/gradients/shadows, with
- * the brand font (Plus Jakarta Sans) embedded as base64, then resized with sharp.
+ * Rendered via headless Chromium (puppeteer, devDependency) for pixel-perfect
+ * text/gradients/shadows, with the brand font (Plus Jakarta Sans) embedded as
+ * base64, then resized with sharp.
  *
  * Usage:  node scripts/generate-social-preview.mjs
  */
 
-import { chromium } from '/opt/homebrew/lib/node_modules/playwright/index.mjs';
-import sharp from '../node_modules/sharp/lib/index.js';
+import puppeteer from 'puppeteer';
+import sharp from 'sharp';
 import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,6 +28,7 @@ const SCREENSHOT_SRC = resolve(ROOT, 'docs/screenshots/dashboard-dark-web.png');
 const FONT_SRC       = resolve(ROOT, 'docs/fonts/plus-jakarta-sans-variable.woff2');
 const OUT_SOCIAL     = resolve(ROOT, 'docs/social-preview.png');
 const OUT_OG         = resolve(ROOT, 'docs/og-image.png');
+const OUT_TWITTER    = resolve(ROOT, 'docs/twitter-image.png');
 
 const screenshotB64 = 'data:image/png;base64,'
   + readFileSync(SCREENSHOT_SRC).toString('base64');
@@ -271,21 +275,23 @@ body::after {
 // ── Render & export ─────────────────────────────────────────────────────────
 
 async function render(outPath, finalW, finalH) {
-  const browser = await chromium.launch({ headless: true });
-  const DSF = 2;
-  const context = await browser.newContext({
-    viewport:          { width: 1280, height: 640 },
-    deviceScaleFactor: DSF,
-    colorScheme:       'dark',
+  const browser = await puppeteer.launch();
+  const page = await browser.newPage();
+  await page.setViewport({ width: 1280, height: 640, deviceScaleFactor: 2 });
+  await page.setContent(html(screenshotB64), { waitUntil: 'load', timeout: 120_000 });
+  await page.evaluate(async () => {
+    await document.fonts.ready;
+    const img = document.querySelector('.window img');
+    if (img && !img.complete) await new Promise((r) => { img.onload = r; img.onerror = r; });
+    await img?.decode?.().catch(() => {});
   });
-  const page = await context.newPage();
-  await page.setContent(html(screenshotB64), { waitUntil: 'networkidle' });
-  await page.waitForTimeout(400);
   const raw = await page.screenshot({ type: 'png' });
   await browser.close();
 
+  // 'cover' statt 'fill': das Twitter-Format (16:9) weicht vom 2:1-Canvas ab -
+  // ein leichter Seitenbeschnitt ist unsichtbar, eine Stauchung nicht.
   await sharp(raw)
-    .resize(finalW, finalH, { fit: 'fill' })
+    .resize(finalW, finalH, { fit: 'cover', position: 'centre' })
     .png({ compressionLevel: 9 })
     .toFile(outPath);
 
@@ -293,6 +299,7 @@ async function render(outPath, finalW, finalH) {
 }
 
 console.log('Generating social previews…');
-await render(OUT_SOCIAL, 1280, 640);
-await render(OUT_OG,     1200, 630);
+await render(OUT_SOCIAL,  1280, 640);
+await render(OUT_OG,      1200, 630);
+await render(OUT_TWITTER, 1200, 675);
 console.log('Done.');

@@ -1,14 +1,17 @@
 /**
  * Modul: Budget - wiederkehrende Einträge (Intervall + virtuelles Budget) - Tests
- * Zweck: Validiert generateRecurringInstances für monthly/half_year/yearly,
- *        virtuelles (geglättetes) Budget, Idempotenz und übersprungene Monate.
+ * Zweck: Validiert generateRecurringInstances für Einheit + Anzahl (#636:
+ *        weekly/monthly/yearly, "alle N"), virtuelles (geglättetes) Budget,
+ *        Idempotenz und übersprungene Fälligkeitstage.
  * Ausführen: node --experimental-sqlite test/test-budget-recurrence.js
  */
 
 import { DatabaseSync } from 'node:sqlite';
 import {
   generateRecurringInstances,
-  monthsPerInterval,
+  occurrencesPerYear,
+  occurrenceDatesInMonth,
+  normalizeIntervalCount,
   effectiveMonthly,
 } from '../server/routes/budget.js';
 
@@ -38,7 +41,10 @@ function freshDb() {
       recurrence_rule        TEXT,
       recurrence_parent_id   INTEGER REFERENCES budget_entries(id) ON DELETE SET NULL,
       recurrence_interval    TEXT    NOT NULL DEFAULT 'monthly',
+      recurrence_interval_count INTEGER NOT NULL DEFAULT 1,
       recurrence_virtual     INTEGER NOT NULL DEFAULT 0,
+      recurrence_confirm     INTEGER NOT NULL DEFAULT 0,
+      is_pending             INTEGER NOT NULL DEFAULT 0,
       recurrence_full_amount REAL,
       created_by             INTEGER NOT NULL,
       created_at             TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
@@ -47,8 +53,8 @@ function freshDb() {
     );
     CREATE TABLE budget_recurrence_skipped (
       parent_id INTEGER NOT NULL REFERENCES budget_entries(id) ON DELETE CASCADE,
-      month     TEXT    NOT NULL,
-      UNIQUE(parent_id, month)
+      date      TEXT    NOT NULL,
+      UNIQUE(parent_id, date)
     );
     INSERT INTO users (username, display_name, password_hash, role)
       VALUES ('admin', 'Admin', 'x', 'admin');
@@ -57,13 +63,14 @@ function freshDb() {
 }
 
 /** Legt ein Serien-Original an und gibt dessen id zurück. */
-function insertParent(db, { amount, date, interval = 'monthly', virtual = 0, full = null }) {
+function insertParent(db, { amount, date, interval = 'monthly', count = 1, virtual = 0, full = null, confirm = 0 }) {
   const r = db.prepare(`
     INSERT INTO budget_entries
       (title, amount, category, subcategory, date, is_recurring,
-       recurrence_interval, recurrence_virtual, recurrence_full_amount, created_by)
-    VALUES ('Serie', ?, 'housing', 'utilities', ?, 1, ?, ?, ?, 1)
-  `).run(amount, date, interval, virtual, full);
+       recurrence_interval, recurrence_interval_count, recurrence_virtual,
+       recurrence_confirm, recurrence_full_amount, created_by)
+    VALUES ('Serie', ?, 'housing', 'utilities', ?, 1, ?, ?, ?, ?, ?, 1)
+  `).run(amount, date, interval, count, virtual, confirm, full);
   return r.lastInsertRowid;
 }
 
@@ -84,17 +91,56 @@ console.log('\n[Budget-Recurrence-Test] Intervalle + virtuelles Budget\n');
 // Reine Helper
 // --------------------------------------------------------
 
-test('monthsPerInterval bildet Intervalle korrekt ab', () => {
-  assert(monthsPerInterval('monthly') === 1);
-  assert(monthsPerInterval('half_year') === 6);
-  assert(monthsPerInterval('yearly') === 12);
-  assert(monthsPerInterval('unknown') === 1, 'Fallback auf monatlich');
+test('occurrencesPerYear rechnet Einheit + Anzahl in eine Jahresfrequenz um', () => {
+  assert(occurrencesPerYear('monthly') === 12);
+  assert(occurrencesPerYear('monthly', 6) === 2, 'das frühere half_year');
+  assert(occurrencesPerYear('yearly') === 1);
+  assert(occurrencesPerYear('yearly', 2) === 0.5, 'alle zwei Jahre');
+  assert(occurrencesPerYear('weekly') === 52);
+  assert(occurrencesPerYear('weekly', 2) === 26, 'zweiwöchentlich');
+  assert(occurrencesPerYear('unknown') === 12, 'Fallback auf monatlich');
+});
+
+test('normalizeIntervalCount hält die Anzahl in [1, 99]', () => {
+  assert(normalizeIntervalCount(undefined) === 1);
+  assert(normalizeIntervalCount(0) === 1);
+  assert(normalizeIntervalCount(-3) === 1);
+  assert(normalizeIntervalCount(2.7) === 2);
+  assert(normalizeIntervalCount(500) === 99);
 });
 
 test('effectiveMonthly glättet den Periodenbetrag auf Monate', () => {
   assert(effectiveMonthly(-1200, 'yearly') === -100, `yearly: ${effectiveMonthly(-1200, 'yearly')}`);
-  assert(effectiveMonthly(-600, 'half_year') === -100, `half_year: ${effectiveMonthly(-600, 'half_year')}`);
+  assert(effectiveMonthly(-600, 'monthly', 6) === -100, `alle 6 Monate: ${effectiveMonthly(-600, 'monthly', 6)}`);
   assert(effectiveMonthly(-100, 'monthly') === -100, `monthly: ${effectiveMonthly(-100, 'monthly')}`);
+  // 52 Wochen / 12 Monate: 25 pro Woche sind 108,33 im Monat.
+  assert(effectiveMonthly(-25, 'weekly') === -108.33, `weekly: ${effectiveMonthly(-25, 'weekly')}`);
+  assert(effectiveMonthly(-2400, 'yearly', 2) === -100, `alle 2 Jahre: ${effectiveMonthly(-2400, 'yearly', 2)}`);
+});
+
+test('occurrenceDatesInMonth zählt Wochenserien im Monat auf', () => {
+  // Start ist Freitag, der 2026-01-02; der März 2026 trägt vier davon.
+  const march = occurrenceDatesInMonth('2026-01-02', 'weekly', 1, '2026-03');
+  assert(march[0] === '2026-03-06', `erster Freitag: ${march[0]}`);
+  assert(march.every((d) => d.startsWith('2026-03')), 'alle im Monat');
+  assert(march.length === 4, `vier Freitage im März: ${march.join(', ')}`);
+});
+
+test('occurrenceDatesInMonth: alle zwei Wochen überspringt jede zweite', () => {
+  const dates = occurrenceDatesInMonth('2026-01-02', 'weekly', 2, '2026-03');
+  assert(dates.length === 2, `zwei Termine im März: ${dates.join(', ')}`);
+  assert(dates[0] === '2026-03-13' && dates[1] === '2026-03-27', dates.join(', '));
+});
+
+test('occurrenceDatesInMonth: der Starttag selbst zählt nicht mit', () => {
+  assert(occurrenceDatesInMonth('2026-01-02', 'weekly', 1, '2026-01')[0] === '2026-01-09');
+  assert(occurrenceDatesInMonth('2026-01-15', 'monthly', 1, '2026-01').length === 0);
+});
+
+test('occurrenceDatesInMonth kappt den Monatsüberlauf', () => {
+  assert(occurrenceDatesInMonth('2026-01-31', 'monthly', 1, '2026-02')[0] === '2026-02-28');
+  assert(occurrenceDatesInMonth('2026-01-31', 'monthly', 1, '2026-04')[0] === '2026-04-30');
+  assert(occurrenceDatesInMonth('2026-01-31', 'monthly', 1, '2026-03')[0] === '2026-03-31');
 });
 
 // --------------------------------------------------------
@@ -123,14 +169,41 @@ test('Jährlich erzeugt nur im Jahrestag-Monat', () => {
   assert(inst.amount === -1200, `Voller Jahresbetrag: ${inst.amount}`);
 });
 
-test('Halbjährlich erzeugt alle 6 Monate', () => {
+test('Alle 6 Monate erzeugt halbjährlich (das frühere half_year)', () => {
   const db = freshDb();
-  const pid = insertParent(db, { amount: -600, date: '2026-01-10', interval: 'half_year' });
+  const pid = insertParent(db, { amount: -600, date: '2026-01-10', interval: 'monthly', count: 6 });
   generateRecurringInstances(db, '2026-04'); // diff 3 → kein Treffer
   assert(!instanceIn(db, pid, '2026-04'), 'April ohne Instanz');
   generateRecurringInstances(db, '2026-07'); // diff 6 → Treffer
   const inst = instanceIn(db, pid, '2026-07');
   assert(inst && inst.amount === -600, 'Juli hat vollen Betrag');
+});
+
+test('Wöchentlich erzeugt mehrere Instanzen im selben Monat', () => {
+  const db = freshDb();
+  const pid = insertParent(db, { amount: -25, date: '2026-01-02', interval: 'weekly' });
+  generateRecurringInstances(db, '2026-03');
+  const inMarch = instances(db, pid).filter((e) => e.date.startsWith('2026-03'));
+  assert(inMarch.length === 4, `vier Wochen-Instanzen, erhalten ${inMarch.length}`);
+  assert(inMarch.every((e) => e.amount === -25), 'jede trägt den vollen Wochenbetrag');
+  assert(inMarch[0].date === '2026-03-06', `erste am ${inMarch[0].date}`);
+});
+
+test('Alle 2 Wochen lässt jede zweite Woche aus', () => {
+  const db = freshDb();
+  const pid = insertParent(db, { amount: -40, date: '2026-01-02', interval: 'weekly', count: 2 });
+  generateRecurringInstances(db, '2026-03');
+  const dates = instances(db, pid).map((e) => e.date);
+  assert(dates.join(',') === '2026-03-13,2026-03-27', dates.join(','));
+});
+
+test('Alle 2 Jahre erzeugt nur im zweiten Jahrestag-Monat', () => {
+  const db = freshDb();
+  const pid = insertParent(db, { amount: -300, date: '2026-01-15', interval: 'yearly', count: 2 });
+  generateRecurringInstances(db, '2027-01');
+  assert(!instanceIn(db, pid, '2027-01'), 'nach einem Jahr noch nicht fällig');
+  generateRecurringInstances(db, '2028-01');
+  assert(instanceIn(db, pid, '2028-01'), 'nach zwei Jahren fällig');
 });
 
 // --------------------------------------------------------
@@ -151,14 +224,27 @@ test('Virtuell jährlich erzeugt jeden Monat den geglätteten Anteil', () => {
   }
 });
 
-test('Virtuell halbjährlich erzeugt auch in Nicht-Fälligkeitsmonaten', () => {
+test('Virtuell alle 6 Monate erzeugt auch in Nicht-Fälligkeitsmonaten', () => {
   const db = freshDb();
   const pid = insertParent(db, {
-    amount: -100, date: '2026-01-10', interval: 'half_year', virtual: 1, full: -600,
+    amount: -100, date: '2026-01-10', interval: 'monthly', count: 6, virtual: 1, full: -600,
   });
   generateRecurringInstances(db, '2026-03'); // bei nicht-virtuell wäre das leer
   const inst = instanceIn(db, pid, '2026-03');
   assert(inst && inst.amount === -100, 'März hat geglätteten Anteil');
+});
+
+test('Virtuell wöchentlich bleibt bei EINER Buchung je Monat', () => {
+  // Der Monatsanteil ist eine Planungsgröße: über den Monat verstreute
+  // Teilbeträge wären keine Zahlungen, sondern Bruchstücke einer Schätzung.
+  const db = freshDb();
+  const pid = insertParent(db, {
+    amount: -108.33, date: '2026-01-02', interval: 'weekly', virtual: 1, full: -25,
+  });
+  generateRecurringInstances(db, '2026-03');
+  const inMarch = instances(db, pid).filter((e) => e.date.startsWith('2026-03'));
+  assert(inMarch.length === 1, `genau eine Instanz, erhalten ${inMarch.length}`);
+  assert(inMarch[0].amount === -108.33, `Monatsanteil: ${inMarch[0].amount}`);
 });
 
 // --------------------------------------------------------
@@ -174,12 +260,23 @@ test('Mehrfaches Generieren dupliziert nicht', () => {
   assert(all.length === 1, `Genau eine März-Instanz, erhalten ${all.length}`);
 });
 
-test('Übersprungener Monat erzeugt keine Instanz', () => {
+test('Übersprungener Fälligkeitstag erzeugt keine Instanz', () => {
   const db = freshDb();
   const pid = insertParent(db, { amount: -950, date: '2026-01-15', interval: 'monthly' });
-  db.prepare('INSERT INTO budget_recurrence_skipped (parent_id, month) VALUES (?, ?)').run(pid, '2026-03');
+  db.prepare('INSERT INTO budget_recurrence_skipped (parent_id, date) VALUES (?, ?)').run(pid, '2026-03-15');
   generateRecurringInstances(db, '2026-03');
   assert(!instanceIn(db, pid, '2026-03'), 'März bleibt leer (übersprungen)');
+});
+
+test('Ein übersprungener Termin nimmt die übrigen Wochen nicht mit', () => {
+  // Genau das war der Grund, den Vermerk vom Monat auf den Tag zu ziehen (#636):
+  // eine gelöschte Woche hätte sonst den ganzen Monat stillgelegt.
+  const db = freshDb();
+  const pid = insertParent(db, { amount: -25, date: '2026-01-02', interval: 'weekly' });
+  db.prepare('INSERT INTO budget_recurrence_skipped (parent_id, date) VALUES (?, ?)').run(pid, '2026-03-13');
+  generateRecurringInstances(db, '2026-03');
+  const dates = instances(db, pid).map((e) => e.date);
+  assert(dates.join(',') === '2026-03-06,2026-03-20,2026-03-27', dates.join(','));
 });
 
 test('Startmonat selbst bekommt keine zusätzliche Instanz', () => {
@@ -187,6 +284,35 @@ test('Startmonat selbst bekommt keine zusätzliche Instanz', () => {
   const pid = insertParent(db, { amount: -950, date: '2026-01-15', interval: 'monthly' });
   generateRecurringInstances(db, '2026-01');
   assert(!instanceIn(db, pid, '2026-01'), 'Startmonat ohne Kind-Instanz');
+});
+
+// --------------------------------------------------------
+// Bestätigung vor der Buchung (#637)
+// --------------------------------------------------------
+
+test('Eine Serie mit Bestätigungspflicht erzeugt erwartete Buchungen', () => {
+  const db = freshDb();
+  const pid = insertParent(db, { amount: -60, date: '2026-01-15', interval: 'monthly', confirm: 1 });
+  generateRecurringInstances(db, '2026-03');
+  const inst = instanceIn(db, pid, '2026-03');
+  assert(inst, 'Instanz vorhanden');
+  assert(inst.is_pending === 1, 'als erwartet markiert');
+});
+
+test('Ohne Bestätigungspflicht bleibt die Buchung sofort gültig', () => {
+  const db = freshDb();
+  const pid = insertParent(db, { amount: -60, date: '2026-01-15', interval: 'monthly' });
+  generateRecurringInstances(db, '2026-03');
+  assert(instanceIn(db, pid, '2026-03').is_pending === 0, 'Vorgabe bleibt gebucht');
+});
+
+test('Auch jede Woche einer bestätigungspflichtigen Serie wartet einzeln', () => {
+  const db = freshDb();
+  const pid = insertParent(db, { amount: -25, date: '2026-01-02', interval: 'weekly', confirm: 1 });
+  generateRecurringInstances(db, '2026-03');
+  const all = instances(db, pid);
+  assert(all.length === 4, `vier Instanzen, erhalten ${all.length}`);
+  assert(all.every((e) => e.is_pending === 1), 'jede einzeln zu bestätigen');
 });
 
 // --------------------------------------------------------

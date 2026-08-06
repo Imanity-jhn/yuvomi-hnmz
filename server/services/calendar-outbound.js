@@ -62,6 +62,23 @@ export function classifyOutboundError(err) {
   return 'retry';
 }
 
+/**
+ * Was nach einem fehlgeschlagenen Versuch zu tun ist - die Regel, nicht ihre
+ * Ausführung. Kalender-Termine und VTODO-Einträge (#617) liegen in verschiedenen
+ * Tabellen und merken ihre Absicht verschieden vor, aber sie geben nach denselben
+ * Kriterien auf: erledigt, endgültig abgelehnt, oder Versuch verbraucht.
+ *
+ * @param {Error}  err       Provider-Fehler
+ * @param {number} attempts  bisherige Fehlversuche (vor diesem)
+ * @returns {'settled'|'give-up'|'retry'}
+ */
+export function outboundFailureAction(err, attempts) {
+  const kind = classifyOutboundError(err);
+  if (kind === 'settled') return 'settled';
+  if (kind === 'permanent' || attempts + 1 >= MAX_OUTBOUND_ATTEMPTS) return 'give-up';
+  return 'retry';
+}
+
 // --------------------------------------------------------
 // Vormerkung: Löschung
 // --------------------------------------------------------
@@ -70,11 +87,11 @@ export function classifyOutboundError(err) {
  * Legt einen Tombstone an. Idempotent über den UNIQUE-Index.
  * @returns {boolean} true, wenn eine Löschung vorgemerkt ist
  */
-export function queueDeletion({ source, calendarExternalId, eventExternalId, objectUrl = null }) {
+export function queueDeletion({ source, calendarExternalId, eventExternalId, objectUrl = null }, database = null) {
   if (!source || !eventExternalId) return false;
   if (!calendarExternalId && !objectUrl) return false;
 
-  db.get().prepare(`
+  (database || db.get()).prepare(`
     INSERT INTO calendar_pending_deletions (source, calendar_external_id, event_external_id, object_url)
     VALUES (?, ?, ?, ?)
     ON CONFLICT(source, calendar_external_id, event_external_id)
@@ -145,14 +162,14 @@ export function recordDeletionObjectUrl(id, objectUrl) {
  * @returns {boolean} true, wenn der Tombstone erledigt (oder aufgegeben) ist
  */
 export function handleDeletionError(err, row, provider) {
-  const kind = classifyOutboundError(err);
-  if (kind === 'settled') {
+  const action = outboundFailureAction(err, row.attempts);
+  if (action === 'settled') {
     dropDeletion(row.id);
     return true;
   }
   const attempts = row.attempts + 1;
   failDeletion(row.id, err);
-  if (kind === 'permanent' || attempts >= MAX_OUTBOUND_ATTEMPTS) {
+  if (action === 'give-up') {
     log.error(`[${provider}] Giving up on remote deletion of ${row.event_external_id} after ${attempts} attempt(s):`, err.message);
     dropDeletion(row.id);
     return true;
@@ -230,24 +247,20 @@ export function failOutbound(eventId) {
  * Umzugs-Vormerkung (clearOutboundMove), beim Push alles (clearOutbound).
  */
 export function handleUpdateError(err, event, what, provider, giveUp = clearOutbound) {
-  const kind = classifyOutboundError(err);
-  if (kind === 'settled') {
+  const action = outboundFailureAction(err, event.outbound_attempts);
+  if (action === 'settled') {
     log.warn(`[${provider}] Event ${event.external_calendar_id} no longer exists at the provider, dropping outbound ${what}.`);
     clearOutbound(event.id);
     return;
   }
-  if (kind === 'permanent') {
-    log.error(`[${provider}] Outbound ${what} of event ${event.id} rejected, giving up:`, err.message);
+  if (action === 'give-up') {
+    // giveUp setzt den Zähler ohnehin zurück, deshalb hier kein failOutbound.
+    log.error(`[${provider}] Giving up on outbound ${what} of event ${event.id} after ${event.outbound_attempts + 1} attempt(s):`, err.message);
     giveUp(event.id);
     return;
   }
   const attempts = event.outbound_attempts + 1;
   failOutbound(event.id);
-  if (attempts >= MAX_OUTBOUND_ATTEMPTS) {
-    log.error(`[${provider}] Giving up on outbound ${what} of event ${event.id} after ${attempts} attempts:`, err.message);
-    giveUp(event.id);
-    return;
-  }
   log.warn(`[${provider}] Outbound ${what} failed for event ${event.id} (attempt ${attempts}):`, err.message);
 }
 
@@ -270,9 +283,9 @@ function cfg(key) {
 }
 
 /** Externe Kalender-Kennung, in der das Event beim Provider liegt. */
-function calendarExternalId(event) {
+function calendarExternalId(event, database = null) {
   if (event.calendar_ref_id) {
-    const row = db.get().prepare(
+    const row = (database || db.get()).prepare(
       'SELECT external_id FROM external_calendars WHERE id = ? AND source = ?'
     ).get(event.calendar_ref_id, event.external_source);
     if (row?.external_id) return row.external_id;
@@ -301,12 +314,12 @@ function acceptsOutbound(source) {
  * Muss VOR dem lokalen DELETE mit der noch vorhandenen Zeile aufgerufen werden.
  * @returns {boolean} true, wenn ein Tombstone entstanden ist
  */
-export function queueEventDeletion(event) {
+export function queueEventDeletion(event, database = null) {
   if (!event || !OUTBOUND_SOURCES.includes(event.external_source)) return false;
   if (!event.external_calendar_id) return false;
   if (!acceptsOutbound(event.external_source)) return false;
 
-  const calId = calendarExternalId(event);
+  const calId = calendarExternalId(event, database);
   // Ohne Kalender und ohne Objekt-URL gibt es keinen Weg zum entfernten Objekt.
   if (!calId && !event.external_object_url) {
     log.warn(`No remote calendar known for event ${event.id}, deletion at the provider skipped.`);
@@ -318,7 +331,7 @@ export function queueEventDeletion(event) {
     calendarExternalId: calId,
     eventExternalId:    event.external_calendar_id,
     objectUrl:          event.external_object_url || null,
-  });
+  }, database);
 }
 
 /**

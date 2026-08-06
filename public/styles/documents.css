@@ -689,8 +689,8 @@
 .document-dropzone:focus-within {
   border-color: var(--module-accent);
   border-style: solid;
-  outline: 2px solid var(--module-accent);
-  outline-offset: 2px;
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
 }
 
 .document-dropzone--active {
@@ -1005,8 +1005,8 @@
 }
 
 .document-viewer__pdf-pages:focus-visible {
-  outline: 2px solid var(--module-accent);
-  outline-offset: 2px;
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
 }
 
 /* Sichtbarer Seitenindikator ("n von total"), klebt beim Scrollen oben am Modal-Body.
@@ -1300,8 +1300,8 @@
 
 .dms-result__media--link:focus-visible,
 .dms-result__media--action:focus-visible {
-  outline: 2px solid var(--color-focus-ring, var(--module-accent));
-  outline-offset: 2px;
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
 }
 
 @media (prefers-reduced-motion: reduce) {

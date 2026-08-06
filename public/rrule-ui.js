@@ -4,7 +4,7 @@
  * Abhängigkeiten: /i18n.js
  */
 
-import { t, formatDateInput, parseDateInput, isDateInputValid } from '/i18n.js';
+import { t, formatDate, formatDateInput, parseDateInput, isDateInputValid } from '/i18n.js';
 
 const FREQ_OPTIONS = () => [
   { value: '',        label: t('rrule.freqNone') },
@@ -81,14 +81,19 @@ export function buildRRule({ freq, interval, byday, until, count = null }) {
  * Rendert das HTML für die Wiederholungs-Felder.
  * @param {string} prefix - ID-Prefix (z.B. "task" oder "event")
  * @param {string|null} existingRule - bestehende RRULE oder null
- * @param {{ allowCount?: boolean }} [opts] - allowCount aktiviert die
- *        "Nach N Terminen"-Endebedingung (COUNT). Nur für Kontexte mit
- *        startverankerter Expansion (Kalender). Aufgaben sind
+ * @param {{ allowCount?: boolean, allowFromCompletion?: boolean, fromCompletion?: boolean }} [opts]
+ *        allowCount aktiviert die "Nach N Terminen"-Endebedingung (COUNT). Nur
+ *        für Kontexte mit startverankerter Expansion (Kalender). Aufgaben sind
  *        abschluss-getrieben und kennen keine COUNT-Semantik (#513).
+ *        allowFromCompletion aktiviert den Ankerschalter "ab Erledigung" (#658) -
+ *        umgekehrt nur dort, wo es ein Erledigen gibt: ein Termin wird nicht
+ *        abgehakt, für ihn gäbe es keinen zweiten Anker.
  * @returns {string} HTML-String
  */
 export function renderRRuleFields(prefix, existingRule, opts = {}) {
   const allowCount = !!opts.allowCount;
+  const allowFromCompletion = !!opts.allowFromCompletion;
+  const fromCompletion = !!opts.fromCompletion;
   const parsed = parseRRule(existingRule);
 
   const freqOpts = FREQ_OPTIONS().map(o =>
@@ -127,7 +132,7 @@ export function renderRRuleFields(prefix, existingRule, opts = {}) {
             <div class="rrule-interval-wrap">
               <input class="input form-input" type="number" id="${prefix}-rrule-interval"
                      min="1" max="99" value="${parsed.interval}" inputmode="numeric" style="width:64px;text-align:center">
-              <span class="rrule-interval-unit" id="${prefix}-rrule-unit">${unitLabel(parsed.freq, parsed.interval)}</span>
+              <span class="rrule-interval-unit" id="${prefix}-rrule-unit">${intervalUnitLabel(parsed.freq, parsed.interval)}</span>
             </div>
           </div>
           <div class="form-group" style="margin-bottom:0">
@@ -159,18 +164,100 @@ export function renderRRuleFields(prefix, existingRule, opts = {}) {
           <div class="rrule-day-grid">${dayBtns}</div>
         </div>
 
+        ${allowFromCompletion ? `
+        <div class="rrule-anchor">
+          <label class="toggle" style="margin:0">
+            <input type="checkbox" id="${prefix}-rrule-from-completion" ${fromCompletion ? 'checked' : ''}>
+            <span class="toggle__track"></span>
+            <span>${t('rrule.fromCompletionLabel')}</span>
+          </label>
+          <p class="rrule-anchor__hint">${t('rrule.fromCompletionHint')}</p>
+        </div>` : ''}
+
       </div>
     </div>
   `;
 }
 
-function unitLabel(freq, interval) {
-  const n = interval > 1;
-  if (freq === 'DAILY')   return n ? t('rrule.unitDays')   : t('rrule.unitDay');
-  if (freq === 'WEEKLY')  return n ? t('rrule.unitWeeks')  : t('rrule.unitWeek');
-  if (freq === 'MONTHLY') return n ? t('rrule.unitMonths') : t('rrule.unitMonth');
-  if (freq === 'YEARLY')  return n ? t('rrule.unitYears')  : t('rrule.unitYear');
-  return '';
+/**
+ * Das Wort hinter „Alle N": Einheit in Ein- oder Mehrzahl.
+ *
+ * Versteht beide Schreibweisen - die RRULE-Frequenz (`WEEKLY`) und die
+ * Budget-Einheit (`weekly`, #636). Die Zuordnung Einheit → Wort lag sonst ein
+ * zweites Mal im Budget-Modal, sobald auch dort „alle N Monate" wählbar wurde.
+ *
+ * @param {string} unit   DAILY|WEEKLY|MONTHLY|YEARLY oder weekly|monthly|yearly
+ * @param {number} count  Anzahl, entscheidet über Ein-/Mehrzahl
+ */
+export function intervalUnitLabel(unit, count = 1) {
+  const n = count > 1;
+  switch (String(unit || '').toUpperCase()) {
+    case 'DAILY':   return n ? t('rrule.unitDays')   : t('rrule.unitDay');
+    case 'WEEKLY':  return n ? t('rrule.unitWeeks')  : t('rrule.unitWeek');
+    case 'MONTHLY': return n ? t('rrule.unitMonths') : t('rrule.unitMonth');
+    case 'YEARLY':  return n ? t('rrule.unitYears')  : t('rrule.unitYear');
+    default:        return '';
+  }
+}
+
+
+/**
+ * Beschreibt eine RRULE in einem Satz: „Alle 2 Wochen (Mo, Do) bis 31.12.2026".
+ *
+ * Für die Detailansicht: Ob ein Termin wöchentlich wiederkehrt, war bisher nur
+ * im Bearbeitungsformular zu sehen - man musste den Termin öffnen, um eine
+ * Leseinformation zu bekommen.
+ *
+ * @param {string|null} rule
+ * @param {{ fromCompletion?: boolean }} [opts] Der Anker steht nicht in der
+ *        RRULE (RFC 5545 kennt ihn nicht) und muss deshalb hier hereingereicht
+ *        werden. Ohne ihn läse sich „Jede Woche" für zwei verschiedene Serien
+ *        gleich, obwohl sie an verschiedenen Tagen wiederkommen (#658).
+ * @returns {string} leerer String, wenn keine Wiederholung
+ */
+export function describeRRule(rule, opts = {}) {
+  const p = parseRRule(rule);
+  if (!p.freq) return '';
+
+  // Die Beschriftungen kommen aus denselben Listen, die auch das Formular füllt.
+  // Eine zweite Wert-zu-Label-Zuordnung daneben hiesse, jede künftige Frequenz
+  // an zwei Stellen zu pflegen.
+  const parts = [
+    p.interval > 1
+      ? `${t('rrule.labelEvery')} ${p.interval} ${intervalUnitLabel(p.freq, p.interval)}`
+      : (FREQ_OPTIONS().find((o) => o.value === p.freq)?.label ?? t('rrule.freqDaily')),
+  ];
+
+  // Wochentage nur bei WEEKLY: bei jeder anderen Frequenz trägt BYDAY in dieser
+  // Oberfläche keine Bedeutung (buildRRule schreibt es dort auch nicht).
+  if (p.freq === 'WEEKLY' && p.byday.length) {
+    const weekdays = WEEKDAYS();
+    const days = p.byday.map((d) => weekdays.find((w) => w.value === d)?.label).filter(Boolean);
+    if (days.length) parts.push(`(${days.join(', ')})`);
+  }
+
+  // Die Endebedingung ist eine eigene Aussage und bekommt einen Trenner:
+  // „Alle 2 Monate 5 Termine" las sich wie ein verunglückter Satz.
+  let rhythm = parts.join(' ');
+  if (opts.fromCompletion) rhythm += ` · ${t('rrule.summaryFromCompletion')}`;
+  if (p.count) return `${rhythm} · ${t('rrule.summaryCount', { count: p.count })}`;
+  if (p.until) return `${rhythm} · ${t('rrule.summaryUntil', { date: formatDate(p.until) })}`;
+  return rhythm;
+}
+
+/**
+ * Die Wiederholung als fertige Zeile für die Detailansicht.
+ *
+ * Wohnt hier statt in detail-view.js, weil dieses Modul das Konzept
+ * „Wiederholungsregel" besitzt - Kalender und Aufgaben bauten die Zeile sonst
+ * beide selbst, wortgleich bis auf die Entität.
+ *
+ * @param {string|null} rule
+ * @param {{ fromCompletion?: boolean }} [opts] siehe describeRRule
+ * @returns {{icon: string, label: string, value: string}}
+ */
+export function recurrenceRow(rule, opts = {}) {
+  return { icon: 'repeat', label: t('rrule.labelRepeat'), value: describeRRule(rule, opts) };
 }
 
 /**
@@ -216,7 +303,7 @@ export function bindRRuleEvents(root, prefix) {
   function updateUnit() {
     if (!unitEl) return;
     const interval = parseInt(intervalEl?.value, 10) || 1;
-    unitEl.textContent = unitLabel(freqSelect.value, interval);
+    unitEl.textContent = intervalUnitLabel(freqSelect.value, interval);
   }
 }
 
@@ -224,7 +311,8 @@ export function bindRRuleEvents(root, prefix) {
  * Liest die aktuellen RRULE-Werte aus dem Formular.
  * @param {HTMLElement} root - Container-Element
  * @param {string} prefix - ID-Prefix
- * @returns {{ is_recurring: boolean, recurrence_rule: string|null }}
+ * @returns {{ is_recurring: boolean, recurrence_rule: string|null,
+ *            recurrence_from_completion: boolean, valid_until: boolean }}
  */
 export function getRRuleValues(root, prefix) {
   const freq     = root.querySelector(`#${prefix}-rrule-freq`)?.value || '';
@@ -243,9 +331,15 @@ export function getRRuleValues(root, prefix) {
   });
 
   const rule = buildRRule({ freq, interval, byday, until, count });
+  // Ohne Regel ist der Anker bedeutungslos: sonst bliebe der Schalter an einer
+  // Aufgabe hängen, die gar nicht mehr wiederkehrt, und käme beim nächsten
+  // Einschalten der Wiederholung ungefragt zurück.
+  const fromCompletion = !!rule
+    && !!root.querySelector(`#${prefix}-rrule-from-completion`)?.checked;
   return {
     is_recurring:    !!rule,
     recurrence_rule: rule,
+    recurrence_from_completion: fromCompletion,
     // UNTIL nur validieren, wenn "Am Datum" gewählt ist (sonst irrelevant).
     valid_until:     endMode !== 'until' || isDateInputValid(untilRaw),
   };

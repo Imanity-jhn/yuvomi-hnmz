@@ -81,26 +81,24 @@
  * der äußere .app-content-Scrollcontainer läuft über → beim Scrollen wandert
  * die gesamte Seite (z.B. week-nav + Tages-Header) statt nur des inneren
  * Scrollbereichs. .meals-page und .recipes-page teilen dieselbe Basisformel. */
+/* Die vier Küchen-Seiten füllen den Platz UNTER der Tab-Leiste.
+ *
+ * Vorher rechneten diese beiden Blöcke die Viewport-Höhe nach
+ * (`100dvh - safe-top - nav - safe-bottom - tabs`), und zwar in zwei leicht
+ * verschiedenen Fassungen - der Einkauf ließ --safe-area-inset-top aus. Eine
+ * nachgerechnete Höhe kennt nur, was zum Zeitpunkt des Schreibens unter der
+ * Seite lag: die FAB-Zone (--fab-safe-zone) kam später dazu und fehlte in
+ * beiden, weshalb die Seiten aus der verkürzten .app-content herausliefen und
+ * sie selbst scrollbar machten.
+ *
+ * `100%` liest den Platz, statt ihn zu erraten - die Kette .app-content →
+ * .page-transition → Seite reicht ihn durch. Jede künftige Änderung an der
+ * Shell wirkt damit automatisch hier. */
 .has-kitchen-tabs .meals-page,
 .has-kitchen-tabs .recipes-page,
+.has-kitchen-tabs .shopping-page,
 .has-kitchen-tabs .pantry-page {
-  height: calc(
-    100dvh
-    - var(--safe-area-inset-top)
-    - var(--nav-bottom-height)
-    - var(--safe-area-inset-bottom)
-    - var(--kitchen-tabs-height)
-  );
-}
-
-/* Einkauf: Viewport-Höhe um Tab-Leiste reduzieren (Mobile) */
-.has-kitchen-tabs .shopping-page {
-  height: calc(
-    100dvh
-    - var(--nav-bottom-height)
-    - var(--safe-area-inset-bottom)
-    - var(--kitchen-tabs-height)
-  );
+  height: calc(100% - var(--kitchen-tabs-height));
 }
 
 /* Mahlzeiten + Rezepte + Einkauf: Viewport-Höhe (Desktop) */
@@ -109,6 +107,6 @@
   .has-kitchen-tabs .recipes-page,
   .has-kitchen-tabs .shopping-page,
   .has-kitchen-tabs .pantry-page {
-    height: calc(100dvh - var(--kitchen-tabs-height));
+    height: calc(100% - var(--kitchen-tabs-height));
   }
 }

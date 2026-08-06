@@ -9,6 +9,7 @@ import { t } from '/i18n.js';
 import { openModal, closeModal, reportFieldError } from '/components/modal.js';
 import { vibrate } from '/utils/ux.js';
 import { renderSkeletonList } from '/utils/skeleton.js';
+import { amountPlaceholder, amountStep, amountIsSavable, smallestUnitLabel } from '/utils/money.js';
 
 const view = { month: '', data: null, error: false, ctx: null, root: null };
 
@@ -244,14 +245,14 @@ function openPlanEditor({ category, savings = false }) {
       const input = panel.querySelector('#plan-amount');
       input?.focus();
       input?.select();
-      panel.querySelector('#plan-save').addEventListener('click', () => savePlan(panel, category));
+      panel.querySelector('#plan-save').addEventListener('click', () => savePlan(panel, category, hasCurrent ? current : null));
       panel.querySelector('#plan-delete')?.addEventListener('click', (e) => {
         const btn = e.currentTarget;
         if (btn.disabled) return;        // Doppel-Klick-Schutz gegen doppeltes DELETE
         btn.disabled = true;
         deletePlan(category).finally(() => { btn.disabled = false; });
       });
-      bindEnter(panel, () => savePlan(panel, category));
+      bindEnter(panel, () => savePlan(panel, category, hasCurrent ? current : null));
     },
   });
 }
@@ -260,8 +261,9 @@ function amountFieldHtml(value) {
   return `
     <div class="form-group">
       <label class="form-label" for="plan-amount">${t('budget.planMonthlyAmount')}</label>
-      <input id="plan-amount" class="form-input" type="number" inputmode="decimal" min="0" step="0.01"
-             value="${value === '' ? '' : String(value)}" placeholder="${t('budget.amountPlaceholder')}" />
+      <input id="plan-amount" class="form-input" type="number" inputmode="decimal" min="0"
+             step="${amountStep(view.ctx.currency, value)}"
+             value="${value === '' ? '' : String(value)}" placeholder="${amountPlaceholder(view.ctx.currency)}" />
     </div>`;
 }
 
@@ -271,12 +273,23 @@ function bindEnter(panel, fn) {
   });
 }
 
-async function savePlan(panel, category) {
+async function savePlan(panel, category, original = null) {
   const raw = panel.querySelector('#plan-amount').value;
   const amount = parseFloat(raw);
   if (isNaN(amount) || amount <= 0) {
     // Fehler am Feld statt als ortloser Toast (geteiltes Muster, Critique P1).
     reportFieldError(panel.querySelector('#plan-amount'), t('budget.validAmountRequired'));
+    return;
+  }
+  // Der Dialog ist kein <form>: gespeichert wird über einen Button-Handler, die
+  // native step-Prüfung läuft also nie. Ohne diese Zeile nähme ein Feld mit
+  // step="1" trotzdem 12,5 JPY entgegen. Ein unangetasteter Bestandswert, der
+  // schon vorher neben dem Raster lag, bleibt speicherbar.
+  if (!amountIsSavable(amount, view.ctx.currency, { original })) {
+    reportFieldError(panel.querySelector('#plan-amount'), t('common.amountPrecisionRequired', {
+      currency: view.ctx.currency,
+      step: smallestUnitLabel(view.ctx.currency),
+    }));
     return;
   }
   const btn = panel.querySelector('#plan-save');

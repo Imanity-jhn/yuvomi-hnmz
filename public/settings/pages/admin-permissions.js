@@ -48,6 +48,7 @@ const WIDGET_LABEL_KEYS = {
   notes: 'nav.notes',
   family: 'settings.permWidgetFamily',
   weather: 'settings.permWidgetWeather',
+  clock: 'dashboard.clock',
 };
 
 // Icon je Zugriffsstufe (Icon-Segmente statt langer Textlabels). Tooltip/aria

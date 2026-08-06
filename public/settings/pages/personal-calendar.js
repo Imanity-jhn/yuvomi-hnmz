@@ -1,5 +1,7 @@
+import { api } from '/api.js';
 import { t } from '/i18n.js';
 import { esc } from '/utils/html.js';
+import { buildSyncTargetOptions } from '/utils/sync-target.js';
 import { toggleRowHtml } from '/settings/components.js';
 import { getPreferences, savePreferences } from '/settings/preferences-cache.js';
 
@@ -40,13 +42,64 @@ export function collectDefaultReminders(box) {
     .sort((a, b) => a - b);
 }
 
-function renderPage(container, preferences) {
+/**
+ * Optionen des Standard-Ziel-Dropdowns (#620). Wortlaut bewusst derselbe wie im
+ * Event-Modal, denn es ist dieselbe Wahl; die Kennungen kommen aus dem geteilten
+ * Util, damit Einstellung und Modal nicht auseinanderlaufen können.
+ */
+function syncTargetOptions(targets, current = '') {
+  return buildSyncTargetOptions(targets, {
+    local: t('calendar.syncTargetLocal'),
+    google: t('calendar.syncTargetGoogleGroup'),
+    caldav: t('calendar.syncTargetCaldavGroup'),
+    unavailable: t('settings.calendarDefaultTargetUnavailable'),
+  }, current);
+}
+
+function syncTargetFieldHtml(options, current) {
+  let html = '';
+  let openGroup = null;
+  for (const option of options) {
+    if (option.group !== openGroup) {
+      if (openGroup) html += '</optgroup>';
+      openGroup = option.group;
+      if (openGroup) html += `<optgroup label="${esc(openGroup)}">`;
+    }
+    const selected = option.value === current ? ' selected' : '';
+    html += `<option value="${esc(option.value)}"${selected}>${esc(option.label)}</option>`;
+  }
+  if (openGroup) html += '</optgroup>';
+
+  return `
+        <div class="form-group">
+          <label class="form-label" for="calendar-default-target">${t('settings.calendarDefaultTargetLabel')}</label>
+          <select id="calendar-default-target" class="form-select">${html}</select>
+          <p class="form-hint">${t('settings.calendarDefaultTargetHint')}</p>
+        </div>
+  `;
+}
+
+function renderPage(container, preferences, syncTargets = null) {
   const selected = new Set(
     Array.isArray(preferences.calendar_default_reminders)
       ? preferences.calendar_default_reminders.map(Number)
       : [],
   );
   const assignMe = !!preferences.calendar_default_assign_me;
+  // Das Ziel-Feld erscheint nur, wenn es etwas zu wählen gibt: ohne verbundenen
+  // Google- oder CalDAV-Kalender bliebe ein Dropdown mit der einzigen Option
+  // "Lokal speichern". Sobald ein Ziel gespeichert ist, trägt es
+  // buildSyncTargetOptions als zweite Option nach und das Feld erscheint wieder -
+  // sonst gäbe es keinen Weg, ein Ziel abzuwählen, dessen Konto entfernt wurde.
+  // Nur wenn die Zielabfrage selbst scheitert (syncTargets === null), bleibt das
+  // Feld weg: dann ist unbekannt, was zur Wahl stünde.
+  const currentTarget = preferences.calendar_default_target || '';
+  const targetOptions = syncTargets
+    ? syncTargetOptions(syncTargets, currentTarget)
+    : [];
+  const targetField = targetOptions.length > 1
+    ? syncTargetFieldHtml(targetOptions, currentTarget)
+    : '';
   const checkboxes = DEFAULT_REMINDER_OPTIONS.map((option) => `
     <label class="reminder-preset">
       <input type="checkbox" class="js-default-reminder" value="${option.value}"${selected.has(option.value) ? ' checked' : ''}>
@@ -69,6 +122,7 @@ function renderPage(container, preferences) {
           })}
         </div>
 
+${targetField}
         <div class="form-group">
           <span class="form-label" id="calendar-default-reminders-label">${t('settings.calendarDefaultRemindersLabel')}</span>
           <p class="settings-card-description">${t('settings.calendarDefaultRemindersHint')}</p>
@@ -99,6 +153,27 @@ function bindEvents(container) {
       if (assignMe.isConnected) assignMe.disabled = false;
     }
   });
+
+  // Standard-Sync-Ziel (#620): Instant-Save mit Rollback auf den letzten
+  // gespeicherten Wert, damit ein abgelehnter Wert nicht sichtbar stehenbleibt.
+  const targetSelect = container.querySelector('#calendar-default-target');
+  if (targetSelect) {
+    let persistedTarget = targetSelect.value;
+    targetSelect.addEventListener('change', async () => {
+      const value = targetSelect.value;
+      targetSelect.disabled = true;
+      try {
+        await savePreferences({ calendar_default_target: value });
+        persistedTarget = value;
+        window.yuvomi?.showToast(t('settings.calendarDefaultsSaved'), 'success');
+      } catch (error) {
+        targetSelect.value = persistedTarget;
+        window.yuvomi?.showToast(error.message || t('common.errorGeneric'), 'danger');
+      } finally {
+        if (targetSelect.isConnected) targetSelect.disabled = false;
+      }
+    });
+  }
 
   const remindersBox = container.querySelector('#calendar-default-reminders');
   if (!remindersBox) return;
@@ -135,7 +210,15 @@ function bindEvents(container) {
 
 export async function render(container, { user }) {
   void user;
-  const preferences = await getPreferences();
-  renderPage(container, preferences);
+  // Die Zielliste ist ein Netzaufruf gegen Google/CalDAV und darf die Seite
+  // nicht mitreißen: fällt sie aus, fehlt nur das Ziel-Feld, die Erinnerungen
+  // und der Zuweisen-Schalter bleiben bedienbar.
+  const [preferences, syncTargets] = await Promise.all([
+    getPreferences(),
+    api.get('/calendar/sync-targets')
+      .then((res) => ({ google: res.data?.google || [], caldav: res.data?.caldav || [] }))
+      .catch(() => null),
+  ]);
+  renderPage(container, preferences, syncTargets);
   bindEvents(container);
 }

@@ -21,7 +21,7 @@
 .contacts-page {
   display: flex;
   flex-direction: column;
-  height: calc(100dvh - var(--safe-area-inset-top) - var(--nav-bottom-height) - var(--safe-area-inset-bottom));
+  height: 100%;
   /* Full-bleed-Root (Issue #577): Content-Spalte über --page-inline-pad auf den
    * direkten Kindern, damit das Chrome des Kopfes bis zur Shell-Kante läuft. */
   /* overflow:clip inside overflow:auto (.app-content) triggers iOS WebKit blank-screen on scroll.
@@ -30,7 +30,7 @@
 }
 
 @media (min-width: 1024px) {
-  .contacts-page { height: 100dvh; }
+  .contacts-page { height: 100%; }
 }
 
 /* --------------------------------------------------------
@@ -206,7 +206,10 @@
   background-color: color-mix(in srgb, var(--c-accent) 12%, transparent);
 }
 
-.contacts-page.is-selecting .page-fab {
+/* Auswahlmodus verdeckt die Anlege-Affordance. Gefragt wird über :has() am
+ * Dokument, weil der FAB seit #634 nicht mehr unter `.contacts-page` hängt,
+ * sondern in der Shell-Layer neben dem Scrollport. */
+html:has(.contacts-page.is-selecting) .page-fab {
   display: none;
 }
 
@@ -229,8 +232,8 @@
 }
 
 .contact-item__open:focus-visible {
-  outline: 2px solid var(--active-module-accent, var(--color-accent));
-  outline-offset: -2px;
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset-inset);
   border-radius: var(--radius-md);
 }
 
@@ -398,8 +401,8 @@
 /* Tastatur-Fokus mit Inset-Ring statt nur Flächenfarbe (Audit F-16). */
 .contact-menu-item:focus-visible {
   background-color: var(--color-surface-2);
-  outline: 2px solid var(--module-accent, var(--color-accent));
-  outline-offset: -2px;
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset-inset);
 }
 
 .contact-menu-item__icon {
@@ -702,4 +705,50 @@
 
 .contact-phone-hint__warn {
   color: var(--color-warning);
+}
+
+/* --------------------------------------------------------
+   Detailansicht: antippbare Werte
+
+   Eine Zeile je Gruppe (Telefon, Mail, Adresse), darin je ein Wert pro Zeile.
+   Der Wert IST die Aktion - anrufen, mailen, Karte öffnen -, deshalb liegt die
+   Trefferfläche auf dem Link und nicht auf einem zusätzlichen Icon daneben.
+   -------------------------------------------------------- */
+.contact-detail__values {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.contact-detail__value {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* Volle Zeilenhöhe als Trefferfläche: Auf dem Smartphone steht hier die
+   häufigste Handlung der ganzen Seite, und Telefonnummern liegen dicht
+   untereinander. --target-base ist dasselbe Maß, das die Detailansicht für
+   Kopf- und Fußzeilen-Aktionen nutzt. */
+.contact-detail__link {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--target-base);
+  color: var(--module-contacts, var(--color-accent));
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.contact-detail__link:hover,
+.contact-detail__link:focus-visible {
+  text-decoration: underline;
+}
+
+/* Das Label der Nummer ("mobil", "Arbeit") ordnet ein, ohne mit dem Wert zu
+   konkurrieren - es steht daneben, nicht darüber, weil die Zeile sonst bei drei
+   Nummern zu einem Block aus sechs Zeilen wird. */
+.contact-detail__sub {
+  font-size: var(--type-caption);
+  color: var(--color-text-tertiary);
 }

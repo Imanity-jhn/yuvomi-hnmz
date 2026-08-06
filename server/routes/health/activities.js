@@ -8,7 +8,8 @@ import * as db from '../../db.js';
 import * as v from '../../middleware/validate.js';
 import {
   log, VISIBILITIES, MAX_UNIT,
-  viewerId, visibilityClause, applyUpdate, badRequest,
+  viewerId, careAwareClause, applyUpdate, badRequest,
+  resolveOwner, writableClause,
 } from './helpers.js';
 
 const router = express.Router();
@@ -18,7 +19,7 @@ router.get('/activities', (req, res) => {
   try {
     const viewer   = viewerId(req);
     const personId = req.query.user_id ? parseInt(req.query.user_id, 10) : null;
-    const clause   = visibilityClause('a', viewer, personId);
+    const clause   = careAwareClause('a', viewer, personId);
     const params   = [...clause.params];
     let sql = `SELECT a.* FROM health_activities a WHERE ${clause.sql}`;
 
@@ -51,10 +52,14 @@ router.post('/activities', (req, res) => {
     const errors = v.collectErrors([type, duration, distance, intensity, calories, performedAt, note, visibility]);
     if (errors.length) return badRequest(res, errors);
 
+    // Optionales user_id: eine betreuende Person trägt für die betreute ein (#584).
+    const owner = resolveOwner(req, viewer);
+    if (owner.error) return res.status(owner.status).json({ error: owner.error, code: owner.status });
+
     const result = db.get().prepare(`
       INSERT INTO health_activities (user_id, type, duration_min, distance_km, intensity, calories, performed_at, note, visibility)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(viewer, type.value, duration.value, distance.value, intensity.value, calories.value,
+    `).run(owner.ownerId, type.value, duration.value, distance.value, intensity.value, calories.value,
            performedAt.value, note.value, visibility.value || 'private');
 
     const row = db.get().prepare('SELECT * FROM health_activities WHERE id = ?').get(result.lastInsertRowid);
@@ -72,7 +77,8 @@ router.patch('/activities/:id', (req, res) => {
     const id = parseInt(req.params.id, 10);
     if (!id) return res.status(400).json({ error: 'Ungültige ID.', code: 400 });
 
-    const existing = db.get().prepare('SELECT * FROM health_activities WHERE id = ? AND user_id = ?').get(id, viewer);
+    const w = writableClause('', viewer);
+    const existing = db.get().prepare(`SELECT * FROM health_activities WHERE id = ? AND ${w.sql}`).get(id, ...w.params);
     if (!existing) return res.status(404).json({ error: 'Aktivität nicht gefunden.', code: 404 });
 
     const b = req.body || {};
@@ -106,7 +112,8 @@ router.delete('/activities/:id', (req, res) => {
     const id = parseInt(req.params.id, 10);
     if (!id) return res.status(400).json({ error: 'Ungültige ID.', code: 400 });
 
-    const existing = db.get().prepare('SELECT id FROM health_activities WHERE id = ? AND user_id = ?').get(id, viewer);
+    const w = writableClause('', viewer);
+    const existing = db.get().prepare(`SELECT id FROM health_activities WHERE id = ? AND ${w.sql}`).get(id, ...w.params);
     if (!existing) return res.status(404).json({ error: 'Aktivität nicht gefunden.', code: 404 });
 
     db.get().prepare('DELETE FROM health_activities WHERE id = ?').run(id);

@@ -10,7 +10,7 @@ import { api } from '/api.js';
 import { t, formatDate, getLocale, getNumberFormat } from '/i18n.js';
 import { esc } from '/utils/html.js';
 import { getReadableTextColor, AVATAR_FALLBACK_COLOR } from '/utils/color.js';
-import { openModal, closeModal, confirmModal } from '/components/modal.js';
+import { openModal, closeModal, confirmModal, confirmOverModal } from '/components/modal.js';
 import { createPageFab, setPageFabAction } from '/utils/fab.js';
 import { wireTablist } from '/utils/tablist.js';
 import { renderSkeletonList } from '/utils/skeleton.js';
@@ -619,9 +619,17 @@ async function openRedeemModal(memberId, presetItemId = null) {
 
 async function decideRedemption(id, action, btn) {
   if (action === 'reject' || action === 'cancel') {
+    // Kein `danger`: der Server bucht die reservierten Punkte per `reversal`
+    // zurück (routes/rewards.js), es geht also kein Guthaben verloren. Die
+    // Anfrage bleibt als entschieden stehen und lässt sich neu stellen, solange
+    // die Belohnung aktiv im Katalog steht - `POST /redemptions` verlangt
+    // `is_active = 1`. Ist sie inzwischen gelöscht, war das Löschen der
+    // Belohnung die endgültige Handlung, und die trägt ihr eigenes `danger`.
+    // Rot faerben wuerde hier eine Endgueltigkeit behaupten, die die
+    // Entscheidung selbst nicht hat.
     const ok = await confirmModal(
       action === 'reject' ? t('rewards.confirmReject') : t('rewards.confirmCancel'),
-      { confirmLabel: action === 'reject' ? t('rewards.reject') : t('common.cancel'), danger: true },
+      { confirmLabel: action === 'reject' ? t('rewards.reject') : t('common.cancel') },
     );
     if (!ok) return;
   }
@@ -729,10 +737,12 @@ function openRewardModal(item) {
       </form>`,
     onSave: (panel) => {
       panel.querySelector('#rw-reward-delete')?.addEventListener('click', async () => {
-        const ok = await confirmModal(t('rewards.confirmDeleteReward', { reward: item.name }), { confirmLabel: t('common.delete'), danger: true });
+        // confirmOverModal statt confirmModal: „Abbrechen" gibt das Belohnungs-
+        // Formular unverändert zurück; bestätigt schliesst es die Frage selbst.
+        const ok = await confirmOverModal(t('rewards.confirmDeleteReward', { reward: item.name }),
+          { confirmLabel: t('common.delete'), danger: true, detail: t('rewards.confirmDeleteRewardDetail') });
         if (!ok) return;
         await api.delete(`/rewards/catalog/${item.id}`);
-        await closeModal({ force: true });
         toast(t('rewards.toastRewardDeleted'), 'default');
         await refreshActiveTab();
       });

@@ -70,6 +70,7 @@ export const PERMISSION_WIDGETS = Object.freeze([
   { id: 'notes',        module: 'notes' },
   { id: 'family',       module: null },
   { id: 'weather',      module: null },
+  { id: 'clock',        module: null },
 ]);
 
 export const MODULE_ACCESS_LEVELS = Object.freeze(['none', 'read', 'write']);

@@ -281,3 +281,183 @@ test('DELETE /categories/:key: 404, in Benutzung 409, danach Erfolg', async () =
   const ok = await call('DELETE', `/categories/${key}`, { as: { id: ALICE, role: 'admin' } });
   assert.equal(ok.status, 204);
 });
+
+// --------------------------------------------------------
+// GET /: Mehrfachauswahl je Achse (#671)
+//
+// Gemeldet: "Filtering the tasklist for e.g. priority only allows one value to
+// be filtered by per row/attribute". Innerhalb einer Achse muss ODER gelten -
+// eine Aufgabe trägt genau EINE Priorität, ein UND wäre garantiert leer.
+// Zwischen den Achsen bleibt es UND.
+// --------------------------------------------------------
+test('GET /: mehrere Prioritäten verknüpfen sich ODER', async () => {
+  const admin = { id: ALICE, role: 'admin' };
+  const mk = (title, priority, status = 'open') =>
+    call('POST', '/', { as: admin, body: { title, priority, status } });
+
+  const marker = `prio-${randomUUID().slice(0, 8)}`;
+  await mk(`${marker}-hoch`, 'high');
+  await mk(`${marker}-mittel`, 'medium');
+  await mk(`${marker}-niedrig`, 'low');
+
+  const mine = (rows) => rows.filter((r) => r.title.startsWith(marker)).map((r) => r.priority).sort();
+
+  const single = await call('GET', '/?priority=high', { as: admin });
+  assert.deepEqual(mine(single.body.data), ['high'], 'ein Wert filtert wie bisher');
+
+  const both = await call('GET', '/?priority=high&priority=medium', { as: admin });
+  assert.deepEqual(mine(both.body.data), ['high', 'medium'], 'zwei Werte liefern beide Gruppen');
+
+  const all = await call('GET', '/?priority=high&priority=medium&priority=low', { as: admin });
+  assert.deepEqual(mine(all.body.data), ['high', 'low', 'medium']);
+});
+
+test('GET /: mehrere Status verknüpfen sich ODER, Achsen untereinander UND', async () => {
+  const admin = { id: ALICE, role: 'admin' };
+  const marker = `mix-${randomUUID().slice(0, 8)}`;
+  await call('POST', '/', { as: admin, body: { title: `${marker}-a`, status: 'open', priority: 'high' } });
+  await call('POST', '/', { as: admin, body: { title: `${marker}-b`, status: 'in_progress', priority: 'high' } });
+  await call('POST', '/', { as: admin, body: { title: `${marker}-c`, status: 'in_progress', priority: 'low' } });
+
+  const titles = (rows) => rows.filter((r) => r.title.startsWith(marker)).map((r) => r.title).sort();
+
+  const twoStatus = await call('GET', '/?status=open&status=in_progress', { as: admin });
+  assert.deepEqual(titles(twoStatus.body.data), [`${marker}-a`, `${marker}-b`, `${marker}-c`]);
+
+  // Achsen-Kombination engt ein: (open ODER in_progress) UND Priorität hoch.
+  const narrowed = await call('GET', '/?status=open&status=in_progress&priority=high', { as: admin });
+  assert.deepEqual(titles(narrowed.body.data), [`${marker}-a`, `${marker}-b`]);
+});
+
+test('GET /: mehrere Personen verknüpfen sich ODER', async () => {
+  const admin = { id: ALICE, role: 'admin' };
+  const marker = `wer-${randomUUID().slice(0, 8)}`;
+  await call('POST', '/', { as: admin, body: { title: `${marker}-alice`, assigned_to: ALICE } });
+  await call('POST', '/', { as: admin, body: { title: `${marker}-bob`, assigned_to: BOB } });
+  await call('POST', '/', { as: admin, body: { title: `${marker}-niemand` } });
+
+  const titles = (rows) => rows.filter((r) => r.title.startsWith(marker)).map((r) => r.title).sort();
+
+  const one = await call('GET', `/?assigned_to=${BOB}`, { as: admin });
+  assert.deepEqual(titles(one.body.data), [`${marker}-bob`]);
+
+  const two = await call('GET', `/?assigned_to=${ALICE}&assigned_to=${BOB}`, { as: admin });
+  assert.deepEqual(titles(two.body.data), [`${marker}-alice`, `${marker}-bob`]);
+});
+
+test('GET /: ein leerer oder unsinniger Wert engt nicht versehentlich ein', async () => {
+  const admin = { id: ALICE, role: 'admin' };
+  // Ein leerer Parameter darf nicht als Wert "" gelten und alles wegfiltern.
+  const empty = await call('GET', '/?priority=', { as: admin });
+  const unfiltered = await call('GET', '/', { as: admin });
+  assert.equal(empty.body.data.length, unfiltered.body.data.length);
+
+  // Eine nicht-numerische Person wird verworfen, statt die Query zu sprengen.
+  const bogus = await call('GET', '/?assigned_to=abc', { as: admin });
+  assert.equal(bogus.status, 200);
+  assert.equal(bogus.body.data.length, unfiltered.body.data.length);
+});
+
+// --------------------------------------------------------
+// Archiv als eigene Achse (#688)
+//
+// Gemeldet war: eine erledigte Aufgabe kam nach dem Archivieren als unerledigt
+// zurück und stand danach in "Heute auf einen Blick", wo sie sich nicht öffnen
+// ließ. Ursache war ein überladenes Statusfeld - das Ablegen überschrieb das
+// Erledigt-Sein. Diese Tests halten die Trennung fest.
+// --------------------------------------------------------
+test('Archivieren lässt den Status stehen - auch erledigt bleibt erledigt', async () => {
+  const admin = { id: ALICE, role: 'admin' };
+  const created = await call('POST', '/', { as: admin, body: { title: `arch-${randomUUID().slice(0, 8)}` } });
+  const id = created.body.data.id;
+
+  await call('PATCH', `/${id}/status`, { as: admin, body: { status: 'done' } });
+  const archived = await call('PATCH', `/${id}/archive`, { as: admin, body: { archived: true } });
+
+  assert.equal(archived.status, 200);
+  assert.equal(archived.body.data.status, 'done', 'der Status darf sich beim Ablegen nicht ändern');
+  assert.ok(archived.body.data.archived_at, 'archived_at wird gesetzt');
+
+  const row = await call('GET', `/${id}`, { as: admin });
+  assert.equal(row.body.data.status, 'done');
+  assert.ok(row.body.data.archived_at);
+});
+
+test('PATCH /status mit "archived" legt ab, statt den Status zu überschreiben', async () => {
+  const admin = { id: ALICE, role: 'admin' };
+  const created = await call('POST', '/', { as: admin, body: { title: `legacy-${randomUUID().slice(0, 8)}` } });
+  const id = created.body.data.id;
+  await call('PATCH', `/${id}/status`, { as: admin, body: { status: 'done' } });
+
+  // Der Weg, den Bestandsclients und die MCP-Brücke nehmen.
+  const r = await call('PATCH', `/${id}/status`, { as: admin, body: { status: 'archived' } });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.data.status, 'done');
+  assert.ok(r.body.data.archived_at);
+
+  // Dasselbe über das Vollupdate.
+  const other = await call('POST', '/', { as: admin, body: { title: `legacy-put-${randomUUID().slice(0, 8)}` } });
+  await call('PATCH', `/${other.body.data.id}/status`, { as: admin, body: { status: 'in_progress' } });
+  const put = await call('PUT', `/${other.body.data.id}`, { as: admin, body: { title: 'unverändert', status: 'archived' } });
+  assert.equal(put.body.data.status, 'in_progress');
+  assert.ok(put.body.data.archived_at);
+});
+
+test('Zurückholen setzt den Status nicht zurück', async () => {
+  const admin = { id: ALICE, role: 'admin' };
+  const created = await call('POST', '/', { as: admin, body: { title: `back-${randomUUID().slice(0, 8)}` } });
+  const id = created.body.data.id;
+  await call('PATCH', `/${id}/status`, { as: admin, body: { status: 'done' } });
+  await call('PATCH', `/${id}/archive`, { as: admin, body: { archived: true } });
+
+  const back = await call('PATCH', `/${id}/archive`, { as: admin, body: { archived: false } });
+  assert.equal(back.body.data.status, 'done', 'gemeldet war genau das Gegenteil: sie kam als offen zurück');
+  assert.equal(back.body.data.archived_at, null);
+});
+
+test('GET /: Abgelegtes bleibt draußen, bis danach gefragt wird', async () => {
+  const admin = { id: ALICE, role: 'admin' };
+  const marker = `sicht-${randomUUID().slice(0, 8)}`;
+  await call('POST', '/', { as: admin, body: { title: `${marker}-offen` } });
+  const b = await call('POST', '/', { as: admin, body: { title: `${marker}-abgelegt` } });
+  await call('PATCH', `/${b.body.data.id}/archive`, { as: admin, body: { archived: true } });
+
+  const titles = (rows) => rows.filter((r) => r.title.startsWith(marker)).map((r) => r.title).sort();
+
+  const plain = await call('GET', '/', { as: admin });
+  assert.deepEqual(titles(plain.body.data), [`${marker}-offen`]);
+
+  // Der Statusfilter allein holt die abgelegte Aufgabe NICHT zurück, obwohl sie
+  // weiter auf 'open' steht - genau daran hing die Beobachtung im Dashboard.
+  const byStatus = await call('GET', '/?status=open', { as: admin });
+  assert.deepEqual(titles(byStatus.body.data), [`${marker}-offen`]);
+
+  const included = await call('GET', '/?archived=1', { as: admin });
+  assert.deepEqual(titles(included.body.data), [`${marker}-abgelegt`, `${marker}-offen`]);
+
+  const only = await call('GET', '/?archived=only', { as: admin });
+  assert.deepEqual(titles(only.body.data), [`${marker}-abgelegt`]);
+
+  // Der Filterchip der Oberfläche spricht weiter über den Statusparameter.
+  const chip = await call('GET', '/?status=archived', { as: admin });
+  assert.deepEqual(titles(chip.body.data), [`${marker}-abgelegt`]);
+
+  // Und kombiniert bleibt es eine ODER-Achse wie jede andere.
+  const both = await call('GET', '/?status=open&status=archived', { as: admin });
+  assert.deepEqual(titles(both.body.data), [`${marker}-abgelegt`, `${marker}-offen`]);
+});
+
+test('Ablegen storniert keine Punkte-Gutschrift', async () => {
+  const admin = { id: ALICE, role: 'admin' };
+  db.prepare('INSERT OR REPLACE INTO reward_participants (user_id, enabled) VALUES (?, 1)').run(BOB);
+
+  const created = await call('POST', '/', { as: admin, body: { title: `punkte-${randomUUID().slice(0, 8)}`, points: 7, assigned_to: [BOB] } });
+  const id = created.body.data.id;
+  await call('PATCH', `/${id}/status`, { as: admin, body: { status: 'done' } });
+
+  const earned = () => db.prepare("SELECT COALESCE(SUM(delta), 0) AS n FROM reward_ledger WHERE task_id = ? AND type = 'earn'").get(id).n;
+  assert.equal(earned(), 7, 'Erledigen bucht');
+
+  await call('PATCH', `/${id}/archive`, { as: admin, body: { archived: true } });
+  assert.equal(earned(), 7, 'Ablegen ist keine Rücknahme des Erledigens');
+});

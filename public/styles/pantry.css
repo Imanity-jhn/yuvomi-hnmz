@@ -8,20 +8,16 @@
   --module-accent: var(--module-kitchen);
   display: flex;
   flex-direction: column;
-  /* Basisformel der Küchen-Seiten; die Tab-Leiste zieht ihre Höhe zusätzlich
-   * ab (siehe .has-kitchen-tabs in kitchen-tabs.css). */
-  height: calc(
-    100dvh
-    - var(--safe-area-inset-top)
-    - var(--nav-bottom-height)
-    - var(--safe-area-inset-bottom)
-  );
+  /* Platz lesen, nicht nachrechnen: die Kette .app-content → .page-transition
+   * reicht ihn durch, inklusive der FAB-Zone. Die Tab-Leiste zieht ihre Höhe
+   * zusätzlich ab (siehe .has-kitchen-tabs in kitchen-tabs.css). */
+  height: 100%;
   overflow: hidden;
 }
 
 @media (min-width: 1024px) {
   .pantry-page {
-    height: 100dvh;
+    height: 100%;
   }
 }
 
@@ -30,9 +26,11 @@
  * Padding- und Flex-Regeln, die der Kopf schon mitbringt. Der Lagerort-Button
  * sitzt im __actions-Slot und braucht kein eigenes flex-shrink mehr. */
 
+/* Nur Positionierung: das Bedienelement selbst liegt in page-search.css, die
+ * Klasse kommt über den `className`-Parameter von renderPageSearch() an den
+ * geteilten Baustein. `min-width: 0` steht dort und muss hier nicht doppelt. */
 .pantry-search {
   flex: 1;
-  min-width: 0;
   max-width: 420px;
 }
 
@@ -89,9 +87,9 @@
 
 /* KEINE reservierte FAB-Gasse mehr. Sie stand hier und in shopping.css als
  * `padding-inline-end: var(--fab-lane)` und war kollisionsfrei um den Preis von
- * 76px in JEDER Zeile - bei 320px 24% der Viewportbreite. Der FAB fährt
- * stattdessen beim Abwärtsscrollen weg (utils/fab-scroll.js): kein horizontaler
- * Platz, sondern Zeit. */
+ * 76px in JEDER Zeile - bei 320px 24% der Viewportbreite. Den Freiraum trägt
+ * stattdessen `--fab-safe-zone` (Marge an .app-content, layout.css): kein Platz
+ * in der Zeile, sondern ein kürzerer Scrollport. */
 
 .pantry-empty-hint {
   padding: var(--space-6) var(--space-4);
@@ -99,22 +97,13 @@
   color: var(--color-text-tertiary);
 }
 
-/* Kopf-Inhalt auf dasselbe Lesemaß wie der Körper.
- *
- * Der Kopf bleibt full-bleed (Chrome läuft bis zur Shell-Kante, Issue #577),
- * aber sein INHALT lief bis 1156px, während die Liste darunter bei 720px endet:
- * gemessen 428px Versatz in Einkaufen, 500px im Vorrat - der Papierkorb hing
- * weit rechts über leerer Seite (Critique 2026-07-30). DESIGN.md macht die
- * gemeinsame Fluchtlinie zur Bedingung; sie gilt für beide Kanten, nicht nur
- * für die linke. */
-@media (min-width: 1024px) {
-  .pantry-page .page-toolbar--in-group > * {
-    max-width: var(--content-max-width-narrow);
-  }
-
-  .pantry-page .page-toolbar--in-group {
-    flex-wrap: wrap;
-  }
+/* Kopf-Inhalt auf dasselbe Lesemaß wie der Körper: `.page-toolbar--narrow`
+ * (layout.css), gesetzt im Markup neben `--in-group`. Hier stand dieselbe
+ * Absicht als `> * { max-width: ... }` - sie kappte die Slot-Breiten und ließ
+ * den Lagerort-Knopf trotzdem an der äußeren Kante stehen; die Begründung steht
+ * am geteilten Selektor. */
+.pantry-page .page-toolbar--in-group {
+  flex-wrap: wrap;
 }
 
 /* --------------------------------------------------------
@@ -275,8 +264,8 @@
 }
 
 .pantry-stepper__btn:focus-visible {
-  outline: 2px solid var(--module-accent);
-  outline-offset: 2px;
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
 }
 
 .pantry-stepper__btn:disabled {

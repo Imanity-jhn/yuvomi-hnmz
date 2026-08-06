@@ -1,4 +1,4 @@
-FROM node:22-slim AS build
+FROM node:24-slim AS build
 
 # Toolchain als Fallback für native Module: better-sqlite3-multiple-ciphers zieht
 # normalerweise ein Prebuild (node-v127-linux-{x64,arm64}); schlägt der Download
@@ -17,7 +17,7 @@ COPY package*.json ./
 RUN npm ci --omit=dev
 
 # ---- Runtime stage ----
-FROM node:22-slim
+FROM node:24-slim
 
 RUN apt-get update && apt-get install -y \
     gosu \
@@ -32,7 +32,7 @@ COPY --from=build /app/node_modules ./node_modules
 COPY . .
 
 # Daten-Volume-Verzeichnisse anlegen (Permissions werden zur Laufzeit gesetzt)
-RUN mkdir -p /data /backups /app/modules
+RUN mkdir -p /data /backups /app/modules /documents
 
 # Container-Default für das Backup-Ziel. Ohne diesen ENV fällt die App auf ihren
 # Bare-Metal-Default './backups' (= /app/backups) zurück - dort hat der node-User

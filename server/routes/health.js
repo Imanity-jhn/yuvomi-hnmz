@@ -13,11 +13,14 @@
  *   activities.js   Aktivitäten
  *   export.js       CSV-Übersichts-Exporte (vitals/activities/labs/meds-logs)
  *   cycle.js        Zyklus (Perioden/Tages-Logs/Einstellungen) + Zyklus-Export
+ *   caregivers.js   Betreuung: wer darf fuer wen eintragen (#584)
  *
  * Scoping/Visibility-Modell (siehe ./health/helpers.js):
  *   - Jede Zeile gehört einem Nutzer (`user_id`, "Eigentümer").
  *   - Lesen: erlaubt für den Eigentümer ODER wenn `visibility = 'family'`.
- *   - Schreiben/Ändern/Löschen: ausschließlich der Eigentümer.
+ *   - Schreiben/Ändern/Löschen: der Eigentümer - oder eine betreuende Person
+ *     (health_care_grants, #584), die die betreute Person dann auch vollständig
+ *     sieht. Der Zyklus-Tab ist davon bewusst ausgenommen.
  *   - Verschachtelte Entitäten (Schedules/Logs, Lab-Results) erben Scoping/Visibility
  *     von ihrem Eltern-Datensatz (Medikament bzw. Befund).
  */
@@ -30,6 +33,7 @@ import labsRouter from './health/labs.js';
 import activitiesRouter from './health/activities.js';
 import exportRouter from './health/export.js';
 import cycleRouter from './health/cycle.js';
+import caregiversRouter from './health/caregivers.js';
 
 const router = express.Router();
 
@@ -42,5 +46,6 @@ router.use(labsRouter);
 router.use(activitiesRouter);
 router.use(exportRouter);
 router.use(cycleRouter);
+router.use(caregiversRouter);
 
 export default router;

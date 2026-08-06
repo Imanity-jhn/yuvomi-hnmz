@@ -13,16 +13,17 @@ import { esc } from '/utils/html.js';
 import {
   openModal as openSharedModal,
   closeModal as closeSharedModal,
-  selectModal,
   advancedSection,
   wireBlurValidation,
   reportFieldError,
 } from '/components/modal.js';
-import { renderKitchenTabsBar, refreshKitchenBadges } from '/utils/kitchen-tabs.js';
+import { renderKitchenTabsBar } from '/utils/kitchen-tabs.js';
+import { resolveShoppingTarget, announceTransfer } from '/utils/kitchen-transfer.js';
 import { renderSkeletonList } from '/utils/skeleton.js';
+import { renderPageSearch, wirePageSearch } from '/utils/page-search.js';
 // Alias, weil dieses Modul selbst eine `emptyStateEl()`-Funktion hat, die den
 // Renderer mit den Vorrats-Texten füllt.
-import { emptyStateEl as emptyStateComponentEl, mountEmptyState } from '/utils/empty-state.js';
+import { emptyStateEl as emptyStateComponentEl, mountLoadError } from '/utils/empty-state.js';
 import { scheduleUndoableDelete, vibrate, wireScrollFade } from '/utils/ux.js';
 import { toLocalDateKey } from '/utils/date.js';
 import { DEFAULT_CATEGORY_NAME, categoryLabel } from '/utils/shopping-categories.js';
@@ -37,6 +38,8 @@ import {
 } from '/utils/pantry-status.js';
 
 let _container = null;
+/** Handle des geteilten Suchfelds (setValue/clear), gesetzt in render(). */
+let _search = null;
 
 const state = {
   items: [],
@@ -217,14 +220,22 @@ export async function render(container) {
   // layout.css): Suche im __center-Slot, Lagerort-Verwaltung im __actions-Slot -
   // dieselbe Slot-Ordnung wie in den drei Geschwister-Tabs.
   const toolbar = document.createElement('div');
-  toolbar.className = 'page-toolbar page-toolbar--in-group';
+  // --narrow: der Kopf endet beim Lesemaß der Liste darunter (.kitchen-list),
+  // nicht an der Content-Spalte. Siehe layout.css.
+  toolbar.className = 'page-toolbar page-toolbar--in-group page-toolbar--narrow';
   toolbar.insertAdjacentHTML('beforeend', `
     <div class="page-toolbar__center">
-      <div class="pantry-search">
-        <input type="search" class="form-input pantry-search__input" id="pantry-search"
-               placeholder="${esc(t('pantry.searchPlaceholder'))}"
-               aria-label="${esc(t('pantry.searchPlaceholder'))}">
-      </div>
+      ${renderPageSearch({
+        id: 'pantry-search',
+        // Label und Placeholder aus demselben Key: „Vorrat durchsuchen" benennt
+        // das Feld vollständig, wie in notes/contacts/documents. Ein eigener
+        // Label-Key wäre ein Schlüssel über 23 Locales ohne zusätzliche Aussage.
+        label: t('pantry.searchPlaceholder'),
+        placeholder: t('pantry.searchPlaceholder'),
+        value: state.query,
+        clearLabel: t('common.searchClear'),
+        className: 'pantry-search',
+      })}
     </div>
     <div class="page-toolbar__actions">
       <button class="btn btn--ghost btn--icon" data-action="manage-locations"
@@ -265,9 +276,20 @@ export async function render(container) {
 
   if (window.lucide) window.lucide.createIcons({ el: container });
 
-  toolbar.querySelector('#pantry-search').addEventListener('input', (e) => {
-    state.query = e.target.value.trim();
-    renderList();
+  // Geteilter Baustein statt eigenem Input (utils/page-search.js): Lupe,
+  // Leeren-Knopf, `<label for>` und die mobilen Eingabe-Attribute liegen dort
+  // einmal. Der Vorrat baute sie privat nach und hatte keines davon; die
+  // Beschriftung trug der Placeholder, der beim Tippen verschwindet.
+  // Die Debounce (Default 200ms) ist hier der eigentliche Gewinn: renderList()
+  // zeichnet die gesamte Liste neu, vorher bei jedem Tastendruck.
+  // Handle im Modul halten: der Zurücksetzen-Pfad des Treffer-Leerzustands
+  // braucht `clear()`, nicht nur `input.value = ''`.
+  _search = wirePageSearch(toolbar, {
+    id: 'pantry-search',
+    onQuery: (value) => {
+      state.query = value.trim();
+      renderList();
+    },
   });
 
   toolbar.querySelector('[data-action="manage-locations"]').addEventListener('click', openLocationManager);
@@ -294,13 +316,20 @@ export async function render(container) {
   renderList();
 }
 
+/**
+ * Der Vorrat war der einzige Tab mit einem echten Fehlerzustand - und zeigte
+ * als Erklärung `[object Object]`, weil die Beschreibung den rohen Servertext
+ * durchreichte (Critique P0, 2026-07-30). `mountLoadError()` nimmt jetzt das
+ * Fehlerobjekt selbst entgegen und liest daraus nur den Statuscode.
+ */
 function renderLoadError(list, err) {
   list.removeAttribute('aria-busy');
-  mountEmptyState(list, {
-    variant: 'error',
+  mountLoadError(list, {
     title: t('pantry.loadErrorTitle'),
-    description: err?.data?.error ?? t('pantry.loadErrorDescription'),
-    action: { label: t('common.retry'), onClick: () => render(_container) },
+    description: t('common.loadErrorDescription'),
+    error: err,
+    retryLabel: t('common.retry'),
+    onRetry: () => render(_container),
   });
 }
 
@@ -416,7 +445,7 @@ function bulkBarEl() {
   bulk.className = 'btn btn--secondary kitchen-bulkbar__action';
   bulk.insertAdjacentHTML('beforeend', '<i data-lucide="shopping-cart" class="icon-sm" aria-hidden="true"></i>');
   bulk.append(document.createTextNode(t('pantry.toShoppingAll')));
-  bulk.addEventListener('click', () => sendToShopping(visibleItems()));
+  bulk.addEventListener('click', () => sendToShopping(visibleItems(), bulk));
 
   bar.append(label, bulk);
   return bar;
@@ -520,11 +549,12 @@ function noResultsEl() {
       onClick: () => {
         state.query = '';
         state.filter = 'all';
-        const search = _container?.querySelector('#pantry-search');
-        if (search) search.value = '';
+        // clear() versteckt zugleich den Leeren-Knopf des geteilten Suchfelds;
+        // ein blankes `value = ''` ließe ihn über dem leeren Feld stehen.
+        _search?.clear();
         renderFilters();
         renderList();
-        search?.focus();
+        _search?.input.focus();
       },
     },
   });
@@ -716,7 +746,7 @@ function onListClick(e) {
   if (!item) return;
 
   if (btn.dataset.action === 'edit') { openItemModal('edit', item); return; }
-  if (btn.dataset.action === 'to-shopping') { sendToShopping([item]); return; }
+  if (btn.dataset.action === 'to-shopping') { sendToShopping([item], btn); return; }
   if (btn.dataset.action === 'increase') { adjustQuantity(item, +1, row); return; }
   if (btn.dataset.action === 'decrease') { adjustQuantity(item, -1, row); }
 }
@@ -863,7 +893,7 @@ function shortfallText(item) {
   return `${formatQuantity(missing)} ${unitLabel(item.unit)}`;
 }
 
-async function sendToShopping(items) {
+async function sendToShopping(items, btn) {
   if (!items.length) return;
 
   let lists;
@@ -874,24 +904,18 @@ async function sendToShopping(items) {
     return;
   }
 
-  if (!lists.length) {
-    window.yuvomi?.showToast(t('pantry.noLists'), 'warning');
-    return;
-  }
+  // Vorprüfung, Listenwahl und die Antwort auf „es gibt keine Liste" liegen im
+  // geteilten Baustein (utils/kitchen-transfer.js) - dieselbe Abfolge stand
+  // vorher in allen drei erzeugenden Tabs, mit drei Ergebnissen.
+  const target = await resolveShoppingTarget(lists);
+  if (!target) return;
 
-  // Eine Liste → keine Rückfrage. Mehrere → einmal fragen.
-  let listId = lists[0].id;
-  if (lists.length > 1) {
-    const chosen = await selectModal(
-      t('common.toShoppingListWhich'),
-      lists.map((l) => ({ value: String(l.id), label: l.name }))
-    );
-    if (!chosen) return;
-    listId = Number(chosen);
-  }
-
+  // Während des Transfers gesperrt, wie im Rezepte-Tab. Ohne das lässt sich der
+  // Warenkorb mehrfach antippen, und jeder Klick erzeugt einen eigenen Toast mit
+  // eigenem Undo - von denen nur der letzte etwas zurücknimmt.
+  if (btn) btn.disabled = true;
   try {
-    const res = await api.post(`/shopping/${listId}/import-pantry`, {
+    const res = await api.post(`/shopping/${target.id}/import-pantry`, {
       items: items.map((item) => ({ pantry_item_id: item.id, quantity: shortfallText(item) })),
     });
     const { added = 0, skipped = 0, added_ids: addedIds = [] } = res.data ?? {};
@@ -909,43 +933,19 @@ async function sendToShopping(items) {
     // Typ, nicht die Liste - bei mehreren Listen bleibt damit offen, auf welche
     // (Critique 2026-07-30, P1). Der Name steht hier ohnehin fest: entweder gibt es
     // nur eine Liste, oder der Nutzer hat sie gerade ausgewählt.
-    const listName = lists.find((l) => l.id === listId)?.name ?? '';
     const message = skipped
-      ? `${t('pantry.toShoppingDone', { count: added, list: listName })} ${t('pantry.toShoppingSkipped', { count: skipped })}`
-      : t('pantry.toShoppingDone', { count: added, list: listName });
-    // Der Einkaufs-Tab zeigt jetzt eine andere Zahl.
-    refreshKitchenBadges();
+      ? `${t('pantry.toShoppingDone', { count: added, list: target.name })} ${t('pantry.toShoppingSkipped', { count: skipped })}`
+      : t('pantry.toShoppingDone', { count: added, list: target.name });
 
-    // Undo für den einen Pfad im Modul, der etwas ERZEUGT und bisher keines
-    // anbot. Er ist zugleich der Pfad, den man am leichtesten versehentlich
-    // nimmt: der Warenkorb sitzt in der Zeile direkt neben „Menge erhöhen", und
-    // die beiden bedeuten das Gegenteil voneinander (Critique 2026-07-30).
-    //
-    // Echtes Rücknehmen, kein verzögerter Commit: der Server überspringt
-    // Duplikate, die Anzahl im Toast kennt also erst er. Ein verzögerter Commit
-    // müsste sie vorher versprechen. Stattdessen liefert er die erzeugten IDs und
-    // das Undo löscht genau diese.
-    //
-    // Ohne IDs (ältere Serverantwort) erscheint der Toast ohne Aktion, statt
-    // einen Knopf zu zeigen, der nichts zurücknehmen kann.
-    const undo = addedIds.length
-      ? async () => {
-          try {
-            await Promise.all(addedIds.map((id) => api.delete(`/shopping/items/${id}`)));
-            // Zählfrei: die Anzahl stand eine Sekunde vorher im Toast, den der
-            // Nutzer gerade angetippt hat. Ein zweiter Zähler wäre ein Key mit
-            // _one/_few/_two-Kategorien über 23 Locales - für eine Bestätigung,
-            // die nichts Neues sagt.
-            window.yuvomi?.showToast(t('pantry.toShoppingUndone'), 'info');
-          } catch (err) {
-            window.yuvomi?.showToast(err.data?.error ?? t('common.errorGeneric'), 'danger');
-          }
-        }
-      : null;
-
-    window.yuvomi?.showToast(message, 'success', 5000, undo);
+    // Meldung, Standzeit, Tab-Zahl und Rücknahme kommen aus dem geteilten
+    // Baustein. Der Warenkorb ist der Pfad, den man am leichtesten versehentlich
+    // nimmt - er sitzt in der Zeile direkt neben „Menge erhöhen", und die beiden
+    // bedeuten das Gegenteil voneinander (Critique 2026-07-30).
+    announceTransfer({ message, addedIds });
   } catch (err) {
     window.yuvomi?.showToast(err.data?.error ?? t('common.errorGeneric'), 'danger');
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -1142,6 +1142,9 @@ async function openLocationManager() {
         titleKey: 'pantry.manageLocations',
         hintKey: 'pantry.manageLocationsHint',
         addPlaceholderKey: 'pantry.addLocation',
+        // Lagerorte, keine Kategorien: der Server loescht auch belegte und
+        // laesst die Artikel unzugeordnet zurueck (`orphaned` in der Antwort).
+        deleteDetailKey: 'pantry.locationDeleteConfirmDetail',
         groups: [{ key: '', labelKey: '', addLabelKey: 'common.add' }],
       });
     },

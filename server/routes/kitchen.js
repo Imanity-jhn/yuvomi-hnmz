@@ -1,7 +1,7 @@
 /**
  * Modul: Küche (Kitchen)
- * Zweck: Ein Zustandsabruf für die vier Küchen-Tabs (Mahlzeiten, Rezepte,
- *        Einkaufen, Vorrat).
+ * Zweck: Ein Zustandsabruf für die Küchen-Tab-Leiste (offene Einkaufsartikel,
+ *        Vorratsartikel mit Frist).
  * Abhängigkeiten: express, server/db.js
  *
  * WARUM ES DIESE ROUTE GIBT: Die vier Tabs sind Stationen eines Kreislaufs -
@@ -11,10 +11,19 @@
  * dauerhaft tragen, wenn sie den Zustand der Nachbarn kennt - und den kennt keine
  * der vier Seiten, weil jede nur ihre eigenen Daten lädt.
  *
- * WARUM EIN EIGENER ROUTER UND NICHT VIER AUFRUFE: die Leiste rendert auf jeder
- * Küchen-Seite. Drei Fremd-Endpunkte pro Seitenaufruf wären drei Roundtrips und
- * drei Mal Logik, die der Client nachrechnen müsste (was zählt als „fast leer"?).
- * Eine Abfrage, vier Zahlen.
+ * WARUM EIN EIGENER ROUTER UND NICHT ZWEI AUFRUFE: die Leiste rendert auf jeder
+ * Küchen-Seite. Zwei Fremd-Endpunkte pro Seitenaufruf wären zwei Roundtrips und
+ * zwei Mal Logik, die der Client nachrechnen müsste (was zählt als „fast leer"?).
+ * Eine Abfrage, zwei Zahlen.
+ *
+ * WARUM DER ESSENSPLAN NICHT MEHR DABEI IST: er lieferte `meals.gaps` = sichtbare
+ * Mahlzeitentypen × 7 Tage minus die belegten Slots, also die FEHLENDEN Einträge
+ * einer Woche. Bei leerer Woche stand dort 28 - die lauteste Zahl der Leiste für
+ * den Zustand „nichts geplant" -, und mitgezählt wurden Tage, die schon vorbei
+ * waren. Das Badge ist deshalb entfallen (Begründung am BADGES-Array in
+ * public/utils/kitchen-tabs.js), und mit ihm die Rechnung: eine COUNT-DISTINCT-
+ * Abfrage über `meals` plus ein sync_config-Lesevorgang auf JEDEM Küchen-
+ * Seitenaufruf, deren Ergebnis niemand mehr liest.
  *
  * WARUM `today` VOM CLIENT KOMMT: „abgelaufen" hängt am lokalen Kalendertag des
  * Nutzers. Der Server rechnet in UTC und läge westlich von UTC bis zu einen Tag
@@ -33,48 +42,14 @@ const log = createLogger('Kitchen');
 const router = express.Router();
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-const VALID_MEAL_TYPES = ['breakfast', 'lunch', 'dinner', 'snack'];
-
-/**
- * Montag der Woche zu `dateKey`.
- *
- * Identisch zu `weekStart()` in routes/meals.js, inklusive der festen
- * Montags-Basis: der Essensplan lädt seine Woche über GET /meals, das dieselbe
- * Rechnung macht. Eine andere Wochendefinition hier würde eine Lückenzahl liefern,
- * die zu dem Board nicht passt, das der Nutzer daneben sieht.
- *
- * Reine String→UTC→String-Rechnung, deshalb ohne Zeitzonenversatz.
- */
-function weekBounds(dateKey) {
-  const d = new Date(`${dateKey}T00:00:00Z`);
-  const day = d.getUTCDay();
-  d.setUTCDate(d.getUTCDate() + (day === 0 ? -6 : 1 - day));
-  const from = d.toISOString().slice(0, 10);
-  d.setUTCDate(d.getUTCDate() + 6);
-  return { from, to: d.toISOString().slice(0, 10) };
-}
-
-/** Sichtbare Mahlzeit-Typen aus den Einstellungen (dieselbe Quelle wie /preferences). */
-function visibleMealTypes() {
-  const row = db.get().prepare('SELECT value FROM sync_config WHERE key = ?').get('visible_meal_types');
-  const raw = row?.value ?? VALID_MEAL_TYPES.join(',');
-  const types = String(raw).split(',').map((s) => s.trim()).filter((s) => VALID_MEAL_TYPES.includes(s));
-  return types.length ? types : VALID_MEAL_TYPES;
-}
 
 /**
  * GET /api/v1/kitchen/summary?today=YYYY-MM-DD
  *
  * Response: { data: {
- *   meals:    { gaps },
  *   shopping: { open },
  *   pantry:   { attention, expired, low, out },
- *   week:     { from, to },
  * } }
- *
- * `gaps` = freie Slots der laufenden Woche: sichtbare Mahlzeit-Typen × 7 Tage minus
- * die Slots, in denen etwas steht. Ein Slot mit drei Einträgen ist EIN belegter
- * Slot, deshalb DISTINCT.
  *
  * `attention` = abgelaufen ODER leer ODER fast leer, ohne Doppelzählung. Die drei
  * Teilzahlen kommen mit, damit die Leiste später verfeinert werden kann, ohne die
@@ -86,16 +61,6 @@ router.get('/summary', (req, res) => {
     const today = DATE_RE.test(req.query.today ?? '')
       ? req.query.today
       : new Date().toISOString().slice(0, 10);
-    const { from, to } = weekBounds(today);
-
-    const types = visibleMealTypes();
-    const placeholders = types.map(() => '?').join(',');
-    const filledSlots = db.get().prepare(`
-      SELECT COUNT(*) AS c FROM (
-        SELECT DISTINCT date, meal_type FROM meals
-        WHERE date BETWEEN ? AND ? AND meal_type IN (${placeholders})
-      )
-    `).get(from, to, ...types).c;
 
     const open = db.get().prepare(
       'SELECT COUNT(*) AS c FROM shopping_items WHERE is_checked = 0'
@@ -119,7 +84,6 @@ router.get('/summary', (req, res) => {
 
     res.json({
       data: {
-        meals: { gaps: Math.max(0, types.length * 7 - filledSlots) },
         shopping: { open },
         pantry: {
           attention: pantry.attention ?? 0,
@@ -127,7 +91,6 @@ router.get('/summary', (req, res) => {
           low: pantry.low ?? 0,
           out: pantry.out_of_stock ?? 0,
         },
-        week: { from, to },
       },
     });
   } catch (err) {

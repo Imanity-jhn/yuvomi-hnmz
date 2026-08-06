@@ -7,6 +7,549 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.87.0] - 2026-08-06
+
+### Added
+
+- Shopping items can now be reordered by hand within their category, by dragging the handle in the row or with the arrow keys once it has focus. The list groups by aisle and that order was already yours to arrange in the category manager, but inside an aisle the items stayed in the order they were typed, which is not the order a shop is walked in. New items keep landing at the end of their category, including the ones that arrive from the meal plan, a recipe, the pantry or a synced reminder list - the position is assigned by the database itself, so no path can forget it. Moving an item to another category, and the items that move along when a category is deleted, join the end of their new group rather than wedging themselves between what is already sorted there. Checked-off items stay at the bottom of their aisle and are exempt: they are done, and a drag on them would have sprung back on the next load. Existing lists keep the order they show today (#678)
+
+## [1.86.3] - 2026-08-06
+
+### Fixed
+
+- Archiving a task no longer un-finishes it. Filing away and finishing are two different statements, but they shared one field, so archiving a completed task overwrote its "done": the task came back as unfinished, the reward points it had earned were withdrawn along with it, and it then turned up in "Today at a glance" as something still to do - where tapping it led nowhere, because every list hides the archive. A task now keeps the status it had while it is filed away, and comes back exactly as it went in. The archive is left out of the dashboard, the calendar chips and the overdue badge for the same reason: a filed-away task is not waiting for anyone. Existing archived tasks are read as finished, since what they were before is no longer recorded (#688)
+
+## [1.86.2] - 2026-08-06
+
+### Fixed
+
+- The round create button on the dashboard now answers a tap immediately. Pressing it and the plus turning into an X are two different movements, but they shared one animation: a 350ms curve that overshoots and springs back. That is right for the turn, where it acknowledges the change of state, and wrong for a press, which was left feeling spongy and bouncing past its own size on release. The press is now short and direct; the spring stays where it says something.
+
+## [1.86.1] - 2026-08-06
+
+### Fixed
+
+- The add button no longer disappears when entering a module. It is a floating button anchored to the screen, but it was rendered inside the scrolling page, and on iOS a fixed element inside a scrolling container is not reliably anchored to the viewport - it resolves against the scrolled content instead. So it appeared mid-right while the module still showed its loading skeleton, then drifted down past the bottom of the screen as the list loaded, with no way back. That is why it broke in Tasks and the Pantry, where the page really scrolls, while other modules only showed it snapping into place after loading. The button now lives in the app shell, next to the scrolling area rather than inside it, where nothing can position it against anything but the viewport. The bottom navigation bar had walked into the same trap once and was moved out of it years ago; this was the last fixed element left in the scroll port. Third and final mechanism behind #634, after the scroll retract (v1.71.2) and the viewport-only keyboard detection (v1.73.1) - both of those hid the button, this one moved it out of sight (#634)
+
+## [1.86.0] - 2026-08-05
+
+### Added
+
+- The reminder-sync page now says why an iCloud account offers no usable task list. Apple's upgraded Reminders app, since iOS 13 and macOS 10.15, keeps its lists in a private store that no CalDAV client can read, so iCloud only serves the collections that existed before that switch - typically none, occasionally a single orphaned list that the Reminders app itself no longer shows. Since the calendars of the same account keep syncing perfectly, this looked like a broken search rather than an Apple limitation. The note appears only on iCloud accounts; Nextcloud, Radicale and Baikal publish their task lists as before (#677)
+- Credit-card accounts can now carry the issuing bank and the agreed credit limit. Both fields appear in the account dialog as soon as the type is set to credit card, and the account list shows the bank next to what is still available on the card - the limit minus what you currently owe on it. A balance in your favour does not raise that figure above the limit. The fields are specific to credit cards: switching an account to another type clears them again. Groundwork from #541; statements and installment purchases follow separately.
+- Height and head circumference are now vital signs, next to weight. For a newborn the three are taken together, and two of them had nowhere to go. Both accept centimetres or inches and behave like every other measurement in the chart and the history. They stay raw numbers on purpose: what a paediatrician reads is the percentile for that age and sex, and producing one needs reference data and carries medical weight, so it is a separate decision rather than a property of the measurement (#683)
+
+## [1.85.0] - 2026-08-05
+
+### Added
+
+- Bug reports now use a GitHub issue form that asks for the app version and the deployment type before it lets you submit. The old Markdown template could not require anything, and GitHub did not even count it as an issue template. Half of one earlier report turned out to have been fixed long before it was written, which nobody could tell because the version was missing. The log instructions name the current service and work for container installs as well.
+
+### Changed
+
+- The Umbrel store gallery images are rebuilt from current screenshots. The previous ones showed the interface as it looked fourteen months ago, under the old branding. A generator now composes them in the published store style, so the next refresh is a command rather than an afternoon.
+
+### Fixed
+
+- Three ways the CLI installer could get a rerun wrong. It polled the container's internal port instead of the host port, so with a non-default mapping the health check spent two minutes waiting for nothing. `SYNC_INTERVAL_MINUTES` was silently reset to 15 on every rerun although the dialog never asks about it. And values were read with one escaping rule and written back with another, which quietly damaged quoted secrets; both sides now use the same encoder as the web installer.
+- Link previews for the site. The Twitter image still came from a retired generator and rendered missing-glyph boxes on an app state from v0.65.34; all three social images are now produced from one layout and regenerated.
+- Five test suites had npm scripts but hung in no chain, so they never ran in CI. One of them had quietly rotted: its fixture predated the pending-confirmation column, which the suite would otherwise have caught.
+
+## [1.84.0] - 2026-08-05
+
+### Added
+
+- A dot on the "Changelog" entry now says when a newer release is out. Self-hosted installs have nobody to tell them; the version was already there in the changelog modal, next to the latest one, but only for whoever thought to look. The dot marks the sidebar entry and, on mobile, the "More" button that hides it in its sheet, and it names the version for screen readers. Opening the modal clears it until something newer appears, and the modal then leads with "Version X is available". The comparison is numeric per segment, because a string compare ranks 1.9.0 above 1.10.0; anything unparseable counts as unknown and stays quiet, as does a failed check (#490)
+- A clock widget for the dashboard. The case it is built for is a wall tablet in the living room, which has no system bar to read the time off, so the digits scale with the tile size instead of sitting at one fixed size, and they follow the 12h/24h and date-format preferences already set. It ticks on the minute, not the second: the display has no seconds, and a tab that was in the background catches up as soon as it is looked at again. Hidden by default, since a second clock on a phone is duplication - switch it on under Customize (#651)
+
+### Fixed
+
+- The published Docker image no longer carries the test suite. `.dockerignore` excluded `test-*.js` and `test-*.mjs`, but Docker's globs do not cross a slash, so those patterns only ever matched the context root and all 180 files under `test/` were baked into every image. The deploy descriptors, store templates and local tooling folders were riding along for the same reason and are excluded now too
+
+## [1.83.0] - 2026-08-05
+
+### Added
+
+- A parent can now record health data for a child. Fever and medication are handled by whoever is looking after the child, but every entry in the health module was hard-wired to the person logged in, so the one case that matters most at home was the one case the module could not do. An admin decides per person who may record for them, under Settings → Family; nothing changes for anyone until they do. The person switcher then says "You are recording for X" in place of the read-only banner, and the capture button is there. A grant covers vitals, medications, lab results and activities, and it includes seeing that person's private entries, since a caregiver who could write but not read would lose sight of the reading they just took. The cycle diary stays excluded: fever and medication are care, reading someone's cycle diary is not (#584)
+
+### Changed
+
+- Whether the health module lets you write is now one question asked in one place, instead of five tabs each carrying their own copy of "is this me?"
+
+### Fixed
+
+- The Portainer stack now keeps third-party modules. The image creates `/data`, `/backups` and `/app/modules`, but the Portainer compose mounted only the first two, so anything dropped into the modules folder lived in the container layer and was gone with the next image pull. It has its own named volume now, like the other two.
+
+## [1.82.0] - 2026-08-05
+
+### Added
+
+- Sleep and mood join the vitals you already track. Sleep is entered as hours and minutes, not as a decimal ("7.5" is a sum you should not have to do in your head), and carries the date the night ended, so a night belongs to the morning it finished rather than landing on either side of midnight depending on when you went to bed. Mood is a scale of five faces, from very bad to very good. Both get the same card, trend chart, history and CSV export as every other metric. The mood chart keeps its axis on the full 1 to 5 range: a week between "good" and "very good" should look like a good week, not like a collapse. The mood in the cycle diary stays where it is and means something else: it names a kind of mood (irritable, sensitive, anxious) on a cycle day, while the new scale measures how well you are and is open to everyone, with or without the cycle tab (#609)
+
+### Changed
+
+- A vitals metric now declares how its numbers read (a pair, a duration, a scale) instead of the card, the history, the chart and the overview each carrying their own "is this blood pressure?" branch. Sleep and mood would have made that branch five times three
+
+## [1.81.0] - 2026-08-05
+
+### Added
+
+- Recurring budget entries take any rhythm now: pick weekly, monthly or yearly and say how many of them lie between two bookings. Every two weeks, every three months, every second year - none of that was expressible before, when the only choices were monthly, half-yearly and yearly. A weekly series books several times in the same month; the day of the month, or the weekday, is the one the entry itself carries. Existing entries keep their rhythm exactly: half-yearly ones now read as "every 6 months" (#636)
+- A recurring series can now wait for your confirmation before its bookings count. Not every service debits on the same day or to the cent, and an entry that has not actually happened yet was still moving the monthly balance. Turn it on per series: its bookings appear in the list marked as expected, count towards no total until you confirm them, and confirming lets you correct the amount and the date to what the bank actually did. What is still outstanding is shown under the summary cards, so nothing disappears quietly. Existing series are unaffected unless you turn it on (#637)
+
+### Changed
+
+- Deleting a single booking of a recurring series no longer suppresses the whole month, only that one date. The difference was invisible while a series could book at most once a month, but a deleted Tuesday of a weekly series would have taken the rest of the month with it
+
+## [1.80.1] - 2026-08-05
+
+### Fixed
+
+- Ticking a recurring task off through the edit dialog ended the series. Only the checkbox on the task card created the next instance; saving the form with the status set to "Done" completed the task and left nothing behind, so a weekly task finished that way simply stopped coming back, with nothing to show that it had. Both ways of ticking off now write the series forward, including the repeat anchor released in v1.80.0, and if the rule or due date is changed in the same save, the next instance already follows the new one. Taking the tick back has removed the follow-up on either path since v1.75.2; this is the other half of it (#650)
+- The next instance of a recurring task lost its start date. A task set to begin three days before it is due came back with the start date empty, so the head start it was given had to be entered again every time. The follow-up now keeps the same distance between its start and its due date as the run before it. Note that a task is hidden from the list until its start date arrives, unless "Show future tasks" is on
+
+## [1.80.0] - 2026-08-05
+
+### Added
+
+- A recurring task can now count its interval from the day you tick it off instead of from its due date. The switch sits with the other repetition settings in the task dialog. A weekly task due Saturday and completed on Monday becomes due the Monday after, rather than five days later. The old behaviour stays the default and stays right for anything tied to an outside rhythm, such as bin day or rent: the grid must not move just because you were late. Existing recurring tasks keep counting from the due date until you flip the switch (#658)
+
+### Fixed
+
+- The day a recurring task was completed was read in UTC rather than in the household's own time zone, so ticking one off shortly after midnight could make the next instance land a day early. It now uses the zone the container runs in, the same one that already governs task due times
+
+## [1.79.0] - 2026-08-05
+
+### Added
+
+- A default calendar for your own new events, under Settings → Personal → Calendar. Pick any of the Google or CalDAV calendars already connected and new events start out pointing at it, instead of at "Store locally only" every time. The setting belongs to each household member separately, like the default reminders and the assign-to-me switch next to it: in a family where one person keeps a work calendar and another does not, a single shared default would be wrong for somebody by definition. The target picker in the event dialog still has the last word, so a single event can go anywhere. Editing an existing event never changes its target, and a default whose calendar has since been removed, disabled or turned read-only quietly falls back to storing locally rather than pointing a new event at a calendar that cannot accept it (#620)
+
+## [1.78.1] - 2026-08-04
+
+### Fixed
+
+- Subtasks from a CalDAV reminder list (Apple Reminders, Nextcloud Tasks, Tasks.org) arrived as separate top-level tasks standing next to their parent, so a checklist of five items showed up as five unrelated entries. The property carrying that relationship, `RELATED-TO`, was never read. Existing mirrored tasks sort themselves out on the next sync, no re-import needed (#671)
+- Subtasks could be seen but not ticked off in a task's detail view, while the same subtask had a checkbox on the task card. Anyone who added a subtask and then opened the task found it visible and out of reach, because the card keeps its subtasks behind a collapsed progress bar (#671)
+- The task filter accepted only one value per row, so "high or medium priority" was impossible to ask for. Priority, status and person now take several values at once and combine them with OR, while the rows still narrow each other. Tags keep narrowing as before, since a task can genuinely carry several (#671)
+
+## [1.78.0] - 2026-08-04
+
+### Added
+
+- 25 more currencies, covering every currency in use across the Americas plus the Philippine peso: ARS, BBD, BOB, BSD, BZD, COP, CRC, CUP, DOP, GTQ, GYD, HNL, HTG, JMD, MXN, NIO, PAB, PEN, PHP, PYG, SRD, TTD, UYU, VES and XCD. They are selectable as the household currency and in Subscriptions and Split Expenses alike (54 in total)
+- 34 more regions under Settings → Appearance → Region: every sovereign state of North, Central and South America including the Caribbean, plus English (Philippines) and Filipino (Philippines). Each preset takes its date and time format from the region's own convention, so Panama defaults to MM/DD/YYYY and Argentina to a 12-hour clock (64 in total)
+- Filipino as the 24th interface language, fully translated in the app, the web installer and the command-line installer (#669)
+
+### Changed
+
+- The region selector now sorts by the name it displays instead of by an internal grouping, which matters now that it lists 64 regions
+
+### Fixed
+
+- Regions whose language code is three letters long, such as Filipino (`fil-PH`), were rejected by the server as invalid and never reached the number and currency formatting. The shape check for language tags accepted two-letter codes only, in all five places it is made
+
+## [1.77.0] - 2026-08-04
+
+### Added
+
+- A loan now records its direction: whether the household lent the money out or took it on. Instalments on a loan you took on are booked as an expense under Financial Services and Other / Loans / Interest, while instalments on money you lent out stay income as before. The dialog asks for the direction first and renames the field below it accordingly, so it is clear whose name belongs there: the borrower when you lend, the lender when you borrow. Existing loans keep counting as lent out, and switching one to borrowed re-books the instalments already recorded, so a mortgage entered before this release does not have to be deleted and entered again (#638)
+- A loan can be assigned an account. Every instalment booked from then on charges that account, so its balance follows the payment. Until now the budget entry written for an instalment carried no account at all (#638)
+
+### Fixed
+
+- Paying an instalment on a loan the household had taken on counted as income in the monthly balance, so a mortgage payment raised the balance instead of lowering it. The loan module was originally built for money lent out, where a repayment coming back really is income; the interest fields released in v1.45.10 made a mortgage expressible without the booking logic following (#638)
+- The installer reported the exit code of the start command before its last output had arrived, so the setup wizard could offer "Try again" while the line explaining the failure was still missing from the start log
+
+## [1.76.0] - 2026-08-04
+
+### Added
+
+- The New Zealand dollar is now one of the currencies a household can pick, in the household settings as well as in subscriptions and in split expenses. New Zealand households had to record their money under a currency that was not theirs. Choosing New Zealand as the region sets the dollar together with the local date and time format in one step, and amounts are then written the way they are written there: $1,234.56.
+
+## [1.75.8] - 2026-08-04
+
+### Fixed
+
+- The edit and delete buttons of a housekeeping task now carry their icons the moment the task is added from a suggestion. The list was redrawn without turning the icon placeholders into icons, which happened only on a tab switch, so the buttons stayed blank until the page was reloaded. Checking a task off, restoring it, deleting one and saving the edit dialog were affected the same way, as was marking a visit as paid on the reports tab (#668)
+
+## [1.75.7] - 2026-08-04
+
+### Fixed
+
+- CalDAV reminder lists now appear on the reminder sync page by themselves. Adding an account only ever discovered calendars, so the page showed an empty state and the task mirror looked broken while the server was serving lists all along (#617)
+- Collections that only hold tasks are no longer offered as calendars. They were adopted as event destinations when an account was added, where Nextcloud rejects a saved appointment outright and Radicale files it into the task list other clients read (#617)
+- Accounts created before this release shed those task lists on their next sync run instead of requiring a manual calendar refresh. Events already mirrored from such a collection are kept (#617)
+- A server that does not advertise `supported-calendar-component-set` no longer loses every reminder list. RFC 4791 leaves the property optional and requires clients to assume all components are supported (#617)
+- The reminder page no longer queries the server on every visit when an account has no task lists. It now records that a discovery ran, which also removes the duplicate request behind the refresh button that could show a connected account as disconnected (#617)
+
+## [1.75.6] - 2026-08-04
+
+### Security
+
+- Deleting a split expense group turned the guest accounts belonging to it into full household members. A guest is held to the Split module by a single record that carries two things at once: that the account is restricted at all, and which group it may see. Deleting the group took that whole record with it, while the login itself stayed untouched, so the account went on to reach the rest of the API, from the calendar to the documents. Any group owner could bring this about, because a group without expenses or settlements can be deleted outright. Deleting a group now clears only the group assignment: the account stays a guest and sees nothing. Accounts that an earlier deletion already promoted cannot be recognised after the fact, because the record that marked them is gone, so it is worth looking through Settings, Administration, Family for accounts that should not have household access.
+- A guest who also belonged to a second group could see that group's figures and expenses. On the Split dashboard the group list was restricted but the balances and recent expenses shown next to it were not, and a single expense could be opened, commented on, edited or deleted through its id, because those routes went by group membership alone. All of them now apply the same restriction as the group list.
+
+## [1.75.5] - 2026-08-03
+
+### Fixed
+
+- Deleting a CalDAV account left the tasks and shopping items it had mirrored pointing at an account that no longer existed, and those entries could then not be deleted at all. Deleting a mirrored entry first records the deletion for the server, and that record requires a live account: the record failed, and because it is written before the entry itself is removed, the removal never happened. The entry stayed put in Yuvomi while its copy on the server was already out of reach, with nothing to explain why it kept coming back. Deleting an account now detaches everything it had mirrored, so those tasks and shopping items remain as ordinary local ones, and entries left behind by an earlier account deletion are repaired during the update.
+
+## [1.75.4] - 2026-08-03
+
+### Changed
+
+- Confirmation dialogs for destructive actions now say what they actually destroy. Twenty-five of them asked "Delete X?" and left it there, which in a self-hosted household is the only chance anyone gets to learn the consequence: there is no support desk and no undo. Each one now names the concrete outcome instead of repeating the warning. Deleting a budget account keeps its entries but strips their account link. Deleting a folder keeps the documents and moves them out of it. Deleting a medication takes its schedule and the whole intake history along. Deleting a subscribed calendar removes the events it imported. Disconnecting Google drops deletions that had not been pushed yet, so those events stay behind in Google, and it clears the calendar selection, so reconnecting alone does not resume the sync.
+- Where one component serves several modules, each module now supplies its own consequence rather than sharing a single sentence. The category manager is used by Budget, Tasks, Contacts, Shopping and Pantry, and those servers disagree: the first three refuse to delete a category that is still in use, Shopping moves the items to the first remaining category, and Pantry leaves the supplies without a storage location. One shared text was wrong for two of the five.
+- Rejecting or withdrawing a reward request is no longer marked as dangerous. The reserved points are booked back and the request can be made again while the reward is still in the catalogue, so a red button claimed a finality the action does not have.
+
+### Fixed
+
+- Deleting a subscription category or payment method explained nothing at all when no subscription used it yet. The linked budget subcategory is removed in either case, so the dialog was silent exactly where the effect was least expected.
+- The dialog for removing a CalDAV account read as though the appointments were going away with it. They stay; what ends is the sync.
+
+## [1.75.3] - 2026-08-03
+
+### Fixed
+
+- Signing in through an identity provider that sends no `preferred_username` claim named the new account after its email address. That claim is optional in the OIDC spec, and Synology DSM SSO is one of the providers that leaves it out. An email makes a poor account name: a household commonly shares one address across several members, so it identifies nobody in particular, and the domain part only makes it unwieldy. The name is now taken from `preferred_username`, then from the non-standard `username` claim that Synology and others do send, then from `sub`, and never from the email. Accounts that already exist keep the name they have, because sign-in matches on `sub`, not on the name.
+- An account created through SSO could end up carrying a username that no other part of Yuvomi accepts. Everywhere else a user is named, the name must be letters, digits, dots, hyphens or underscores, but the SSO path wrote through whatever the provider sent, and both an email address and a Synology `sub` carry an `@`. Such an account could then not be saved under Settings → Administration → Family at all, not even to change something unrelated to the name, because saving revalidates the name the account already had. Names derived from SSO now pass through the same format, with accented letters transliterated instead of mangled.
+- Yuvomi recorded which provider an SSO account came from by copying the configured `OIDC_ISSUER`. It now reads the issuer out of the validated ID token instead. That is the name the provider gives itself, and it can differ from the URL you configured, for instance when yours is a CNAME pointing at it.
+
+## [1.75.2] - 2026-08-03
+
+### Fixed
+
+- Unticking a recurring task left the series looking doubled. Marking one off creates the next instance, but that instance carried no trace of where it came from, so taking the completion back - the natural fix for an accidental tap - reopened the task next to the instance that same tap had created. Two entries for one series, and the only way out was deleting one by hand. Moving a task back out of "done", by checkbox or in the edit dialog, now withdraws the follow-up it created. Only an untouched one: a follow-up you have since completed yourself, or given subtasks to, stays put, because a click on its predecessor must not throw that work away. Ticking the same task off twice no longer adds a second follow-up either (#650)
+
+## [1.75.1] - 2026-08-03
+
+Most of this release is translation. The locale files were complete in the sense that every key existed, which is why nothing looked broken and every test passed - but in many languages the value behind the key was still the English original. The second half is about money: an amount field now knows what currency it holds, and says so before you save rather than after.
+
+### Fixed
+
+- Large parts of the app were still English in up to 21 languages. The locale files carried every key, so nothing looked broken and every test passed, but in many languages the value was simply the untranslated English text. Those screens read as English to everyone outside the German and English households. Just over 4,000 strings are now actually translated, across subscriptions, the budget categories and the loan screens, the shared category manager, calendar attachments and sync targets, the SMTP form, bulk actions on tasks, document folders, dashboard widgets, meals, onboarding, reminder lead times, the offline banner, the whole Housekeeping module, and the installer.
+- Greek, Arabic, Hindi, Japanese, Korean, Russian, Ukrainian, Persian and Chinese showed German text in places, not English. Anyone reading those languages got a string they had no way to parse. The last of these are gone: the contact nickname field and the weekday initials in the cycle calendar, which stood at "Mo Di Mi Do" in all 21 languages and now use each language's own abbreviations. Arabic gets short forms rather than the full weekday names it uses elsewhere, because the calendar header is seven fixed columns and long names spill into the next one.
+- Six settings strings were German in the English locale file too, among them the CalDAV and CardDAV help tooltips and the sync status. English is the file every other translation was written against, so ten languages had copied the German text into their own files from there. The English wording is now actually English, and the copies are corrected.
+- The Swedish word for a file attachment was wrong: calendar attachments were labelled "Fastsättning", which means fastening something in place, not a file attached to an entry. It now reads "Bilaga", the word the rest of the Swedish translation already used.
+- Amount fields showed the wrong number format. The placeholder was a fixed string per language, so Czech, Hungarian and Vietnamese got a decimal point where those languages use a comma, and Swiss German got a comma where it uses a point. The placeholder, the step size and the lower bound now follow the currency and the configured region: euro amounts step in cents, yen, won, forint, rupiah, rial and Chilean peso in whole units. This covers every field that carries a currency - budget entries and plans, account balances, loans, subscriptions and the subscription budget, shared expenses and settlements, and the housekeeping rates. Where the currency can be picked in the same form, the field follows the choice instead of keeping the format of the previous currency. The step size is also enforced when saving, not just displayed: none of these dialogues is a form, so the browser never checked it, and a loan of 12.5 yen was stored as entered while the app displayed it rounded.
+- Amounts typed the way the app itself suggested were rejected on saving. A shared expense showed "0,00" as its hint, and in Persian or Egyptian Arabic even "۰٫۰۰", but only a dot-separated ASCII number ever reached the server. Entering the suggested format now works in every language. Amounts written with a thousands separator are refused instead of guessed at: "1.000" means a thousand in German and one as a decimal number, and taking the wrong reading would be off by a factor of a thousand. That refusal keys on the pattern rather than the character, so "12.50" still counts as twelve-fifty.
+- The translations follow the vocabulary each language already used for the module itself rather than introducing a second term for the same thing, so Housekeeping stays Limpieza, Ménage, Уборка or 家事 throughout, including in the calendar entries, payment tasks and receipts it generates.
+
+## [1.75.0] - 2026-08-03
+
+Adding someone to the household no longer means inventing a password for them and passing it on. You send them a link, they choose their own, and nobody else ever knows it.
+
+### Added
+
+- Invitations: admins invite new members with a link instead of setting their password. The panel sits under Settings, Administration, Family and roles, next to the member list. Username and display name are optional, so the invited person can pick their own; family role and admin rights are decided by whoever invites.
+- The link is shown exactly once, with a copy button. Only a hash of it is stored, so a lost link cannot be recovered, only revoked and reissued. Invitations expire after seven days and can be revoked at any time, which kills the link immediately.
+- Sending the invitation by email is optional and needs SMTP plus `BASE_URL`. Without either, the panel says so instead of claiming a mail it never sent, and you pass the link on yourself.
+- Creating an account directly is unchanged and stays the right way for a child with no mail address and no device of their own.
+
+### Fixed
+
+- Password reset: the confirmation after setting a new password was never visible. It sat inside the form that gets hidden on success, so the page went blank for a moment and then jumped to the login screen.
+- The password reset and forgot-password pages were still English in 16 of the 23 languages.
+
+### Security
+
+- Role and family role are taken from the invitation and ignored in the request that redeems it, so an invited member cannot make themselves an admin. Redeeming happens inside the transaction that creates the account, so one link can never produce two accounts, and an expired link cannot slip through while the password is being hashed.
+
+## [1.74.0] - 2026-08-03
+
+The installer got a thorough pass, and most of what came out of it are fixes for ways an installation could quietly lose data or configuration. If you installed once and never ran the installer again, little changes for you. If you ever re-ran it, or deploy through Portainer, several things that silently did not work now do.
+
+### Added
+
+- Installer: `DATA_DIR` and `DOCUMENT_STORAGE_LOCAL_DIR` (host folders for the database and for locally stored documents), `DOCUMENT_STORAGE_WEBDAV_ALLOW_PRIVATE_NETWORK` and `ICS_SUBSCRIPTION_ALLOW_PRIVATE_NETWORK` (for targets on your own LAN, which the SSRF guard blocked before), and `OIDC_TRUST_EMAIL_WITHOUT_VERIFIED_CLAIM` for identity providers that send no `email_verified` claim.
+- Installer: `WEBDAV_BACKUP_KEEP` finally has a field. It had been in the schema for months without ever being written.
+- CLI installer: asks for the base URL your household will open. Behind a reverse proxy this differs from the host and port the container listens on, and password-reset mails need it.
+- Portainer: 23 previously missing variables, among them all of `OIDC_*`, all of `WEBDAV_BACKUP_*`, the `EMAIL_*` fields and `BASE_URL`. Portainer lists every variable by hand, so anything absent could not be set at all.
+- Web installer: a wait screen that names what is happening (pulling the image, starting the container, health check), shows the pull log after 90 seconds and offers a retry.
+
+### Changed
+
+- CLI installer: configures weather through Open-Meteo coordinates. It still asked for an OpenWeatherMap API key, although the default has been Open-Meteo without a key since 2026-06-07.
+- CLI installer: derives `SESSION_SECURE` and `TRUST_PROXY` from the scheme of the base URL, and writes both. An existing value in your `.env` always wins.
+- Settings: SMTP fields that come from an environment variable are now shown as locked and labelled as such. The value always won; the page just did not say so, accepted your input and discarded it.
+- Web installer: matches the app visually, and its touch targets and input sizes now follow the mobile guidelines.
+
+### Fixed
+
+- Text on coloured fills follows the theme. In dark mode white text sat on every lightened module accent at between 1.44:1 and 3.21:1 — among others the selected day in the date picker and the count in the reminder badge.
+- Re-running either installer no longer discards configuration. Both rewrote the `.env` from scratch and kept only the two security keys, so SMTP, OIDC, WebDAV backups and the data directory were lost — visible only at the next login attempt.
+- The web installer no longer terminates when no container engine is present.
+- A slow first installation is no longer reported as a failure while the image is still downloading, and a start that fails after launching is now recognised instead of waiting for the 15-minute timeout.
+- Google Calendar and Drive callbacks are built from the base URL, so OAuth completes behind a reverse proxy.
+- Local document storage: the Compose files mount the host folder at `DOCUMENT_STORAGE_LOCAL_PATH` instead of a fixed `/documents`. Changing that path sent uploads into the container layer, where the next image update removed them.
+- WebDAV backups configured in the settings are no longer overridden by empty environment variables that deployment descriptors pass through.
+- Passwords supplied through environment variables keep leading and trailing whitespace.
+- The `.env` download on the final screen is the file that was written, and the installer stays reachable long enough to serve it.
+- The "generate" button keeps its accessible name while working, and no longer stays disabled after a failure.
+- Installer translations: error messages state coordinate ranges with a plain hyphen, so the value can be typed into the field it refers to.
+
+## [1.73.2] - 2026-08-02
+
+This release changes nothing in the application itself. Apart from the service worker's release marker, which every release bumps so that browsers drop their caches, no file under `public/` or `server/` differs from v1.73.1. What it carries is the reworked project website and documentation, and it keeps the published version in step with them. If you self-host, a running instance will behave exactly as before.
+
+### Changed
+
+- The project website has been rebuilt around the design critique. The landing page and the installation page were reworked, the imprint and privacy pages follow the same layout, and 21 unused translation keys were dropped along the way.
+- The screenshot gallery now also shows Pantry, Accounts and the Budget plan. The shots were retaken with the version number hidden, the dashboard laid out denser, and the meal plan set on the calendar week.
+- The installation guide now describes the state of the database key the same way on every install path, instead of differing between them.
+
+## [1.73.1] - 2026-08-02
+
+### Fixed
+
+- The button for adding an entry no longer disappears while you are not typing. Yuvomi hides it whenever the on-screen keyboard is open, so that it does not cover the field you are filling in, but it inferred the keyboard from the size of the visible page alone - and on an iPhone the address bar shrinks that page just as a keyboard would. A single such change could therefore take the button away in any module that has one, with nothing to bring it back, which is what remained of the report in #634 after the previous fix: the same button, gone for the same reason, this time in Tasks and Pantry alike. The keyboard now counts as open only while a text field actually has the focus. Leaving that field brings the button straight back, and so does moving to another module. Date and colour fields no longer count, since they open a picker rather than a keyboard.
+
+## [1.73.0] - 2026-08-02
+
+### Added
+
+- Recipes can now mirror from a self-hosted Mealie instance. Add a Mealie account under Settings → Kitchen and its recipes appear alongside your own, with a "Mealie" badge and a link back to view them there. Mealie stays the source of truth for their content, so mirrored recipes are read-only here - editing and deleting are blocked, though you can still duplicate one into an editable native copy. They slot straight into the meal planner and shopping list like any other recipe, sync automatically, and a rename in Mealie updates the mirrored copy in place instead of losing its meal-plan links. A broken connection to Mealie never wipes the local copies. A Mealie account also accepts an optional public link URL, separate from the (possibly Docker-internal or LAN-only) address used for syncing, so the "Open in Mealie" links actually work from your browser.
+- Subtasks can start expanded. A task's checklist was always folded away behind its progress bar, so a household that plans in subtasks reopened the same lists on every visit. A new switch under Settings → Modules → Module options makes them open by default; folding one shut by hand still works, the setting only decides where a task starts.
+
+### Fixed
+
+- The module list in the sidebar no longer jumps while you use it. Rebuilding the navigation - which happens on every route change, and when the language or the module list changes - reset its scroll position to the top, and the mechanism that keeps the current module in view immediately pulled it somewhere else, so a long list appeared to jump between its first and last entry. The position now survives the rebuild, and the current module is only scrolled into view when it genuinely sits outside it.
+
+## [1.72.0] - 2026-08-02
+
+### Added
+
+- Tapping a contact now shows it to you before it lets you change it. Until now it opened the edit form straight away, while the chevron at the end of the row promised a detail view that did not exist - so looking up the paediatrician's number put you in a form with the keyboard in the way. The new view holds no input field at all, and "Edit" in the header is a separate step. Creating a contact still starts in the form. The same applies when you arrive from search: a hit is something you want to see first.
+- Every number, mail and address a contact has is now reachable. The list only ever showed and offered the first of each, so a contact with a work and a mobile number gave you exactly one to tap although the second had long been stored - it was only ever visible inside the edit form. Each value now sits in the detail view with its label, ready to call, mail or open on a map.
+- Contacts show their organisation and job title. Both arrive over CardDAV and had no display anywhere in the app, because the contact form does not manage them.
+
+## [1.71.2] - 2026-08-02
+
+### Fixed
+
+- The button for adding a task no longer disappears the moment you enter the module. It slid away whenever you scrolled down, to clear the row sitting underneath it, and it came back only once you scrolled again - so a single downward nudge could leave the module without its one way to add anything. On an iPhone the address bar produces such a nudge on its own, and so does a list still growing as it loads, which is why it looked like the button vanished on its own. The free space below the button is held open at every scroll position anyway since v1.60.0, so the sliding had nothing left to do.
+- Opening a module now starts at the top of the page, instead of wherever you left the previous one. The scrolling area belongs to the whole app rather than to a page, and nothing reset it, so stepping from a long dashboard into the task list dropped you into the middle of the list. Browser back and forward still take you to where you were. That part covers the pages that scroll as a whole; the eight modules with a list of their own (Budget, Calendar, Contacts, Meals, Notes, Pantry, Recipes, Shopping) come back to the top for now.
+
+## [1.71.1] - 2026-08-02
+
+### Fixed
+
+- Changes to a birthday now reach the calendar you sync it to. Editing one detached its appointment from the copy in iCloud, Google or Nextcloud: the new name showed up in Yuvomi while the external calendar kept the old one forever. Deleting a birthday, or setting its reminder to "none", now removes the appointment there too instead of leaving it behind for the next sync to bring back.
+- Moving or deleting a housekeeping visit reaches the external calendar as well. A visit shifted to another day showed the new date in Yuvomi and the old one everywhere else.
+- Visit and payment entries that Yuvomi writes for you now follow the household data language, with the amount formatted as currency and the date in your chosen format. Only the app sent translated text before; anything else - the API, scripts, integrations - got English and a raw date.
+
+## [1.71.0] - 2026-08-01
+
+### Fixed
+
+- Birthday appointments no longer read "Birthday: Grandma" outside the app. The title was stored in English and only translated while the page was drawn, so everything that reads the stored appointment showed English: the API, the calendar feed you subscribe to elsewhere, the sync to iCloud, Google and Nextcloud, and the search index.
+- Names containing a dollar sign are no longer mangled where the app writes them into a sentence. A contact called "A $& B" showed up as "A {{name}} B", and some combinations pulled a piece of the surrounding sentence into the name. Affected every screen that puts a name, title or note into a phrase - birthday appointments, assignment labels, confirmation prompts.
+
+### Added
+
+- Settings → Personal → Appearance → Language now carries a second setting: the language Yuvomi writes into the entries it creates for you. It is separate from the language of the app itself, because a saved appointment has one wording no matter which member opens it later. Households that picked a region already get it for free - a German region means German birthday appointments, with nothing to configure. A household that never picked a region keeps the English wording it has today until someone chooses a language, so nothing changes underfoot on update.
+
+## [1.70.0] - 2026-08-01
+
+### Added
+
+- Tapping an appointment or a task now shows it to you before it lets you change it. Until now the edit form opened straight away, so the on-screen keyboard rose over roughly 40 % of the display for someone who only wanted to know when the dentist appointment is - and tasks had no reading path at all, every one of the five ways in ended in the form. The new view contains no input field whatsoever, so the keyboard cannot come up, and "Edit" in the header is a separate, deliberate step. Creating something new still starts in the form, because there typing is the point. On a wide screen an appointment opens as a small card anchored to the entry you tapped, so the short path stays short.
+- The appointment view states three things the old popup kept to itself: how the appointment repeats, written out ("Every 2 weeks (Mon, Thu), until 31.12.2026"), which reminders are set, and who can see it.
+- A task's status can be moved on straight from its detail view, instead of going through a form with seven select fields just to tick something off.
+
+### Fixed
+
+- Switching between light and dark mode now also recolours the status bar of the installed app. It kept the module colour of the theme that had been active when the page was opened, so after a switch it sat there in the old shade until the next navigation.
+
+## [1.69.3] - 2026-08-01
+
+### Fixed
+
+- A confirmation asked from inside a form no longer throws the form away. Deleting a shared expense, an account, a reward, a medication, a lab report, an activity, a cycle entry or a subscription category opened its confirmation *in place of* the form, so pressing "Cancel" - the only reason the question exists - was the one path that destroyed everything typed in. Cancelling now hands the form back exactly as it was.
+- Deleting a birthday from the edit dialog no longer asks whether to discard the changes first. Those fields go with the entry anyway, so the question stood between the user and a single decision. Cancelling it could even bring the edit dialog back for an entry that had already been removed from the list.
+- Confirmation dialogs are announced with their own question again. When one opened over a form, screen readers read the heading of the form underneath instead, because both carried the same title id. While the dialog is up, the form beneath is now also out of the reading order rather than only out of the tab order.
+- Keyboard focus returns to the button that opened a confirmation once it is closed, instead of falling back to the top of the page.
+
+## [1.69.2] - 2026-08-01
+
+### Fixed
+
+- Switching between light and dark mode now recolours the whole app right away. The colour a module lends to its buttons, focus rings and the active navigation pill kept the shade of the theme that was active when the page was opened, so after switching to dark mode that text sat at 2.7:1 against the background - below the readable minimum. Reloading fixed it, which is why it was easy to miss. The same went for "Automatic": when the system moved to dark mode on its own, the accent stayed behind.
+
+## [1.69.1] - 2026-08-01
+
+### Fixed
+
+- Saving an edited shopping item no longer asks whether to discard the changes. The item was already stored at that point, so the question described the opposite of what had happened - and pressing "Discard" kept the save. The same dialog appeared after importing ingredients from the meal plan.
+
+## [1.69.0] - 2026-08-01
+
+### Added
+
+- Tasks can carry tags. A task still sits in exactly one category, but it can wear any number of labels on top - "garden", "before the holidays", "for grandma". Tags are free text with no list to maintain: one exists because a task carries it, and it disappears with the last one. The dialog has a tag field with suggestions, and tags show as chips on the task card and on the Kanban board.
+- Clicking a tag on a card filters the list by it, and picking several narrows it further, the same way the status and person filters already do. The filter bar offers every tag in use.
+- Tags can be managed for the whole household. "Manage tags" in the tasks toolbar renames a tag everywhere at once, merges it into another by renaming it onto an existing name, or detaches it from every task. Fixing a typo no longer means opening every task that carries it.
+- Several tasks can be tagged at once. With multiple tasks selected, the bulk bar adds or removes a tag on all of them in one step.
+- Tags travel both ways with CalDAV reminder lists, as that list's categories. A label you set in Nextcloud Tasks, Radicale or another reminder app shows up here, and one you set here reaches the server. Until now those categories were read past and lost.
+- Shopping items show the categories of the reminder list they came from as tags. A reminder list can feed either the task list or the shopping list, and on the shopping side those labels used to be dropped without a trace. They are shown, not managed here: they belong to the source list, so nothing Yuvomi does overwrites them on the server.
+- The global search finds tasks and shopping items by their tags, so the same word leads to a hit whether you type it into the search or the filter bar.
+- An AI or automation client connected over MCP sees a task's tags, can filter by them, and can set them when creating a task.
+
+### Fixed
+
+- The tags of a private task no longer show up for anyone else. Tag names are free text and can give away what a task is about, so the filter bar and the suggestion list now only offer tags from tasks you are allowed to see - counts included. A task hidden while you prepare a surprise no longer announces itself through its label.
+- An AI or automation client connected over MCP could list every private task in the household. The task list it receives now follows the same visibility rules as the app, matching the calendar list, which always did.
+- A recurring task no longer loses its tags. The follow-up instance created when you tick one off kept the title, category and assignees but silently dropped the labels; tags belong to the task, not to a single run.
+- Renaming a tag to a name containing a comma kept only the part before it, and reported success anyway.
+- A tag consisting only of dots could not be renamed or removed: the address for it dissolved before the request was sent. Such tags are no longer created.
+- A tag ending in a backslash arrived from a reminder list glued to the tag after it.
+- Filtering by a tag that contains a comma, such as `Haus, Hof` from a reminder list, found nothing. A single tag in the address was read as a comma-separated list and split into two, so the search asked for two tags at once.
+- Tags with umlauts ignored capitalization only by half: a task tagged `Äpfel` was not found by `äpfel`, although `ÄPFEL` worked. The database's built-in comparison folds only the English alphabet; tags are now compared through a key that understands the whole alphabet.
+- A private subtask under a shared task was handed out to everyone, title and all. Subtasks never followed the visibility rule of their own; now they do, and their tags with them.
+- On upgrade, a household that had deleted its most recent task could see that task's ID handed out again, which could attach an old reminder to an unrelated new task.
+- An AI or automation client that sent a malformed tag filter received the full task list instead of an error, so an automation could act on tasks it never asked for.
+- The API description declared the category and tag path parameters as numbers, although both are names. A client generated from it refused an address like `/tasks/tags/garden` or sent a number instead. Only generated clients were affected; the API itself always accepted the name.
+- Tasks created over MCP landed in a category that appeared in no dropdown and no filter, and jumped to some other category the first time they were saved. This was a leftover from the category rework: the fallback still wrote the old display name instead of the key. Existing tasks affected by it, including every task that arrived through a reminder list, are repaired on upgrade.
+
+## [1.68.2] - 2026-08-01
+
+### Changed
+
+- The reminder sync settings no longer present reminder lists as an Apple feature. List discovery has always worked with any CalDAV server that serves reminder collections, and the wording now says so instead of naming Apple Reminders.
+
+## [1.68.1] - 2026-08-01
+
+### Fixed
+
+- Reminder lists stayed empty. A list you picked in the settings appeared there, but no task or shopping item ever arrived from it: the request asked the server for calendar events rather than reminders, and a standards-compliant server (Nextcloud, Radicale) correctly answered with nothing. Reminders now arrive from any such list. Nothing was lost while this was broken - the safeguard against deleting on an empty answer kept existing items untouched.
+
+## [1.68.0] - 2026-07-31
+
+### Added
+
+- Reminder lists sync both ways now. A task or shopping item that came from a CalDAV list follows you back to the server when you tick it off, rename it, change its due date or priority, or delete it. Until now the mirror was one-way: the change stayed local and the next sync run quietly undid it. This works with any CalDAV server that serves reminder collections - iCloud, Radicale, Nextcloud - not only Apple Reminders.
+- A change is written into the existing item on the server instead of replacing it, so alarms, categories and whatever else your other apps put there survive the round trip. Tasks created in Yuvomi stay local: unlike an event, a task has no target list it could be created in.
+
+### Fixed
+
+- Reminders with a due time arrived shifted by the time-zone offset - a task due at 16:30 showed up as 14:30. Due times are now read into, and written back out of, the household time zone (`TZ`).
+- A task set to "in progress" or archived fell back to "open" on every sync run, and an "urgent" priority dropped to "high", because neither has an exact counterpart in the reminder format. Both now survive unless the server genuinely moves the item to another level.
+
+## [1.67.0] - 2026-07-31
+
+### Added
+
+- Transactions in Budget can carry receipts. The entry dialog, under "More options", lets you either upload a new file or pick a document you already filed under Documents - several per transaction, since one purchase can produce a till receipt, an invoice and a warranty. A transaction with a receipt shows a paperclip in the list, and a receipt's name opens its preview. Until now the only way to keep a receipt near a transaction was to file it under Documents and remember the connection yourself.
+- Picking an existing document is new everywhere. The three places that could attach a file - Documents, Calendar, Housekeeping - could only ever upload a new one, so filing the same receipt twice was the only way to reuse it. The new receipt field does both and is shared, rather than being built a fourth time.
+- Shared expenses take receipts the same way, and a settle-up can record one payment proof. The database columns for this had existed since the module was written, but nothing in the interface ever filled them.
+- Uploads only leave the browser when you save the transaction, so an abandoned dialog leaves no stray file behind. New receipts are filed under Documents in a "Receipts" folder.
+
+### Security
+
+- A receipt keeps the visibility it has in Documents. A document filed as private stays invisible to everyone else even when it hangs on a shared transaction or a group expense, and administrators are no exception - the Documents module has never had an override, and attaching a document does not create one. You can only attach what you are allowed to see, so a guessed document ID cannot be used to read back a stranger's file name.
+- Saving a shared transaction or expense no longer removes attachments you cannot see. Only the links visible to you are replaced, so another member's private receipt survives your edit instead of being silently dropped.
+- Shared expenses previously handed out the names of attached documents to every group member without checking that document's visibility, and a payment proof was accepted by ID without any check at all. Both now run through the same rule as everything else. No installation was exposed by this, because nothing in the interface could attach a document until now.
+
+### Changed
+
+- The rule for who may see a document lived in three modules as three copies. It now lives in one place, which Budget, shared expenses, Documents, Tasks and the DMS integration all read from.
+
+## [1.66.2] - 2026-07-31
+
+### Fixed
+
+- Web Push reaches iPhone and iPad again. Every push is signed with a contact address, and without a configured email sender or `VAPID_SUBJECT` that address defaulted to `admin@localhost`. Apple checks it and refuses a token it cannot reach, answering `403 BadJwtToken`, so pushes to Apple devices failed while the very same installation kept delivering to Android. The address is now taken from the first reachable source, in order: `VAPID_SUBJECT`, the sender address from the email settings, then `BASE_URL`. A value that cannot work, such as a `localhost` or `.local` address or one without a domain ending, is discarded instead of being sent. Nothing has to be configured for this to take effect.
+- A rejected push now names the contact address it was signed with in the log, alongside the push service and status code it already carried, plus a line pointing at the address as the likely cause. A `403` was previously indistinguishable from any other server-side failure, which is what made the cause above so hard to find.
+- Unraid users can set the Web Push variables at all. `VAPID_SUBJECT`, `VAPID_PUBLIC_KEY` and `VAPID_PRIVATE_KEY` were missing from the template, and since Unraid lists every variable by hand and has no fallback, there was simply no field to enter them in.
+- The installation guide's iOS and iPadOS section now covers the contact address as well, next to the home-screen and certificate requirements already listed there.
+
+## [1.66.1] - 2026-07-31
+
+### Fixed
+
+- Family members can pick a sync target for a calendar event again. Anyone who was not an administrator only ever saw "Store locally" in the dropdown, even with a CalDAV server or Google account connected and its calendars switched on. The list of calendars was read through the account settings, which only administrators may open, so everyone else got nothing back. Saving a target was never restricted, only the list you pick it from.
+- A Google account whose access has expired no longer empties the CalDAV calendars in that same dropdown. Both lists now arrive together and each one falls back to empty on its own.
+
+## [1.66.0] - 2026-07-31
+
+### Added
+
+- A weekly repeating meal can now be given an end date. The field sits next to the repeat switch when you create the meal and can be changed later by editing the series; leaving it empty keeps the series running without an end, the way it behaved before. Until now every repeat ran forever, and since the planner writes a real meal into the week the moment you open it, paging a year ahead planted 52 copies that then stayed there.
+- Deleting a repeating meal offers a third choice: this and all following. It ends the series the day before the meal you are looking at, keeps every earlier occurrence, and stops new ones from appearing. Deleting the very first occurrence this way removes the series outright. Before this, the only ways out were deleting a single date, which the next week undid by generating a fresh copy, or deleting the whole series including its history.
+
+## [1.65.0] - 2026-07-31
+
+### Changed
+
+- The Meals tab in the Kitchen no longer carries a number. It counted free meal slots for the current week, that is the meal types you have switched on times seven days minus the slots you had filled, so an empty week showed 28: the loudest number in the whole tab bar, for the state "nothing planned yet". It also counted days that had already gone by and could no longer be planned, so on a Friday it still asked for Monday's breakfast. The two numbers that remain, open shopping items and pantry items that need attention, count things that are genuinely waiting for you. What is missing from the meal plan is better told by the empty slots on the planner itself, because those also say which day and which meal it is missing from. The shared kitchen request behind the tab bar no longer computes the figure either, which removes a query over the meal table from every kitchen page load.
+
+### Fixed
+
+- Controls in the header of Recipes, Shopping and Pantry no longer sit far to the right of the list they belong to. Those three pages hold their content in a reading column that ends well before the window edge, but their headers ran the full width: on a 1280 pixel window the storage-location button in Pantry sat 276 pixels past the right edge of the list underneath it, and the three header actions in Shopping did the same, hovering over empty space. Header and body now end on the same line at every window size. Recipes never had the rule at all, and the version Shopping and Pantry did have only applied above 1024 pixels, so the gap stayed on smaller laptops and tablets, where it measured 148 pixels at a window width of 900.
+
+## [1.64.1] - 2026-07-31
+
+### Fixed
+
+- Updating the container while the app was open in a browser tab could leave that tab on an error screen naming a module, for example "The requested module '/utils/empty-state.js' does not provide an export named 'mountLoadError'". A browser keeps one set of loaded building blocks per open page and cannot exchange them, so a part of the app fetched after the update was assembled against parts of the previous version that were still in memory. Opening a section that had not been visited yet in that tab, most often Recipes, was enough. The app now stops loading further parts of a page as soon as it knows a new version is available and reloads instead, and it treats a failed load of this kind as a reason to reload once rather than to give up. Reloading the page had always cleared it; the point is that it no longer happens. Updating **to** this version can still show the error once in a tab that was open across the update, because the safeguard only arrives with the version it protects. It never indicated a damaged database, although the message in the container log at the time suggested one.
+- The offline cache stored the pages of the app without the shared building blocks they are made of: 52 of them, among those the module every page uses to insert text safely, were missing. After an update a page could therefore be present in its new form while its foundation was not, which is what made the error above possible in the first place, and offline a page could be complete but unusable. Pages and the modules they rely on are now cached together, and a test walks the whole dependency graph so the next added module cannot quietly reopen the gap.
+- The colour field in the appointment dialog was labelled "Color {{color}}" in 16 of the 23 languages, with the placeholder spelled out. It was written into the label as if a value would be filled in there, and nothing ever filled it. English, Spanish, French, Italian, Swedish, Greek, Russian, Turkish, Chinese, Japanese, Arabic, Hindi, Portuguese, Ukrainian, Vietnamese and Hungarian were affected; German and six others had it right, as did the identical label in Notes. A test now compares the placeholders of every translation against the German reference, so a text that promises a value the app does not supply cannot be added again.
+
+## [1.64.0] - 2026-07-31
+
+### Changed
+- The Budget header now keeps its place on every tab. The month stepper used to disappear without a word on five of the seven tabs, leaving a gap where the date had been, so it was never clear whether the month you had picked still applied. Tabs that have no time frame now say so quietly in the same spot: "Current balances", "All active subscriptions", "All loans", "All groups". "Current month" also moved behind the stepper instead of sitting between the back arrow and the date, where a reset button had no business being.
+- Statistics no longer keeps a second, separate period picker. It had its own stepper at a different position, in a different format (`01/07/2026 - 31/07/2026` instead of `July 2026`) and with its own anchor that was never in sync: picking March on the Budget tab and switching to Statistics showed July. Statistics now steps through the shared header, its Week/Month/Year switcher only picks how wide a step is, and both ends are reconciled when you switch tabs, in either direction. Week bounds still come from the server, so there is only one definition of a week.
+- Every switcher bar in the Budget module looks and behaves the same. There were four looks for the same question - a tinted capsule, a square accent-filled rectangle, a white tile and an outlined pill - and two of them offered no arrow-key navigation at all, so the keyboard handling you learned on Budget and Statistics was silently lost on Loans and Split Expenses. Loan status, group status and the account colour picker now share one appearance and one behaviour; the colour picker gained arrow keys in the process. Their touch targets grew from 40 and 28 pixels to the shared minimum of 44 (48 on touch devices).
+
+### Fixed
+- Subscription monograms were unreadable for many brands. The letters and the tile behind them were drawn from the same brand colour, so how legible a subscription was came down to which services a household happens to pay for: ten contrast failures across the seven demo brands, the worst at 1.83:1 where 4.5:1 is required, and nothing a user could do about it short of changing the brand colour. The brand now carries the tile and its border while the letters come from the regular text colour, which measures 12.9:1 in light mode and 10.7:1 in dark. The same flaw sat unnoticed in the account tiles on the Accounts tab and was fixed with it.
+
+## [1.63.0] - 2026-07-31
+
+### Changed
+- The seven Budget tabs now look like one module instead of three. They already shared the toolbar, the tab bar and the accent colour, but from the panel edge inward they had drifted into five different metric-card designs, four names for the same panel header, three container patterns and three different paddings, so every tab switch meant relearning where the number sits. There is now one metric card for the whole module, left aligned so each amount starts at the same position in a row, with room for a footnote below the figure. Accounts, Loans, Subscriptions and Split Expenses use it too: net worth and the loan figures are ordinary cards, the Loans tab no longer frames itself as a card full of cards, and Subscriptions and Split Expenses stop painting their own page background inside the Budget page, which used to appear as a tinted band that broke off at the container edge.
+- Money is written the same way everywhere in the Budget module. Each amount now carries one of four roles, and the role decides sign and colour together: a single account movement is always signed and coloured, a sum whose direction is already in its label is unsigned, a balance is signed only when negative, and an invoice amount such as a subscription price or a shared expense carries no sign at all. Before this, the same tab could show a signed amount on a transaction row and an unsigned one on the summary card directly above it. Signs come from the locale's own number format, so they stay on the correct side in right-to-left languages.
+- Work surfaces in the Budget module are opaque. The module had documented that rule for itself, that translucent glass belongs to overlays and modals so content stays readable, and then broke it on its own subscription cards, charts, list sections, group header, one search field and two row hover states.
+
+### Fixed
+- The subscription category donut kept its light-mode colours in dark mode. It used fixed colour values instead of the theme's data-series tokens, so it stayed saturated while the identical donut on the Statistics tab next to it lightened correctly.
+- A net worth of exactly zero was shown in green, as if it were good news, and on an empty Accounts tab it was the only coloured thing on the screen. Zero is now neutral.
+- The subscription budget bar could not show that the budget was exceeded. It capped at full width and stayed in the accent colour while the figure beside it already read over budget; it now turns red past 100 percent.
+
+## [1.62.0] - 2026-07-30
+
+### Added
+- Sending things to a shopping list can now be taken back, from all three places that do it: the cart button on a pantry row, a recipe's ingredients, and a planned meal. Until now only the pantry offered it, although a recipe moves the most at once, a whole ingredient list, into a list you are not looking at. The confirmation stays on screen for five seconds everywhere, and taking it back removes exactly what was just added and nothing else. For a meal, the ingredients count as not yet transferred again afterwards, so the meal can be sent a second time.
+
+### Changed
+- "There is no shopping list yet" now says the same thing wherever you meet it, and it offers a way out. There were four different answers to the same situation: one in the pantry that told you where to go, two in red that only named the state and left you standing, and a fourth in the meal editor that was a greyed-out dropdown next to a button that did nothing. Red claims something is broken, while a list you have not created yet is simply a step you have not taken. All four are now one sentence in the same colour, with a button that takes you straight to the shopping list.
+
+## [1.61.0] - 2026-07-30
+
+### Added
+- The Malaysian ringgit is now one of the currencies a household can pick, in the household settings as well as in subscriptions and in split expenses. Malaysian households had to record their money under a currency that was not theirs. Choosing Malaysia as the region sets the ringgit together with the local date and time format in one step, and amounts are then written the way they are written there: RM 1,234.56.
+
+### Fixed
+- The South Korean won, the Indonesian rupiah and the Iranian rial could be chosen as the household currency, but subscriptions did not offer them and split expenses refused them. A household on one of those three currencies could set it once in the settings and then had to leave it behind in two modules. All four places now work from the same list of currencies, and a test keeps them that way.
+
+## [1.60.1] - 2026-07-30
+
+### Fixed
+- Turning a module off under Settings, Navigation did nothing: the checkbox switched itself back on a fraction of a second later, so there was no way to hide anything from the navigation. The setting was in fact saved every time, but the page redrew itself from an empty set of preferences right afterwards and therefore drew every box as switched on again. The same empty read also meant the module order and the three mobile navigation slots were never loaded, so the page opened on the default arrangement instead of yours.
+
+## [1.60.0] - 2026-07-30
+
+### Fixed
+- When the server could not be reached, the four kitchen tabs each did something different, and two of them lied. The shopping list and the meal plan showed their empty state, complete with the button that creates a first entry, while the items were still there on the server. The pantry showed a correct error whose explanation read "[object Object]". Recipes took the whole app down to the error screen because one list had failed. All four now show the same thing: what could not be loaded, and a button to try again.
+- The round button in the bottom corner covered part of a row's controls at every scroll position, up to four fifths of one on a small phone. The free space it needs was reserved at the end of the list, where it only helped once you had already scrolled to the bottom. The area below the button now belongs to it alone, wherever you are in the list.
+- Searching the pantry or the recipes had no way to clear the field again, no magnifier to mark it as a search, and the only label vanished as soon as you typed the first character. Both fields also re-filtered the entire list on every keystroke.
+
+### Changed
+- The focus outline that appears when moving through the app with the keyboard now has one colour: the one of the module you are in. There were six competing definitions, and tabbing through the shopping list alternated between purple and orange six times in fifteen stops. A change of colour reads as a change of context, and there was none.
+- Searching the pantry and the recipes now works like searching notes, contacts, documents or birthdays, because it is now the same component: a magnifier in front, a button to clear the field, a name that stays readable to a screen reader while you type, and a short pause before filtering so that typing stays smooth on a long list.
+
 ## [1.59.0] - 2026-07-30
 
 ### Added
@@ -298,6 +841,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The calendar header no longer sits detached from the top edge and jumps into place on the first scroll (#577).
 - Long module titles are now shortened with an ellipsis instead of running out of the header. This affected languages with longer words than German (#577).
 
+## [1.45.14] - 2026-07-26
+
 ### Fixed
 - Shared expenses: the "Aufteilen" tab no longer overlaps its own cards on desktop. The layout used to switch to a single column at a fixed window width, which ignored the space the expanded sidebar takes up, so at a 1024px window the balances card was squeezed to a sliver and its "simplified debts" subtitle ran across the neighbouring card. Panel and card grid now each reflow from the width actually available to them, which also means collapsing the sidebar widens the content as expected (#575).
 - Shared expenses: the activity feed showed raw text such as `splitExpenses.activityType.expense_added` instead of a readable entry. Removing a member from a group had never been translated in any of the 23 languages, and the demo data recorded two activity types the app itself never writes (#575).
@@ -492,6 +1037,13 @@ Fix for contact-card import corrupting names that use non-ASCII letters.
 ### Fixed
 - Importing a contact card (.vcf) whose name is QUOTED-PRINTABLE encoded (common in vCard 2.1 exports from phone and mail apps) now decodes non-ASCII letters correctly. A name such as "Kalaycı" with the Turkish "ı" was previously imported literally as "Kalayc=C4=B1"; it now imports as written. Soft line breaks and the declared charset are honored, and the CardDAV sync parser decodes the same encoding. Plain values containing "=" (without a QUOTED-PRINTABLE declaration) are left untouched.
 
+## [1.40.5] - 2026-07-21
+
+Fix for contact-card import corrupting names that use non-ASCII letters.
+
+### Fixed
+- Importing a contact card (.vcf) whose name is QUOTED-PRINTABLE encoded (common in vCard 2.1 exports from phone and mail apps) now decodes non-ASCII letters correctly. A name such as "Kalaycı" with the Turkish "ı" was previously imported literally as "Kalayc=C4=B1"; it now imports as written. Soft line breaks and the declared charset are honored, and the CardDAV sync parser decodes the same encoding. Plain values containing "=" (without a QUOTED-PRINTABLE declaration) are left untouched.
+
 ## [1.40.4] - 2026-07-21
 
 Follow-up pass on the accessibility and interaction findings surfaced by the design critique.
@@ -515,6 +1067,20 @@ Bug-fix pass on three reported issues: modal saves, finance account colors, and 
 - Editing a task or document and clicking "Save"/"Apply" now applies the change. The modal footer is lifted out of its form to stay pinned above the fold, which detached the submit button from the form so the click silently did nothing. The button now keeps its form association and submits as before. (#543)
 - Creating or editing a finance account with a color no longer fails with "Color must be a valid HEX color". The account color picker stores theme-aware accent tokens (so the swatch also lightens in dark mode), and the server now accepts those tokens alongside plain hex colors, while still rejecting arbitrary CSS. (#542)
 - Reminder and notification delivery (Web Push, Gotify, ntfy) no longer breaks silently when the `reminders.pushed_at` column is missing after inconsistent migration history (e.g. a backup restored mid-migration). The database now self-heals the known critical column on startup and logs the repair, instead of the scheduler failing every 60 seconds on "no such column". (#538)
+
+Polish pass clearing the remaining P2/P3 findings from the design critique (design health 33 to 34), plus a Kanban board fix uncovered along the way.
+
+### Fixed
+- The Kanban board now shows tasks of every status. The default "open" filter was still being applied in Kanban, so the "In progress" and "Done" columns stayed empty even when tasks existed. The columns already are the status, so the filter no longer applies there, the view reloads all tasks on switch, and the filter badge counts only the filters shown as chips.
+- The month calendar no longer clips the last event mid-cell in short rows: visible capacity is measured from the real cell height (recomputed on resize) and the "+N more" row is always reserved, so nothing is cut off.
+- Empty Kanban columns show a "No tasks" hint that turns into a "Drag here" drop target while a card is being dragged, so empty columns read as valid destinations.
+- Budget tabs on narrow screens reveal the next tab (about a third peeking in) with a sharper edge fade, instead of ending flush and hiding three tabs behind an invisible one.
+- The active person chip in the Health module scrolls into view on mobile instead of sitting off-screen.
+- Recipe cards in the meal-planner sidebar show meal-type chips only for a real subset of meal types, not when a recipe fits every type (or none) where the chips carry no information.
+- Budget category bars keep a visible minimum width for non-zero amounts instead of rounding a tiny value down to an empty bar.
+- Accessibility: the mobile "More" button announces its popup (aria-haspopup), and the quick-actions FAB exposes its keyboard shortcut (aria-keyshortcuts "n" plus a tooltip); the sidebar active-pill easing moved to a single named token.
+
+## [1.40.2] - 2026-07-21
 
 Polish pass clearing the remaining P2/P3 findings from the design critique (design health 33 to 34), plus a Kanban board fix uncovered along the way.
 
@@ -750,6 +1316,11 @@ App-wide UX/UI audit (all modules, light/dark, desktop/mobile). The findings, th
 ### Fixed
 - Birthday calendar entries now show the birthday label in your own language (e.g. "Geburtstag: …" in German) instead of always "Birthday: …". The entry title and description are translated on display across the calendar (month, week, day, agenda), the event popup, the dashboard's upcoming-events widget, and search results, in all 23 supported languages. Existing birthdays are covered automatically; nothing needs re-importing.
 
+## [1.31.2] - 2026-07-19
+
+### Fixed
+- Birthday calendar entries now show the birthday label in your own language (e.g. "Geburtstag: …" in German) instead of always "Birthday: …". The entry title and description are translated on display across the calendar (month, week, day, agenda), the event popup, the dashboard's upcoming-events widget, and search results, in all 23 supported languages. Existing birthdays are covered automatically; nothing needs re-importing.
+
 ## [1.31.1] - 2026-07-19
 
 ### Fixed
@@ -937,6 +1508,18 @@ App-wide UX/UI audit (all modules, light/dark, desktop/mobile). The findings, th
 ### Fixed
 - CalDAV reminders: a single failed fetch could delete every mirrored reminder of an account. The sync mirrors Apple Reminders lists into Tasks or Shopping and prunes rows that vanished remotely, but it treated "the server returned nothing" as "everything was deleted remotely" — including when the fetch had just failed and the sync had already skipped that list. One transient iCloud error was therefore enough to wipe all imported tasks or shopping items of that account, taking their subtasks, assignments and document links with them via CASCADE; a re-import could not restore those, since it creates new rows. An empty result now never deletes anything and logs a warning instead, and a list that could not be fetched suspends deletion for its whole target module. Found while auditing the other sync providers for the issues fixed in #508.
 - Apple Calendar (legacy single-account sync via `APPLE_*`): events deleted in iCloud stayed in Yuvomi forever, the same defect fixed for multi-account CalDAV in v1.23.1. The inbound sync only ever inserted and updated. It now runs the same deletion pass, with the same guards: only synced Apple events of that calendar are affected, calendars whose fetch failed are never pruned, and a calendar returning no events at all is left alone with a warning.
+
+### Fixed
+- CalDAV calendars never synced automatically (#508). The auto-sync scheduler ran Google, Apple, ICS, CalDAV reminders and holidays, but the CalDAV calendar sync was never wired into it. Calendars therefore only updated when "Sync now" was pressed in Settings, even though the log announced "Auto-sync active every 15 minutes". CalDAV calendars now sync on the same `SYNC_INTERVAL_MINUTES` schedule (default 15) as every other provider.
+- CalDAV: events deleted on the server stayed in Yuvomi forever (#508). The inbound sync only ever inserted and updated events, so deleting an event in iCloud or Nextcloud never reached Yuvomi. Each sync now also removes local events that the calendar no longer returns. Only synced CalDAV events of that calendar are affected: local events and events still waiting to be uploaded are never touched, and an event moved between two calendars of the same account keeps its assignments instead of being deleted and re-created. If a calendar returns no events at all while local events still reference it, nothing is deleted and a warning is logged, since an empty response is far more often a server or auth error than a genuinely emptied calendar.
+
+## [1.23.2] - 2026-07-15
+
+### Fixed
+- CalDAV reminders: a single failed fetch could delete every mirrored reminder of an account. The sync mirrors Apple Reminders lists into Tasks or Shopping and prunes rows that vanished remotely, but it treated "the server returned nothing" as "everything was deleted remotely" — including when the fetch had just failed and the sync had already skipped that list. One transient iCloud error was therefore enough to wipe all imported tasks or shopping items of that account, taking their subtasks, assignments and document links with them via CASCADE; a re-import could not restore those, since it creates new rows. An empty result now never deletes anything and logs a warning instead, and a list that could not be fetched suspends deletion for its whole target module. Found while auditing the other sync providers for the issues fixed in #508.
+- Apple Calendar (legacy single-account sync via `APPLE_*`): events deleted in iCloud stayed in Yuvomi forever, the same defect fixed for multi-account CalDAV in v1.23.1. The inbound sync only ever inserted and updated. It now runs the same deletion pass, with the same guards: only synced Apple events of that calendar are affected, calendars whose fetch failed are never pruned, and a calendar returning no events at all is left alone with a warning.
+
+## [1.23.1] - 2026-07-15
 
 ### Fixed
 - CalDAV calendars never synced automatically (#508). The auto-sync scheduler ran Google, Apple, ICS, CalDAV reminders and holidays, but the CalDAV calendar sync was never wired into it. Calendars therefore only updated when "Sync now" was pressed in Settings, even though the log announced "Auto-sync active every 15 minutes". CalDAV calendars now sync on the same `SYNC_INTERVAL_MINUTES` schedule (default 15) as every other provider.
@@ -1323,6 +1906,11 @@ App-wide UX/UI audit (all modules, light/dark, desktop/mobile). The findings, th
 ### Added
 - Calendar: one-time import of events from an `.ics` file or a shared calendar feed URL into editable local events, under Settings → Sync → Calendar → "Import calendar". Unlike an ICS subscription (which stays read-only and auto-synced), imported events become your own editable events and are not synced afterwards — the migration path when moving from another calendar. Recurring events are kept as a series (the recurrence rule is reduced to the supported daily/weekly/monthly/yearly subset), all-day and timed events are preserved, and re-importing the same feed skips events that were already imported. The URL path reuses the SSRF-protected fetch (10 MB / 15 s limits) used by subscriptions. (#437)
 
+## [1.5.0] - 2026-07-09
+
+### Added
+- Calendar: one-time import of events from an `.ics` file or a shared calendar feed URL into editable local events, under Settings → Sync → Calendar → "Import calendar". Unlike an ICS subscription (which stays read-only and auto-synced), imported events become your own editable events and are not synced afterwards — the migration path when moving from another calendar. Recurring events are kept as a series (the recurrence rule is reduced to the supported daily/weekly/monthly/yearly subset), all-day and timed events are preserved, and re-importing the same feed skips events that were already imported. The URL path reuses the SSRF-protected fetch (10 MB / 15 s limits) used by subscriptions. (#437)
+
 ## [1.4.1] - 2026-07-09
 
 ### Changed
@@ -1372,6 +1960,11 @@ App-wide UX/UI audit (all modules, light/dark, desktop/mobile). The findings, th
 
 ### Security
 - API Tokens: scoped tokens are enforced across both the REST API and the MCP endpoint. A scoped token can only reach modules on its allow-list — every other `/api/v1` path is denied, `tools/list` hides MCP tools the token cannot use, out-of-scope `tools/call` is refused, and the OpenAPI bridge inherits the same limits because it loops back through the REST layer with the same token.
+
+### Added
+- Kitchen (Meals): recurring meals can now be edited or deleted as a whole series. Editing or deleting a weekly meal offers a scope choice — "only this date" or "whole series". A series edit propagates the meal's content and ingredients to every occurrence; a series deletion removes the recurrence template together with all of its occurrences.
+
+## [1.1.0] - 2026-07-08
 
 ### Added
 - Kitchen (Meals): recurring meals can now be edited or deleted as a whole series. Editing or deleting a weekly meal offers a scope choice — "only this date" or "whole series". A series edit propagates the meal's content and ingredients to every occurrence; a series deletion removes the recurrence template together with all of its occurrences.
@@ -1468,6 +2061,16 @@ A design and accessibility overhaul of three core areas — the Dashboard, the K
 - **Multiple reminders per calendar event** — an event can now carry several reminders (e.g. 15 minutes before *and* 1 day before) instead of just one. The event dialog manages them as an add/remove list (up to 5 per event); each reminder is delivered independently via in-app badges, Web Push, and notification channels (#436).
 - **Default appointment duration** — Settings → Modules → Calendar lets you choose a default duration (15–120 minutes) that sets the end time of new events automatically from the start. Inside the event dialog the duration is remembered dynamically: adjust the end and a later change to the start re-applies your chosen length (#441).
 - **Flexible time entry** — time fields now accept compact and separator notation (`0930`, `930`, `09.30`, `9,30`, `9h30`) in addition to `09:30`, normalizing to your locale's format on blur. Applies to every time input across the app, making entry easier on keyboards where the colon is awkward (#442).
+
+### Added
+- **Settings → Modules → Health** page: admins can show or hide the Cycle tab household-wide (opt-in, on by default). When off, the tab is hidden and its route redirects to the Health overview.
+- **Settings → Modules → Rewards** page: admins can enable or disable the Rewards module and choose whether reward redemptions require parent/admin approval (on by default; when off, redemptions are granted immediately).
+
+### Fixed
+- The **Rewards** module could not be hidden or reordered in Settings → Modules → Navigation — the enable switch and drag order silently reset because the server did not recognize `rewards` as a toggleable module. Rewards is now a fully toggleable and orderable module.
+- The **Health** and **Rewards** page modules and their new settings pages are now precached by the service worker like every other module, so they are available offline and refresh reliably on each release.
+
+## [0.98.3] - 2026-07-07
 
 ### Added
 - **Settings → Modules → Health** page: admins can show or hide the Cycle tab household-wide (opt-in, on by default). When off, the tab is hidden and its route redirects to the Health overview.
@@ -2188,6 +2791,12 @@ A design and accessibility overhaul of three core areas — the Dashboard, the K
 - **Week view day numbers highlight on hover again**: hovering a non-today day header in the calendar's week view now shows the intended circular highlight; it previously referenced an undefined colour token and had no effect.
 
 
+
+### Changed
+- **Dashboard "Today at a glance" is easier to scan on phones**: the important-today cards now use a compact 2×2 glance grid instead of a full-height stack, so the actionable lists below appear without scrolling; very narrow screens fall back to a single column.
+- **Dashboard glance cards read more calmly**: the task and event cards show an open-count badge and now use neutral titles with a single coloured module icon, reducing the colour load at the top of the screen.
+
+## [0.71.39] - 2026-06-13
 
 ### Changed
 - **Dashboard "Today at a glance" is easier to scan on phones**: the important-today cards now use a compact 2×2 glance grid instead of a full-height stack, so the actionable lists below appear without scrolling; very narrow screens fall back to a single column.
@@ -3202,6 +3811,11 @@ All DMS operations are admin-only, and the API token is never returned in respon
 
 ### Changed
 - **Liquid Glass – stronger specular on elevated surfaces:** The sidebar and bottom navigation now carry an inset top-highlight driven by `--lg-specular`, per the canonical glass recipe, giving the elevated glass panels a crisper specular edge.
+
+### Changed
+- **Calendar – week view time-slot click opens create-event modal:** Clicking an empty time slot in the week view time grid now opens the create-event modal again (reverts the day-view navigation introduced in v0.54.8). Navigating to the day view on time-slot clicks was too disruptive for users who intentionally tap a specific hour to create an event quickly.
+
+## [0.54.9] - 2026-05-29
 
 ### Changed
 - **Calendar – week view time-slot click opens create-event modal:** Clicking an empty time slot in the week view time grid now opens the create-event modal again (reverts the day-view navigation introduced in v0.54.8). Navigating to the day view on time-slot clicks was too disruptive for users who intentionally tap a specific hour to create an event quickly.
@@ -4507,6 +5121,11 @@ All DMS operations are admin-only, and the API token is never returned in respon
 - `install.sh`: interactive CLI wizard (7 steps) guiding users from a blank server to a running Oikos instance — prerequisites check, domain/port/timezone config, auto-generated or manual security secrets, optional weather and calendar integrations, Docker startup with health polling, and admin account creation. Supports `--env-file` for non-interactive/CI deployments.
 - Web installer (`tools/installer/`): browser-based setup wizard served by a zero-dependency Node.js server on `localhost:8090`. Covers the same steps as the CLI installer through a single-file SPA. Auto-terminates after successful setup or 30 minutes of inactivity.
 
+## [0.20.44] - 2026-04-21
+
+### Added
+- `install.sh`: interactive CLI wizard that guides users from a blank server to a running Oikos instance, covering prerequisites check, basic config, secret generation, optional weather/calendar integrations, Docker startup, and admin account creation via the setup endpoint. Supports `--env-file` for non-interactive/CI use.
+
 ## [0.20.43] - 2026-04-21
 
 ### Added
@@ -5061,6 +5680,11 @@ All DMS operations are admin-only, and the API token is never returned in respon
 - Shopping list category dropdown now shows translated labels instead of hardcoded German strings (#21)
 - Recurrence fields in task and calendar modals now fully translated (labels, frequency options, weekday abbreviations, unit labels) (#21)
 
+## [0.11.4] - 2026-04-05
+
+### Fixed
+- UX micro-interaction polish: swipe hint, locale-reload feedback, haptics, weather toast and FAB backdrop behave consistently; native `confirm()` dialogs replaced with an undo toast; `prefers-reduced-motion` is honored.
+
 ## [0.11.3] - 2026-04-05
 
 ### Added
@@ -5411,22 +6035,3 @@ Initial release of Oikos - a self-hosted family planner for 2–6 person househo
 - Rate limiting on login endpoint and global API limiter (300 req/min/IP)
 - No user data cached by service worker (API requests are network-only)
 - Hardened `.gitignore` and `.dockerignore` to prevent accidental secret or binary leakage
-
-[Unreleased]: https://github.com/ulsklyc/oikos/compare/v0.7.0...HEAD
-[0.7.0]: https://github.com/ulsklyc/oikos/compare/v0.6.0...v0.7.0
-[0.6.0]: https://github.com/ulsklyc/oikos/compare/v0.5.9...v0.6.0
-[0.5.9]: https://github.com/ulsklyc/oikos/compare/v0.5.8...v0.5.9
-[0.5.8]: https://github.com/ulsklyc/oikos/compare/v0.5.7...v0.5.8
-[0.5.7]: https://github.com/ulsklyc/oikos/compare/v0.5.6...v0.5.7
-[0.5.6]: https://github.com/ulsklyc/oikos/compare/v0.5.5...v0.5.6
-[0.5.5]: https://github.com/ulsklyc/oikos/compare/v0.5.4...v0.5.5
-[0.5.4]: https://github.com/ulsklyc/oikos/compare/v0.5.3...v0.5.4
-[0.5.3]: https://github.com/ulsklyc/oikos/compare/v0.5.2...v0.5.3
-[0.5.2]: https://github.com/ulsklyc/oikos/compare/v0.5.1...v0.5.2
-[0.5.1]: https://github.com/ulsklyc/oikos/compare/v0.5.0...v0.5.1
-[0.5.0]: https://github.com/ulsklyc/oikos/compare/v0.4.0...v0.5.0
-[0.4.0]: https://github.com/ulsklyc/oikos/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/ulsklyc/oikos/compare/v0.2.1...v0.3.0
-[0.2.1]: https://github.com/ulsklyc/oikos/compare/v0.2.0...v0.2.1
-[0.2.0]: https://github.com/ulsklyc/oikos/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/ulsklyc/oikos/releases/tag/v0.1.0

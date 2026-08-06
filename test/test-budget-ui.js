@@ -16,9 +16,14 @@ const budget = read('../public/pages/budget.js');
 const stats = read('../public/pages/budget-stats.js');
 const plans = read('../public/pages/budget-plans.js');
 const subscriptions = read('../public/pages/subscriptions.js');
+const splitExpenses = read('../public/pages/split-expenses.js');
+const housekeeping = read('../public/pages/housekeeping.js');
+const money = read('../public/utils/money.js');
 const layoutCss = read('../public/styles/layout.css');
 const tokensCss = read('../public/styles/tokens.css');
 const budgetCss = read('../public/styles/budget.css');
+const subscriptionsCss = read('../public/styles/subscriptions.css');
+const splitCss = read('../public/styles/split-expenses.css');
 
 // --------------------------------------------------------
 // Monatsnavigation und Neu-Aktion je Untertab
@@ -34,15 +39,31 @@ test('TAB_CAPS ist die einzige Quelle für Monatsnavigation und Neu-Aktion', () 
     assert.match(table[0], new RegExp(`'${id}':`), `TAB_CAPS ohne Eintrag für '${id}'`);
   }
 
-  // Monatsnavigation nur dort, wo der Monat den Inhalt bestimmt.
-  assert.match(table[0], /'budget':\s*\{ month: true/);
-  assert.match(table[0], /'plan':\s*\{ month: true/);
-  for (const id of ['accounts', 'subscriptions', 'loans', 'reports', 'split-expenses']) {
+  // Zeitbezug nur dort, wo der Zeitraum den Inhalt bestimmt. Berichte tragen ihn
+  // seit der Zusammenführung mit — sie hatten vorher einen eigenen Stepper.
+  for (const id of ['budget', 'plan', 'reports']) {
+    assert.match(table[0], new RegExp(`'${id}':\\s*\\{ month: true`), `'${id}' braucht den Kopf-Stepper`);
+  }
+  for (const id of ['accounts', 'subscriptions', 'loans', 'split-expenses']) {
     assert.match(table[0], new RegExp(`'${id}':\\s*\\{ month: false`), `'${id}' darf keine Monatsnavigation zeigen`);
   }
 
   // Berichte kennt keine Neu-Aktion — dort bleiben Toolbar-Button und FAB weg.
-  assert.match(table[0], /'reports':\s*\{ month: false,\s*add: null/);
+  assert.match(table[0], /'reports':\s*\{ month: true,\s*range: true,\s*add: null/);
+});
+
+test('der Kopf-Slot bleibt auf jedem Tab besetzt', () => {
+  // Eine Lücke im Kopf las sich als „der zuletzt gewählte Monat gilt weiter".
+  // Regel statt Aufzählung: jeder Tab ohne Stepper braucht einen Kontexttext.
+  const table = budget.match(/const TAB_CAPS = \{[\s\S]*?\n\};/);
+  for (const entry of table[0].matchAll(/'([a-z-]+)':\s*\{([^}]*)\}/g)) {
+    const [, id, caps] = entry;
+    if (/month:\s*true/.test(caps)) continue;
+    assert.match(caps, /note:\s*'budget\.periodNote/, `'${id}' hat weder Stepper noch Kontexttext`);
+  }
+  // Und der Kontexttext wird auch wirklich geschaltet.
+  assert.match(budget, /note\.hidden = !caps\.note/);
+  assert.match(budget, /note\.textContent = t\(caps\.note\)/);
 });
 
 test('Monats-Bedienelemente werden als Block geschaltet, nicht einzeln', () => {
@@ -50,6 +71,21 @@ test('Monats-Bedienelemente werden als Block geschaltet, nicht einzeln', () => {
   const block = budget.match(/\['#budget-prev', '#budget-next', '#budget-today', '#budget-label'\][\s\S]{0,220}/);
   assert.ok(block, 'Monats-Bedienelemente werden nicht gemeinsam geschaltet');
   assert.match(block[0], /el\.hidden = !caps\.month/);
+});
+
+test('das Modul führt genau eine Zeitachse', () => {
+  // Vorher hielt budget-stats.js einen eigenen anchor: Budget auf März gestellt,
+  // Wechsel auf Berichte zeigte Juli. Der Anker lebt jetzt im Modul-State und
+  // wird beim Tabwechsel in beide Richtungen angeglichen.
+  assert.match(budget, /reportAnchor:\s*toLocalDateKey\(new Date\(\)\)/);
+  assert.match(budget, /state\.reportAnchor = anchorForMonth\(state\.month\)/, 'Hinweg Budget → Berichte fehlt');
+  assert.match(budget, /const ym = state\.reportAnchor\.slice\(0, 7\)/, 'Rückweg Berichte → Budget fehlt');
+
+  // Das Panel darf keinen eigenen Zeitraumwähler mehr aufbauen.
+  assert.doesNotMatch(stats, /data-step=/, 'budget-stats.js baut wieder einen zweiten Stepper');
+  assert.doesNotMatch(stats, /budget-stats__period/, 'der Zeitraum gehört in den geteilten Kopf');
+  assert.match(stats, /view\.anchor = ctx\.anchor/, 'der Anker muss vom Modul kommen');
+  assert.match(stats, /view\.ctx\.onRangeChange\(id\)/, 'die Auflösung muss ans Modul zurückgemeldet werden');
 });
 
 test('Toolbar-Aktion und FAB teilen sich Sichtbarkeit und Label', () => {
@@ -93,27 +129,104 @@ test('neue Einträge landen im angezeigten Monat, nicht im heutigen', () => {
 // Tab-Leisten und Filter-ARIA
 // --------------------------------------------------------
 
-test('alle Tab-Leisten des Moduls nutzen die geteilte Verhaltensschicht', () => {
+test('keine Umschalter-Leiste im Modul versteckt sich hinter role="group"', () => {
+  // REGEL statt Allowlist. Die Vorgängerfassung nannte drei Selektoren
+  // (.budget-tabs, .budget-scope, .budget-stats__ranges) und übersah damit genau
+  // die beiden Leisten, die role="group" trugen und ohne Pfeiltasten-Navigation
+  // dastanden - Darlehensstatus und Gruppenstatus. Eine Allowlist deckt N
+  // Dateien ab, nicht die Regel.
+  //
+  // Die Regel: wer eine Auswahl anbietet, benennt sie auch so. role="group" ist
+  // ein Sammelbehälter ohne Auswahlsemantik; Leisten gehören auf role="tablist"
+  // (Sichtwechsel) oder role="radiogroup" (Einfachauswahl) - und landen damit
+  // automatisch im Guard darunter.
+  for (const [file, src] of BUDGET_PAGES) {
+    for (const bar of withoutComments(src).matchAll(/role="group"[\s\S]{0,900}?<\/div>/g)) {
+      assert.doesNotMatch(
+        bar[0],
+        /aria-selected=|aria-pressed=|aria-checked=/,
+        `${file}: eine Leiste mit role="group" meldet einen Auswahlzustand - `
+        + 'role="tablist" (Sicht) oder role="radiogroup" (Wert) benennt das richtig',
+      );
+    }
+  }
+});
+
+test('jede Umschalter-Leiste des Moduls läuft durch die geteilte Verhaltensschicht', () => {
   // Ohne wireTablist gibt es Roving-Tabindex ohne Pfeiltasten — eine Falle, aus
-  // der Tastaturnutzer nicht mehr herauskommen.
-  assert.match(budget, /wireTablist\(_container\.querySelector\('\.budget-tabs'\)/);
-  assert.match(budget, /wireTablist\(_container\.querySelector\('\.budget-scope'\)/);
-  assert.match(stats, /wireTablist\(view\.root\.querySelector\('\.budget-stats__ranges'\)/);
+  // der Tastaturnutzer nicht mehr herauskommen. Der Guard leitet die Leisten aus
+  // dem Markup ab, statt sie aufzuzählen: eine neue Leiste ist automatisch erfasst.
+  const wired = BUDGET_PAGES.flatMap(([, src]) =>
+    [...src.matchAll(/wireTablist\(\s*[^)]*?querySelector\('([^']+)'\)/g)].map((m) => m[1]));
+
+  for (const [file, src] of BUDGET_PAGES) {
+    for (const bar of src.matchAll(/<div class="([^"]+)"([^>]*)role="(tablist|radiogroup)"/g)) {
+      const [, classes, attrs] = bar;
+      const id = attrs.match(/id="([^"]+)"/)?.[1];
+      const selectors = [...classes.trim().split(/\s+/).map((c) => `.${c}`), ...(id ? [`#${id}`] : [])];
+      assert.ok(
+        selectors.some((s) => wired.includes(s)),
+        `${file}: Leiste "${classes}" ist an keinem wireTablist verdrahtet (${selectors.join(' / ')})`,
+      );
+    }
+  }
   // Der Scope-Umschalter muss dafür data-tab-id tragen (nicht mehr data-scope).
   assert.doesNotMatch(budget, /data-scope=/);
 });
 
-test('Zeitraum-Umschalter der Berichte trägt echtes Tab-ARIA', () => {
-  const bar = stats.match(/class="budget-stats__ranges"[\s\S]*?<\/div>/);
-  assert.ok(bar, 'Zeitraum-Leiste nicht gefunden');
+test('es gibt genau eine Umschalter-Optik im Modul', () => {
+  // Vier Optiken für dieselbe Frage - getönte Kapsel, eckig gefülltes Rechteck,
+  // weiße Kachel, umrandete Pille - hießen, dass derselbe Zustand pro Tab anders
+  // aussah. .budget-segmented ist der Baustein; wer eine Leiste baut, greift ihn.
+  assert.ok(/\n\.budget-segmented\s*\{/.test(budgetCss), '.budget-segmented fehlt in budget.css');
+  assert.ok(/\n\.budget-segmented__item\s*\{/.test(budgetCss), '.budget-segmented__item fehlt');
+
+  for (const [file, src] of BUDGET_PAGES) {
+    for (const bar of src.matchAll(/<div class="([^"]+)"([^>]*)role="(tablist|radiogroup)"/g)) {
+      const [, classes] = bar;
+      // Die Haupt-Tabs und der Scope-Umschalter tragen die app-weite Pillen-
+      // Grammatik (sub-tabs.css) - sie sitzen in der Toolbar, nicht im Panel.
+      if (/budget-tabs|budget-scope|budget-color-picker/.test(classes)) continue;
+      assert.match(
+        classes,
+        /budget-segmented/,
+        `${file}: Leiste "${classes}" baut eine eigene Optik statt .budget-segmented`,
+      );
+    }
+  }
+
+  // Und die abgelösten Optiken kommen nicht zurück.
+  const liveCss = withoutComments(budgetCss);
+  for (const dead of ['budget-loans__filter\\b', 'budget-stats__range\\b']) {
+    assert.doesNotMatch(liveCss, new RegExp(`\\.${dead}`), `.${dead} ist durch .budget-segmented ersetzt`);
+  }
+});
+
+test('das Touch-Maß der Umschalter kommt aus dem Token, nicht aus der Leiste', () => {
+  // Die abgelösten Leisten lagen bei 40px (Zeitraum) und 28px (Nur-Ausgaben).
+  const item = budgetCss.match(/\n\.budget-segmented__item\s*\{([^}]*)\}/);
+  assert.ok(item, '.budget-segmented__item fehlt');
+  assert.match(item[1], /min-height:\s*var\(--target-base\)/);
+});
+
+test('Auflösungs-Umschalter der Berichte trägt echtes Tab-ARIA', () => {
+  const bar = stats.match(/class="[^"]*budget-stats__ranges"[\s\S]*?<\/div>/);
+  assert.ok(bar, 'Auflösungs-Leiste nicht gefunden');
   assert.match(bar[0], /role="tablist"/);
   assert.match(bar[0], /aria-label=/);
   assert.match(stats, /role="tab"[\s\S]{0,140}aria-selected="\$\{on\}"/);
   assert.match(stats, /tabindex="\$\{on \? '0' : '-1'\}"/);
 });
 
-test('Darlehens-Filter melden ihren Zustand über aria-pressed', () => {
-  assert.match(budget, /data-loan-status="\$\{id\}" aria-pressed="\$\{on\}"/);
+test('Einfachauswahl-Leisten melden ihren Zustand über aria-checked', () => {
+  // Darlehensstatus, Gruppenstatus und Kontofarbe wählen EINEN Wert, sie
+  // wechseln keine Sicht: aria-checked in einer radiogroup, nicht aria-pressed
+  // in einem role="group". Der Zustand muss angesagt werden - reine Einfärbung
+  // ist für Screenreader kein Kanal.
+  assert.match(budget, /role="radio" data-tab-id="\$\{id\}" aria-checked="\$\{on\}"/, 'Darlehensstatus');
+  assert.match(splitExpenses, /role="radio" data-tab-id="\$\{id\}" aria-checked="\$\{on\}"/, 'Gruppenstatus');
+  assert.match(budget, /role="radio"[\s\S]{0,200}aria-checked="\$\{on\}"/, 'Kontofarbe');
+  // Der Filter-Trichter je Darlehenszeile bleibt ein einzelner Toggle-Button.
   assert.match(budget, /data-action="loan-filter"[\s\S]{0,160}aria-pressed=/);
 });
 
@@ -224,6 +337,412 @@ test('keine hartkodierten Anzeigetexte in den Budget-Views', () => {
   assert.match(budget, /t\('budget\.trendDelta'/);
 });
 
+// --------------------------------------------------------
+// Geteilte Bausteine des Moduls (Critique 2026-07-30, P0)
+//
+// Diese Guards sind bewusst als REGEL über alle Dateien des Moduls formuliert,
+// nicht als Allowlist einzelner Selektoren: eine Allowlist deckt N Dateien ab,
+// aber nicht die Regel - genau daran sind hier fünf Kartenbauarten und drei
+// Währungsformatierer vorbeigewachsen.
+// --------------------------------------------------------
+
+// Jede Page-Datei, die unter /budget rendert. Neue Untertabs kommen hierher.
+const BUDGET_PAGES = [
+  ['budget.js', budget],
+  ['budget-stats.js', stats],
+  ['budget-plans.js', plans],
+  ['subscriptions.js', subscriptions],
+  ['split-expenses.js', splitExpenses],
+];
+
+const BUDGET_STYLESHEETS = [
+  ['budget.css', budgetCss],
+  ['subscriptions.css', subscriptionsCss],
+  ['split-expenses.css', splitCss],
+];
+
+// Einmaliges Ersetzen genuegt nicht: ein Rest wie `<!<!-- x -->->` setzt sich
+// nach dem Schnitt zu einem neuen Kommentar-Delimiter zusammen. Darum bis zum
+// Fixpunkt laufen (CodeQL js/incomplete-multi-character-sanitization).
+// Die Schleife muss den Aufruf direkt umschliessen: CodeQL erkennt den Fixpunkt
+// nur, wenn das Ergebnis des `replace` zu seinem eigenen Receiver zurueckfliesst.
+// In einer `.replace().replace()`-Kette gilt das nur fuer das letzte Glied - der
+// Schnitt gehoert deshalb hierher und nicht zurueck in die Kette unten.
+const withoutHtmlComments = (src) => {
+  let out = src;
+  let previous;
+  do {
+    previous = out;
+    out = out.replace(/<!--[\s\S]*?-->/g, '');
+  } while (out !== previous);
+  return out;
+};
+
+// Guards, die auf Markup- oder Selektor-Muster prüfen, müssen an Kommentaren
+// vorbeisehen: sonst schlägt jede Erklärung an, die das verbotene Muster nennt -
+// und der Weg aus dem roten Test wäre, die Begründung zu löschen.
+// Auch die Muster untereinander koennen sich gegenseitig freilegen (ein Blockkommentar
+// verdeckt einen HTML-Kommentar), darum laeuft auch die Kombination bis zum Fixpunkt.
+const withoutComments = (src) => {
+  let out = src;
+  let previous;
+  do {
+    previous = out;
+    out = out.replace(/\/\*[\s\S]*?\*\//g, '');
+    out = withoutHtmlComments(out);
+    out = out.replace(/^\s*\/\/.*$/gm, '');
+  } while (out !== previous);
+  return out;
+};
+
+// Jede Seite, die ein Betragsfeld rendert - nicht nur das Budget-Modul. Die
+// Schrittweite hängt an der Währung, und eine Währung gibt es auch ausserhalb
+// von Budget (Hauspflege rechnet Tages- und Stundensätze ab).
+const MONEY_INPUT_PAGES = [...BUDGET_PAGES, ['housekeeping.js', housekeeping]];
+
+test('Betragsfelder holen ihre Schrittweite aus der Währung, nicht aus 0.01', () => {
+  // Die Regel, nicht die Liste: ein Feld mit inputmode="decimal" ist entweder
+  // ein Anteil in Prozent (dann trägt es max="100") oder ein Geldbetrag - und
+  // dann ist eine feste Schrittweite falsch, sobald die Währung keine zwei
+  // Nachkommastellen hat. Bei JPY liess step="0.01" Hundertstel Yen zu,
+  // während Platzhalter und Untergrenze schon ganze Yen zeigten.
+  // Eine Allowlist einzelner Feld-IDs würde nur die heute bekannten Felder
+  // decken; der nächste neue Dialog fiele wieder durch.
+  for (const [file, src] of MONEY_INPUT_PAGES) {
+    // `[^>]` schliesst Zeilenumbrueche bereits ein (anders als `.`), eine
+    // Alternative `(?:[^>]|\n)` waere also mehrdeutig - und genau das ergibt
+    // exponentielles Backtracking (CodeQL js/redos).
+    const inputs = withoutComments(src).match(/<input[^>]*>/g) || [];
+    for (const input of inputs) {
+      if (!/inputmode="decimal"/.test(input)) continue;
+      if (!/step="0\.01"/.test(input)) continue;
+      assert.match(
+        input,
+        /max="100"/,
+        `${file}: Betragsfeld mit fester Schrittweite 0.01 - amountStep(currency, wert) aus utils/money.js nutzen:\n${input.replace(/\s+/g, ' ')}`,
+      );
+    }
+  }
+});
+
+test('Geldbeträge gehen als Punkt-Dezimalstring an den Server', () => {
+  // Der Server nimmt nur /^-?\d+(\.\d+)?$/ entgegen, die Eingabefelder der
+  // geteilten Ausgaben sind Textfelder und folgen der Region - in de, cs oder
+  // pl trennt ein Komma. Ohne Umschrift stimmt die Client-Prüfung zu und der
+  // Server lehnt danach ab, mit einem Fehler, der auf kein Feld zeigt.
+  const src = withoutComments(splitExpenses);
+  assert.match(src, /toDecimalString[^\n]*from '\/utils\/money\.js'/, 'die Umschrift kommt aus utils/money.js');
+  assert.match(src, /decimalString\s*=\s*toDecimalString/, 'die Umschrift fehlt');
+  // Jeder Payload-Betrag läuft durch die Umschrift: FormData liefert den
+  // Rohwert des Textfeldes, nicht den normalisierten.
+  const posted = src.match(/data\.amount\s*=\s*[^\n;]+/g) || [];
+  assert.ok(posted.length >= 2, 'Ausgabe und Zahlung müssen den Betrag umschreiben');
+  for (const line of posted) {
+    assert.match(line, /decimalString\(/, `Betrag ohne Umschrift an den Server: ${line}`);
+  }
+
+  // Die Umschrift muss die Ziffern des eingestellten Zahlensystems kennen, nicht
+  // nur das ASCII-Komma: unter fa oder ar-EG zeigt der Platzhalter "۰٫۰۰" bzw.
+  // "٠٫٠٠", und wer das abtippt, schickt Zeichen, die Number() nicht kennt.
+  const impl = withoutComments(money).match(/export function toDecimalString[\s\S]*?\n\}/);
+  assert.ok(impl, 'toDecimalString fehlt in utils/money.js');
+  assert.match(impl[0], /getNumberFormat\(/, 'die Ziffern müssen aus Intl kommen, nicht aus einer Tabelle');
+  // Gruppierung wird abgewiesen, nicht aufgelöst: in de-DE heisst "1.000"
+  // tausend, als Dezimalzahl aber eins. Wer das still deutet, liegt bei Geld im
+  // Zweifel um den Faktor tausend daneben.
+  assert.doesNotMatch(impl[0], /replace\([^)]*groupSep/, 'Gruppierung darf nicht still entfernt werden');
+  assert.match(impl[0], /return ''/, 'ein gruppierter Betrag muss abgewiesen werden');
+});
+
+test('jeder Speicherpfad prüft die Schrittweite selbst', () => {
+  // Die Dialoge des Moduls sind keine <form>-Elemente: sie speichern über einen
+  // Button-Handler, die native step-Prüfung des Browsers läuft also nie. Ein
+  // angezeigtes step="1" ist damit reine Behauptung - ohne eigene Prüfung nimmt
+  // das Feld trotzdem 12,5 JPY entgegen und schreibt den Wert weg, während die
+  // Anzeige ihn gerundet darstellt.
+  // Über alle Seiten mit Betragsfeldern, nicht nur die formularlosen: ein
+  // <form> hilft hier nichts, weil amountStep bei Bestandswerten neben dem
+  // Raster "any" liefert und die Browser-Prüfung damit aussetzt.
+  //
+  // Bewusst qualitativ und nicht als Zählung Felder-gegen-Aufrufe: eine Prüfung
+  // kann mehrere Felder gemeinsam abdecken, und eine Zahlengleichheit zu
+  // verlangen hiesse, den Code auf den Guard hin zu verbiegen. Er fängt damit
+  // das vollständige Vergessen einer Seite, nicht das einzelne Feld - dafür
+  // sind die Fall-Guards unten da.
+  for (const [file, src] of MONEY_INPUT_PAGES) {
+    const clean = withoutComments(src);
+    if (!/step="\$\{amountStep\(/.test(clean)) continue;
+    assert.match(
+      clean,
+      /amountIsSavable\(|rejectOffGridAmount\(/,
+      `${file}: währungsgerasterte Felder, aber keine Prüfung im Speicherpfad`,
+    );
+  }
+  assert.match(money, /export function fitsCurrencyGrid/);
+
+  // Keine feste Toleranz gegen Float-Ungenauigkeit: 131072.02 * 100 ergibt
+  // 13107201.999999998, liegt also knapp zwei Milliardstel daneben. Mit einer
+  // Schranke von 1e-9 hätte jeder Speicherpfad diesen gültigen Euro-Betrag
+  // abgewiesen. Der Vergleich mit der gerundeten Dezimaldarstellung braucht
+  // gar keine Schranke und stimmt über jede Größenordnung.
+  const clean = withoutComments(money);
+  assert.doesNotMatch(clean, /1e-9/, 'Rasterprüfung darf nicht an einer festen Toleranz hängen');
+  assert.doesNotMatch(clean, /Math\.round\([^)]*10 \*\* /, 'Rasterprüfung über die Dezimaldarstellung, nicht über skalierte Floats');
+});
+
+test('ein unangetasteter Bestandsbetrag bleibt speicherbar', () => {
+  // Unter der alten Oberfläche mit fester Schrittweite 0,01 konnten Beträge
+  // entstehen, die nicht ins Raster ihrer Währung passen. Eine unbedingte
+  // Prüfung sperrte an solchen Einträgen auch das Ändern von Titel oder Notiz -
+  // der Bestandswert-Schutz in amountStep wäre damit wirkungslos.
+  const clean = withoutComments(budget);
+  assert.match(clean, /original(?:Currency)?\s*[=:]/, 'rejectOffGridAmount kennt den Bestandswert nicht');
+  // Jeder Aufruf an einem bearbeitbaren Eintrag reicht den gespeicherten Wert durch.
+  const calls = clean.match(/rejectOffGridAmount\([\s\S]*?\)\) return;/g) || [];
+  assert.ok(calls.length >= 4, `erwartet 4 Prüfungen, gefunden ${calls.length}`);
+  for (const call of calls) {
+    assert.match(call, /original:/, `Prüfung ohne Bestandsschutz: ${call.replace(/\s+/g, ' ').slice(0, 90)}`);
+  }
+});
+
+test('jedes Formular prüft den Betrag auch selbst, nicht nur über step', () => {
+  // amountStep gibt bei einem Bestandswert neben dem Raster "any" zurück, damit
+  // sich der vorhandene Eintrag noch speichern lässt. Das gilt aber fürs ganze
+  // Feld: wer sich allein auf die Browser-Prüfung verlässt, macht aus 12,5 JPY
+  // anschliessend auch 12,555 JPY speicherbar - mehr Bruch als die feste
+  // Schrittweite je zuliess. Jede Seite mit einem Betragsfeld braucht deshalb
+  // eine eigene Prüfung, unabhängig davon, ob sie ein <form> ist.
+  assert.match(money, /export function amountIsSavable/);
+  for (const [file, src] of MONEY_INPUT_PAGES) {
+    const clean = withoutComments(src);
+    if (!/step="\$\{amountStep\(/.test(clean)) continue;
+    assert.match(
+      clean,
+      /amountIsSavable\(|rejectOffGridAmount\(/,
+      `${file}: währungsgerasterte Felder ohne eigene Prüfung im Speicherpfad`,
+    );
+  }
+});
+
+test('das inaktive Tarif-Feld ist von der Formularprüfung ausgenommen', () => {
+  // Ein per `hidden` verstecktes Feld nimmt weiter an der Browser-Prüfung teil.
+  // Ein liegengebliebener Tagessatz von 12,5 blockierte unter JPY damit das
+  // Speichern, ohne dass etwas zu sehen war - der Knopf tat schlicht nichts.
+  const clean = withoutComments(housekeeping);
+  const fn = clean.match(/function updateRateFields\(\)[\s\S]*?\n  \}/);
+  assert.ok(fn, 'updateRateFields nicht gefunden');
+  assert.match(fn[0], /\.disabled = /, 'das inaktive Feld muss disabled werden, nicht nur versteckt');
+  assert.match(clean, /\n  updateRateFields\(\);/, 'updateRateFields muss beim Öffnen einmal laufen');
+});
+
+test('nur der Trenner der Region wird zum Dezimalpunkt', () => {
+  // Unter en-US gruppiert das Komma Tausender. Würde es pauschal zum Punkt,
+  // machte "1,000" die Zahl 1 - ein Anteil, der um den Faktor tausend
+  // danebenliegt, ohne dass irgendwo ein Fehler erscheint.
+  const impl = withoutComments(money).match(/export function toDecimalString[\s\S]*?\n\}/)[0];
+  assert.doesNotMatch(impl, /char === ','/, "das ASCII-Komma darf nicht pauschal als Dezimaltrenner gelten");
+  assert.match(impl, /char === decimalSep/, 'der Trenner der Region fehlt');
+  // Gruppierung wird abgewiesen, nicht gedeutet: "1.000" heisst in de-DE
+  // tausend, als Dezimalzahl aber eins. Beide Lesarten sind vertretbar, und die
+  // falsche liegt bei Geld um den Faktor tausend daneben.
+  assert.match(impl, /groupSep/, 'die Gruppierung muss erkannt werden');
+  assert.match(impl, /\\\\d\{3\}/, 'erkannt wird das Muster (drei Ziffern), nicht das blosse Zeichen');
+});
+
+test('ein Abo darf null kosten', () => {
+  // Gratis-Tarife sind ein gültiger Bestand: validatePayload weist erst
+  // amount < 0 ab, das Schema prüft CHECK(amount >= 0). Eine Untergrenze aus
+  // der kleinsten Währungseinheit sperrte das Speichern eines 0-Abos.
+  const field = withoutComments(subscriptions).match(/<input[^>]*id="subscription-amount"[^>]*>/);
+  assert.ok(field, 'Abo-Betragsfeld nicht gefunden');
+  assert.match(field[0], /min="0"/, 'Abo-Preis braucht die Untergrenze null, nicht amountMin()');
+});
+
+test('gespeicherte Beträge werden beim Öffnen nicht gerundet', () => {
+  // toFixed() auf die Nachkommastellen der Währung schrieb einen Finanzwert
+  // still um: 12,50 in einem JPY-Darlehen wurde zu "13", und das nächste
+  // Speichern hätte den Betrag dauerhaft auf den gerundeten Wert gesetzt.
+  assert.doesNotMatch(
+    withoutComments(budget),
+    /\.toFixed\(currencyFractionDigits\(/,
+    'budget.js: Bestandsbetrag wird beim Rendern gerundet - amountStep fängt off-grid-Werte ab',
+  );
+});
+
+test('wählbare Währungen ziehen das Betragsfeld nach', () => {
+  // Ein Formular, in dem die Währung gewählt werden kann, muss das Betragsfeld
+  // beim Wechsel nachziehen - sonst behält es das Format der vorherigen Währung
+  // und der Platzhalter widerspricht der Auswahl direkt daneben.
+  assert.match(money, /export function applyAmountFormat/);
+  for (const [file, src] of [['budget.js', budget], ['subscriptions.js', subscriptions], ['split-expenses.js', splitExpenses]]) {
+    assert.match(
+      withoutComments(src),
+      /applyAmountFormat\(|amountPlaceholder\(/,
+      `${file}: Währungswechsel im Formular ohne Nachziehen des Betragsfeldes`,
+    );
+  }
+  // Beim Wechsel gilt das strikte Raster der neuen Währung. Der
+  // Bestandswert-Schutz von amountStep/amountMin existiert nur fürs Öffnen des
+  // Dialogs: gäbe man den aktuellen Wert auch hier weiter, liefe ein von EUR
+  // auf JPY gestelltes Feld mit step="any" weiter und speicherte Hundertstel Yen.
+  const body = withoutComments(money).match(/export function applyAmountFormat[\s\S]*?\n\}/)[0];
+  assert.doesNotMatch(body, /amountStep\([^)]*input\.value/, 'applyAmountFormat darf den Bestandswert nicht weiterreichen');
+  assert.doesNotMatch(body, /amountMin\([^)]*input\.value/, 'applyAmountFormat darf den Bestandswert nicht weiterreichen');
+});
+
+test('Geldbeträge laufen über den Modul-Formatierer, nicht über eigene', () => {
+  // Drei eigene Formatierer bedeuteten vier Vorzeichenkonventionen: dieselbe
+  // Zahl konnte in zwei Untertabs verschieden geschrieben sein. Bei Geld ist
+  // das kein Stilproblem, sondern ein Vertrauensproblem.
+  for (const [file, src] of BUDGET_PAGES) {
+    assert.doesNotMatch(
+      src,
+      /getNumberFormat\(\{[^}]*style:\s*'currency'/,
+      `${file}: Währungsformat gehört in utils/money.js, nicht in die Page`,
+    );
+  }
+  assert.match(money, /export function formatSignedAmount/);
+  assert.match(money, /export function formatMoney/);
+});
+
+test('jede Rolle des Geld-Vokabulars ist in money.js dokumentiert und behandelt', () => {
+  // Das Vokabular ist der eigentliche Baustein: wer einen neuen Betrag rendert,
+  // wählt eine Rolle statt eine fünfte Schreibweise zu erfinden.
+  const roles = money.match(/export const MONEY_ROLES = \[([^\]]*)\]/);
+  assert.ok(roles, 'MONEY_ROLES fehlt in utils/money.js');
+  for (const role of ['flow', 'total', 'balance', 'plain']) {
+    assert.ok(roles[1].includes(`'${role}'`), `Rolle '${role}' fehlt in MONEY_ROLES`);
+    assert.ok(
+      new RegExp(`\\|\\s*\`${role}\``).test(money),
+      `Rolle '${role}' ist in der Rollentabelle von money.js nicht dokumentiert`,
+    );
+  }
+  // Nur diese vier Rollen dürfen aufgerufen werden.
+  for (const [file, src] of BUDGET_PAGES) {
+    for (const call of src.matchAll(/formatSignedAmount\([^)]*role:\s*'([a-z]+)'/g)) {
+      assert.ok(roles[1].includes(`'${call[1]}'`), `${file}: unbekannte Geld-Rolle '${call[1]}'`);
+    }
+    for (const call of src.matchAll(/amountByRole\([^,]+,\s*'([a-z]+)'/g)) {
+      assert.ok(roles[1].includes(`'${call[1]}'`), `${file}: unbekannte Geld-Rolle '${call[1]}'`);
+    }
+  }
+});
+
+test('es gibt genau eine Kennzahlkarte im Modul', () => {
+  // Fünf Bauarten hießen fünfmal neu lernen, wo die Zahl steht. Wer eine neue
+  // Kennzahl zeigt, nimmt .budget-summary-card - oder dieser Guard schlägt an.
+  for (const [file, css] of BUDGET_STYLESHEETS) {
+    for (const match of css.matchAll(/^\.([a-z-]*summary-card[a-z_-]*)/gm)) {
+      assert.ok(
+        match[1].startsWith('budget-summary-card'),
+        `${file}: .${match[1]} ist eine zweite Kennzahlkarte - .budget-summary-card ist der Baustein`,
+      );
+    }
+  }
+  for (const [file, src] of BUDGET_PAGES) {
+    for (const match of src.matchAll(/class="([^"]*summary-card[^"]*)"/g)) {
+      assert.ok(
+        /budget-summary-card/.test(match[1]),
+        `${file}: Kennzahlkarte "${match[1]}" nutzt nicht .budget-summary-card`,
+      );
+    }
+  }
+});
+
+test('Arbeitsflächen des Moduls sind opak, Glass bleibt den Overlays', () => {
+  // budget.css begründet die Regel an .budget-summary-card. Sie galt nur dort,
+  // während subscriptions.css und split-expenses.css im selben Modul Glass auf
+  // Karten, Panels und sogar auf einem Eingabefeld setzten.
+  // Overlay-Rollen tragen ihr Rollenwort im Selektor; alles andere ist
+  // Arbeitsfläche. Neue Arbeitsflächen fallen damit automatisch durch.
+  const OVERLAY_ROLES = /modal|dialog|popover|overlay|picker-panel|form__section|tooltip|menu/;
+  for (const [file, css] of BUDGET_STYLESHEETS) {
+    // Regelblöcke grob zerlegen: Selektorliste bis '{', Body bis '}'.
+    for (const rule of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+      const selector = rule[1].split('*/').pop().trim();
+      if (!/--glass-bg-card|--glass-shadow/.test(rule[2])) continue;
+      assert.match(
+        selector,
+        OVERLAY_ROLES,
+        `${file}: "${selector}" ist eine Arbeitsfläche und darf kein Glass tragen`,
+      );
+    }
+  }
+});
+
+test('kein Kontrast im Modul hängt an der Datenlage', () => {
+  // Das Abo-Monogramm zog Schrift UND Fläche aus derselben Markenfarbe. Damit
+  // war das Kontrastverhältnis reine Datenlage: gemessen 10 AA-Verstöße über 7
+  // Marken im Seed, bis hinunter auf 1.83:1, und kein Nutzer konnte das umgehen.
+  // Dieselbe Mechanik saß unbemerkt in der Konto-Kachel (--account-accent).
+  //
+  // REGEL: Datenfarben (die per style="--x:…" aus dem JS kommen, im Gegensatz zu
+  // den Tokens aus tokens.css) dürfen in einer Fläche nicht gleichzeitig
+  // Vordergrund und Hintergrund stellen. Eine von beiden Seiten muss aus einem
+  // Token kommen, sonst ist das Verhältnis nicht garantierbar.
+  const DATA_COLORS = new Set(
+    BUDGET_PAGES.flatMap(([, src]) =>
+      [...src.matchAll(/style="[^"]*?(--[a-z][a-z0-9-]*)\s*:/g)].map((m) => m[1])),
+  );
+  assert.ok(DATA_COLORS.size > 0, 'keine Datenfarben gefunden - der Guard misst nichts');
+
+  const varsIn = (decls) => [...decls.matchAll(/var\(\s*(--[a-z0-9-]+)/gi)].map((m) => m[1]);
+  for (const [file, css] of BUDGET_STYLESHEETS) {
+    for (const rule of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+      const body = rule[2];
+      const fg = [...body.matchAll(/(?:^|;)\s*color\s*:([^;]*)/g)].map((m) => m[1]).join(' ');
+      const bg = [...body.matchAll(/(?:^|;)\s*background(?:-color)?\s*:([^;]*)/g)].map((m) => m[1]).join(' ');
+      if (!fg.trim() || !bg.trim()) continue;
+      const shared = varsIn(fg).filter((v) => DATA_COLORS.has(v) && varsIn(bg).includes(v));
+      assert.equal(
+        shared.length, 0,
+        `${file}: "${rule[1].split('*/').pop().trim()}" zieht ${shared.join(', ')} `
+        + 'für Schrift UND Fläche - der Kontrast hängt damit an den Nutzerdaten',
+      );
+    }
+  }
+});
+
+test('eingebettete Untertabs bringen kein eigenes Seiten-Chrome mit', () => {
+  // Ein eigener Seiten-Gradient im Sub-Page-Wrapper lief als getönte
+  // Vollbreiten-Bahn innerhalb der Budget-Seite und brach an deren Container-
+  // Kante ab. Fläche und Rand gehören dem Panel.
+  for (const [file, css, selector] of [
+    ['subscriptions.css', subscriptionsCss, '.budget-page .subscriptions-page'],
+    ['split-expenses.css', splitCss, '.budget-page .split-page'],
+  ]) {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const rule = css.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`));
+    assert.ok(rule, `${file}: ${selector}-Override fehlt`);
+    assert.match(rule[1], /background:\s*none/, `${file}: ${selector} muss den eigenen Gradient ablegen`);
+    assert.match(rule[1], /padding-block:\s*0/, `${file}: ${selector} muss den eigenen Rand ablegen`);
+  }
+});
+
+test('Panel-Fläche und Kopfleiste sind geteilt, nicht pro Tab gebaut', () => {
+  // Drei Padding-Werte und drei Scroll-Achsen über sieben Tabs waren drei
+  // Gelegenheiten, die Fläche unterschiedlich zu bauen.
+  const panel = budgetCss.match(/\n\.budget-tab-panel\s*\{([^}]*)\}/);
+  assert.ok(panel, '.budget-tab-panel fehlt in budget.css');
+  assert.match(panel[1], /overflow-y:\s*auto/);
+  assert.match(panel[1], /padding-block-start:\s*var\(--space/);
+
+  assert.ok(/\n\.budget-panel-head\s*\{/.test(budgetCss), '.budget-panel-head fehlt in budget.css');
+  assert.ok(/\n\.budget-panel-head__title\s*\{/.test(budgetCss), '.budget-panel-head__title fehlt');
+
+  // Kein Tab setzt Scroll-Achse oder Panel-Padding noch selbst. Ausnahmen sind
+  // benannte Modifier (--budget hält seine eigene innere Scroll-Region).
+  const ALLOWED_PANEL_OVERRIDES = /budget-tab-panel--budget/;
+  for (const rule of budgetCss.matchAll(/(\.budget-tab-panel--[a-z-]+)(?:[^{}]*)\{([^}]*)\}/g)) {
+    if (!/overflow-y|padding-block-start|padding-top/.test(rule[2])) continue;
+    assert.match(
+      rule[1],
+      ALLOWED_PANEL_OVERRIDES,
+      `${rule[1]} setzt Scroll-Achse oder Padding selbst - beides gehört .budget-tab-panel`,
+    );
+  }
+});
+
 test('Trendpfeile sind Icons, keine Textglyphen', () => {
   assert.doesNotMatch(budget, /'▲'/);
   assert.doesNotMatch(budget, /'▼'/);
@@ -300,9 +819,16 @@ test('der „Nur Ausgaben"-Zustand ist client-persistent und geräte-lokal', () 
 });
 
 test('die Ausgaben-Karte trägt im „Nur Ausgaben"-Modus die volle Breite', () => {
+  // Die Spaltenzahl der geteilten Kennzahl-Zeile kommt seit der Baustein-
+  // Extraktion aus --summary-cards; geprüft wird die Invariante (eine Spalte),
+  // nicht mehr die grid-template-columns-Schreibweise.
   const rule = budgetCss.match(/\.budget-summary--expenses-only[^\n]*\{[^}]*\}/);
   assert.ok(rule, '.budget-summary--expenses-only fehlt in budget.css');
-  assert.match(rule[0], /grid-template-columns:\s*1fr/);
+  assert.match(rule[0], /--summary-cards:\s*1/);
+
+  const base = budgetCss.match(/\n\.budget-summary\s*\{[^}]*\}/);
+  assert.ok(base, '.budget-summary fehlt in budget.css');
+  assert.match(base[0], /grid-template-columns:\s*repeat\(var\(--summary-cards[^)]*\)/);
 });
 
 test('der „Nur Ausgaben"-Umschalter nutzt Tokens, keine Farbliterale', () => {
@@ -401,4 +927,72 @@ test('die Platzhalter der neuen Sätze bleiben in jeder Locale erhalten', () => 
       }
     }
   }
+});
+
+// --------------------------------------------------------
+// Wiederholung: Einheit + Anzahl (#636)
+// --------------------------------------------------------
+
+test('das Intervall-Feld bietet Einheit und Anzahl, ohne half_year', () => {
+  const start = budget.indexOf('id="bm-recurrence-options"');
+  const modal = budget.slice(start, budget.indexOf('renderDocumentAttachField', start));
+  for (const key of ['budget.intervalWeekly', 'budget.intervalMonthly', 'budget.intervalYearly']) {
+    assert.ok(modal.includes(key), `${key} fehlt im Intervall-Feld`);
+  }
+  assert.ok(!budget.includes('intervalHalfYear'), 'half_year ist als Rhythmus abgelöst (monatlich x 6)');
+  assert.ok(!budget.includes("'half_year'"), 'kein half_year-Literal mehr im Frontend');
+  assert.match(modal, /id="bm-interval-count"[\s\S]*?min="1"[\s\S]*?max="99"/, 'Anzahl-Feld mit Grenzen 1..99');
+  assert.ok(modal.includes('id="bm-interval-unit"'), 'Einheitenwort neben der Zahl');
+});
+
+test('das Einheitenwort kommt aus der geteilten Quelle, nicht aus einer zweiten Zuordnung', () => {
+  // Die Zuordnung Einheit -> Wort lebt in rrule-ui.js. Eine eigene Liste im
+  // Budget-Modal wäre beim nächsten Sprachwechsel die Stelle, die zurückbleibt.
+  assert.match(budget, /import \{ intervalUnitLabel \} from '\/rrule-ui\.js'/);
+  assert.ok(budget.includes('intervalUnitLabel('), 'Label über die geteilte Funktion');
+  for (const key of ['rrule.unitWeek', 'rrule.unitMonths', 'rrule.unitYears']) {
+    assert.ok(!budget.includes(key), `${key} gehört nicht ins Budget-Modal`);
+  }
+});
+
+test('die Anzahl reist mit dem Eintrag zum Server', () => {
+  assert.ok(budget.includes('recurrence_interval_count: intervalN'), 'Anzahl fehlt im Request-Body');
+  assert.match(budget, /Math\.min\(99, Math\.max\(1,[^)]*bm-interval-count/, 'Anzahl wird vor dem Senden geklemmt');
+});
+
+// --------------------------------------------------------
+// Bestätigung vor der Buchung (#637)
+// --------------------------------------------------------
+
+test('eine erwartete Buchung ist in der Liste als solche erkennbar und buchbar', () => {
+  assert.ok(budget.includes('budget-badge--pending'), 'Marke an der Zeile fehlt');
+  assert.ok(budget.includes('budget.pendingBadge'), 'Beschriftung der Marke fehlt');
+  assert.match(budget, /data-action="confirm"/, 'Buchen-Aktion fehlt an der Zeile');
+  assert.ok(budget.includes('budget-entry--pending'), 'Zeile trägt keinen eigenen Zustand');
+  assert.ok(budgetCss.includes('.budget-badge--pending'), 'Marke ohne Stil');
+  assert.ok(budgetCss.includes('.budget-entry--pending'), 'Zeilenzustand ohne Stil');
+});
+
+test('der Bestätigen-Dialog lässt Betrag und Datum korrigieren', () => {
+  const modal = budget.slice(budget.indexOf('async function openConfirmBookingModal'));
+  assert.ok(modal.includes('cb-amount'), 'Betragsfeld fehlt');
+  assert.ok(modal.includes('cb-date'), 'Datumsfeld fehlt');
+  assert.ok(modal.includes('yuvomi-datepicker'), 'Datum über die geteilte Komponente');
+  assert.match(modal, /api\.patch\(`\/budget\/\$\{id\}\/confirm`/, 'ruft die Bestätigungs-Route nicht auf');
+  assert.ok(modal.includes('rejectOffGridAmount'), 'Betrag ohne Währungsraster-Prüfung');
+});
+
+test('was noch aussteht, steht unter den Summenkarten', () => {
+  // Sonst verschwände das Geld: die Buchung ist in der Liste, aber in keiner
+  // Karte, und niemand könnte sagen, um wie viel die Übersicht danebenliegt.
+  assert.ok(budget.includes('budget.pendingSummary'), 'Hinweiszeile fehlt');
+  assert.ok(budget.includes('budget-pending-note'), 'Hinweiszeile ohne eigene Klasse');
+  assert.ok(budgetCss.includes('.budget-pending-note'), 'Hinweiszeile ohne Stil');
+});
+
+test('die Bestätigungspflicht ist eine Eigenschaft der Serie', () => {
+  const modal = budget.slice(budget.indexOf('id="bm-recurrence-options"'), budget.indexOf('renderDocumentAttachField', budget.indexOf('id="bm-recurrence-options"')));
+  assert.ok(modal.includes('bm-confirm-first'), 'Schalter fehlt im Wiederholungs-Block');
+  assert.ok(modal.includes('budget.confirmFirstLabel'), 'Beschriftung fehlt');
+  assert.ok(budget.includes('recurrence_confirm: confirmFirst'), 'Feld reist nicht zum Server');
 });

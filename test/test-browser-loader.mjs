@@ -24,6 +24,15 @@ const STUBS = {
       logout: async () => ({ ok: true }),
       updateProfile: async () => ({ user: null }),
     };
+    export const mealie = {
+      listAccounts: async () => ({ data: [] }),
+      createAccount: async () => ({ data: null }),
+      updateAccount: async () => ({ data: null }),
+      deleteAccount: async () => ({ data: null }),
+      testAccount: async () => ({ data: null }),
+      syncAccount: async () => ({ data: null }),
+      getStatus: async () => ({ data: [] }),
+    };
   `,
   '/i18n.js': `
     export const t = (key, values = {}) => {
@@ -53,6 +62,8 @@ const STUBS = {
     export const renderRRuleFields = () => '';
     export const bindRRuleEvents = () => {};
     export const getRRuleValues = () => ({});
+    export const describeRRule = () => '';
+    export const recurrenceRow = () => ({ icon: 'repeat', label: '', value: '' });
   `,
   '/components/modal.js': `
     export const openModal = () => {};
@@ -62,6 +73,17 @@ const STUBS = {
     export const advancedSection = (inner = '') => String(inner);
     export const wireBlurValidation = () => {};
     export const reportFieldError = () => false;
+    export const mountFooter = () => null;
+    export const refreshDirtySnapshot = () => {};
+    export const focusFirstField = () => null;
+    export const updateHeaderAction = () => null;
+  `,
+  '/components/detail-view.js': `
+    export const openDetailView = () => ({ update: () => true, isOpen: () => true });
+    export const closeDetailView = () => {};
+    export const detailRowEl = () => null;
+    export const visibilityRow = () => ({ icon: 'users', label: '', value: '' });
+    export const assignedRow = () => ({ icon: 'user', label: '', value: '' });
   `,
   '/utils/ux.js': `
     export const stagger = () => {};

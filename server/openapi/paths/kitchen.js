@@ -4,7 +4,7 @@ export function kitchenPaths() {
   return {
     '/api/v1/kitchen/summary': {
       get: op({
-        summary: 'Kitchen cycle state for the shared tab bar (meal gaps, open shopping items, pantry attention)',
+        summary: 'Kitchen cycle state for the shared tab bar (open shopping items, pantry attention)',
         tag: 'Kitchen',
       }),
     },

@@ -115,6 +115,94 @@ export function authPaths() {
         },
       }),
     },
+    '/api/v1/auth/invites': {
+      get: op({
+        summary: 'List pending invitations',
+        tag: 'Auth',
+        admin: true,
+        description: 'Returns invitations that are still open: neither accepted, nor revoked, nor expired. Token hashes are never included.',
+        responses: {
+          200: {
+            description: 'Pending invitations',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/InvitesResponse' } } },
+          },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          500: { $ref: '#/components/responses/InternalServerError' },
+        },
+      }),
+      post: op({
+        summary: 'Create an invitation',
+        tag: 'Auth',
+        admin: true,
+        stateChanging: true,
+        description: 'Creates an invite link so a new member can set their own password. Role and family role are fixed here and are taken from the invitation when it is accepted.',
+        requestBody: jsonBody('#/components/schemas/InviteCreateRequest'),
+        responses: {
+          201: {
+            description: 'Invitation created. The plaintext token is returned only once.',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/InviteCreateResponse' } } },
+          },
+          400: { $ref: '#/components/responses/BadRequest' },
+          403: { $ref: '#/components/responses/Forbidden' },
+          409: { description: 'Username already taken' },
+          500: { $ref: '#/components/responses/InternalServerError' },
+        },
+      }),
+    },
+    '/api/v1/auth/invites/{id}': {
+      delete: op({
+        summary: 'Revoke an invitation',
+        tag: 'Auth',
+        admin: true,
+        stateChanging: true,
+        description: 'Revokes a pending invitation. The row is kept as a record of who invited whom; only invitations that are still open can be revoked.',
+        params: [idParam('id', 'Invite ID')],
+        responses: {
+          200: { description: 'Invitation revoked.' },
+          400: { $ref: '#/components/responses/BadRequest' },
+          403: { $ref: '#/components/responses/Forbidden' },
+          404: { description: 'No pending invitation with this ID' },
+          500: { $ref: '#/components/responses/InternalServerError' },
+        },
+      }),
+    },
+    '/api/v1/auth/invites/preview': {
+      get: op({
+        summary: 'Preview an invitation',
+        tag: 'Auth',
+        auth: false,
+        description: 'Public bootstrap endpoint for the /join page. Rate-limited. Unknown, expired, accepted, and revoked tokens all return valid: false rather than an error, so the endpoint reveals nothing beyond whether the token can still be used.',
+        params: [{
+          name: 'token',
+          in: 'query',
+          required: true,
+          description: 'Plaintext invite token from the invitation link.',
+          schema: { type: 'string' },
+        }],
+        responses: {
+          200: {
+            description: 'Invitation state plus the names it pre-assigns.',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/InvitePreviewResponse' } } },
+          },
+          500: { $ref: '#/components/responses/InternalServerError' },
+        },
+      }),
+    },
+    '/api/v1/auth/invites/accept': {
+      post: op({
+        summary: 'Accept an invitation and create the account',
+        tag: 'Auth',
+        auth: false,
+        description: 'Public endpoint, rate-limited, no CSRF: the token is the secret. Role and family role come from the invitation and cannot be raised through the request body. No session is established; the client redirects to the login page.',
+        requestBody: jsonBody('#/components/schemas/InviteAcceptRequest'),
+        responses: {
+          201: { description: 'Account created.' },
+          400: { $ref: '#/components/responses/BadRequest' },
+          409: { description: 'Username already taken' },
+          500: { $ref: '#/components/responses/InternalServerError' },
+        },
+      }),
+    },
     '/api/v1/auth/me': {
       get: op({
         summary: 'Get current authenticated user',

@@ -448,10 +448,316 @@ test('PRESERVED_KEYS deckt beide Startschlüssel ab', () => {
 });
 
 test('install.sh sichert bestehende .env vor cat > .env', () => {
-  const src = readFileSync(new URL('../install.sh', import.meta.url), 'utf8');
+  // Die Reihenfolge gilt für den CODE, nicht für den Dateitext: ein Kommentar,
+  // der `cat > .env` bloss erwähnt, hat diesen Test schon einmal rot gefärbt,
+  // während der Ablauf völlig korrekt war. Kommentare fliegen deshalb raus,
+  // bevor gemessen wird.
+  const src = readFileSync(new URL('../install.sh', import.meta.url), 'utf8')
+    .split('\n')
+    .map(line => (/^\s*#/.test(line) ? '' : line))
+    .join('\n');
   const backupIdx = src.indexOf('.env.bak-');
   const catIdx = src.indexOf('cat > .env');
   assert.ok(backupIdx !== -1, 'install.sh legt kein .env.bak-* an');
   assert.ok(catIdx !== -1, 'install.sh hat keinen cat > .env Block');
   assert.ok(backupIdx < catIdx, 'Backup muss vor dem Überschreiben (cat > .env) stehen');
+});
+
+// ── Regel-Guard: MANAGED_KEYS ⇄ der ENVEOF-Block ─────────────────────────────
+//
+// install.sh schrieb die .env mit `cat >` neu und warf dabei alles weg, was der
+// Dialog nicht selbst kennt: SMTP, OIDC, WebDAV-Backups, VAPID - 31 der 55
+// Schema-Schlüssel. Wer sie von Hand ergänzt oder den Web-Installer benutzt
+// hatte, verlor sie beim nächsten Lauf lautlos, und ein Rerun ist der Normalfall
+// (Update, geänderter Port, nachgetragenes SMTP), nicht die Ausnahme.
+//
+// preserve_unmanaged() übernimmt jetzt alles, was NICHT in MANAGED_KEYS steht.
+// Damit hängt die Korrektheit an genau einer Invariante, und sie geht in beide
+// Richtungen schief:
+//
+//   Schlüssel geschrieben, aber nicht in MANAGED_KEYS  → steht danach doppelt
+//   Schlüssel in MANAGED_KEYS, aber nicht geschrieben  → wird beim Rerun gelöscht
+//
+// Der zweite Fall ist der gefährliche: er sieht aus wie Aufräumen und ist
+// Datenverlust. Beide Richtungen werden hier geprüft.
+
+function installShSource() {
+  return readFileSync(new URL('../install.sh', import.meta.url), 'utf8');
+}
+
+function managedKeys() {
+  const block = installShSource().match(/^MANAGED_KEYS=\(([\s\S]*?)^\)$/m);
+  assert.ok(block, 'MANAGED_KEYS-Array in install.sh nicht gefunden');
+  return new Set(
+    block[1]
+      .split('\n')
+      .map(line => line.replace(/#.*$/, ''))
+      .join(' ')
+      .split(/\s+/)
+      .filter(Boolean),
+  );
+}
+
+function envHeredocKeys() {
+  const block = installShSource().match(/cat > \.env << ENVEOF\n([\s\S]*?)\nENVEOF/);
+  assert.ok(block, 'ENVEOF-Block in install.sh nicht gefunden');
+  return new Set([...block[1].matchAll(/^([A-Z][A-Z0-9_]*)=/gm)].map(m => m[1]));
+}
+
+test('jeder von install.sh geschriebene Schlüssel steht in MANAGED_KEYS', () => {
+  const managed = managedKeys();
+  const written = [...envHeredocKeys()].filter(key => !managed.has(key));
+  assert.deepEqual(written, [],
+    `install.sh schreibt diese Schlüssel und übernimmt sie zusätzlich aus der alten .env `
+    + `(doppelte Zeilen): ${written.join(', ')}`);
+});
+
+test('jeder MANAGED_KEY wird von install.sh auch wirklich geschrieben', () => {
+  const written = envHeredocKeys();
+  const dropped = [...managedKeys()].filter(key => !written.has(key));
+  assert.deepEqual(dropped, [],
+    `Diese Schlüssel stehen in MANAGED_KEYS, werden aber nicht geschrieben - `
+    + `preserve_unmanaged() unterdrückt sie und der Rerun LÖSCHT sie: ${dropped.join(', ')}`);
+});
+
+test('preserve_unmanaged rettet fremde Schlüssel und lässt eigene in Ruhe', () => {
+  const src = installShSource();
+  assert.match(src, /preserve_unmanaged\(\)/, 'preserve_unmanaged() fehlt');
+  // Aus dem Backup lesen, nicht aus .env: die ist zu diesem Zeitpunkt schon neu
+  // geschrieben, und die Funktion würde ihre eigene Ausgabe wiederkäuen.
+  assert.match(src, /preserved=\$\(preserve_unmanaged "\$backup"\)/,
+    'preserve_unmanaged muss aus dem Backup lesen, nicht aus der frischen .env');
+  assert.match(src, /printf '%s\\n' "\$preserved" \| grep -c \./,
+    'die Anzahl übernommener Zeilen wird gemeldet');
+});
+
+test('install.sh schreibt BASE_URL und fragt die Origin ab', () => {
+  // Ohne BASE_URL versendet der Server keine Passwort-Reset-Links (der
+  // Request-Host-Header wird bewusst nicht vertraut). Zusammensetzen aus Host
+  // und Port reicht nicht: hinter einem Reverse-Proxy ist die Origin eine
+  // andere als die, auf die der Container hört.
+  const src = installShSource();
+  assert.match(src, /^BASE_URL=\$\{YUVOMI_BASE_URL\}$/m, 'install.sh schreibt BASE_URL nicht');
+  assert.match(src, /t basic\.base_url/, 'install.sh fragt die Basis-URL nicht ab');
+  assert.match(src, /YUVOMI_BASE_URL="\$\{YUVOMI_BASE_URL:-\$default_base\}"/,
+    'die Basis-URL braucht einen abgeleiteten Default');
+});
+
+test('der Wetter-Dialog nutzt Open-Meteo und fragt keinen API-Schlüssel mehr ab', () => {
+  // Open-Meteo ist seit 2026-06-07 der Default: kostenlos, ohne Konto, ohne
+  // Schlüssel. Der CLI-Dialog schickte trotzdem jeden zu einer Registrierung
+  // bei OpenWeatherMap, die er nicht braucht.
+  const src = installShSource();
+  for (const key of ['WEATHER_LAT', 'WEATHER_LON', 'WEATHER_CITY', 'WEATHER_UNITS']) {
+    assert.match(src, new RegExp(`^${key}=`, 'm'), `install.sh schreibt ${key} nicht`);
+  }
+  assert.doesNotMatch(src, /t weather\.apikey/,
+    'der Wetter-Dialog fragt weiterhin nach einem OpenWeather-API-Schlüssel');
+  assert.doesNotMatch(src, /^OPENWEATHER_/m,
+    'OPENWEATHER_* gehört nicht mehr in den geschriebenen Block (Legacy läuft über preserve_unmanaged)');
+  // Die Bereichsprüfung ist der Grund, warum der Dialog überhaupt Koordinaten
+  // annehmen darf: bash kann kein Fliesskomma, also muss awk ran.
+  assert.match(src, /valid_number "\$WEATHER_LAT" -90 90/, 'Breitengrad wird nicht validiert');
+  assert.match(src, /valid_number "\$WEATHER_LON" -180 180/, 'Längengrad wird nicht validiert');
+});
+
+test('install.sh leitet Reverse-Proxy-Betrieb aus dem Schema der Basis-URL ab', () => {
+  // Beide Server-Defaults sind für die jeweils andere Betriebsart falsch:
+  // SESSION_SECURE ist aus (kein HSTS, kein Secure-Cookie hinter HTTPS), und
+  // TRUST_PROXY steht auf 1, vertraut also X-Forwarded-For auch dann, wenn gar
+  // kein Proxy davor sitzt - dann kann sich jeder Client eine beliebige IP
+  // geben und das Anmelde-Rate-Limit umgehen, weil es pro IP zählt.
+  const src = installShSource();
+
+  assert.match(src, /^SESSION_SECURE=\$\{YUVOMI_SESSION_SECURE\}$/m, 'SESSION_SECURE wird nicht geschrieben');
+  assert.match(src, /^TRUST_PROXY=\$\{YUVOMI_TRUST_PROXY\}$/m, 'TRUST_PROXY wird nicht geschrieben');
+
+  const fn = src.match(/configure_proxy\(\) \{([\s\S]*?)\n\}/);
+  assert.ok(fn, 'configure_proxy() fehlt');
+
+  // Ein bestehender Wert gewinnt, sonst wäre ein von Hand gesetztes
+  // TRUST_PROXY=2 (zwei Hops) beim nächsten Lauf auf 1 zurückgesetzt.
+  assert.match(fn[1], /read_existing_env_value SESSION_SECURE/, 'bestehendes SESSION_SECURE wird ignoriert');
+  assert.match(fn[1], /read_existing_env_value TRUST_PROXY/, 'bestehendes TRUST_PROXY wird ignoriert');
+
+  // https → Proxy-Betrieb, alles andere → Direktzugriff.
+  const secure = fn[1].match(/YUVOMI_SESSION_SECURE[\s\S]*?esac/);
+  assert.ok(secure && /https:\/\/\*\)\s*YUVOMI_SESSION_SECURE='true'/.test(secure[0]),
+    'https muss SESSION_SECURE=true ergeben');
+  assert.match(fn[1], /https:\/\/\*\)\s*YUVOMI_TRUST_PROXY='1'/, 'https muss TRUST_PROXY=1 ergeben');
+  assert.match(fn[1], /\*\)\s*YUVOMI_TRUST_PROXY='loopback'/,
+    'ohne https muss TRUST_PROXY=loopback sein, sonst ist X-Forwarded-For fälschbar');
+});
+
+test('POST /api/save-env verliert bei einem Rerun keinen bestehenden Wert', async () => {
+  // PRESERVED_KEYS war eine Allowlist aus zwei Schlüsseln und deckte damit zwei
+  // Schlüssel ab statt der Regel. Die Datei wird komplett neu geschrieben,
+  // sanitizeEnv verwirft leere Werte, und der Wizard startet jedes Feld leer -
+  // er lädt bestehende Werte nie nach. Ein Rerun löschte deshalb alles ausser
+  // den beiden Secrets: gemessen 7 von 10 Schlüsseln, darunter DATA_DIR mit dem
+  // Datenbankpfad. Die Installation lief danach auf dem Standardpfad weiter und
+  // sah aus, als wären die Daten weg.
+  const dir = mkdtempSync(join(tmpdir(), 'oikos-rerun-'));
+  try {
+    const before = {
+      SESSION_SECRET: 'alt-session',
+      DB_ENCRYPTION_KEY: 'alt-db',
+      DATA_DIR: '/mnt/tank/yuvomi',
+      EMAIL_SMTP_HOST: 'smtp.example.test',
+      EMAIL_SMTP_PASS: 'geheim',
+      OIDC_ISSUER: 'https://auth.example.test',
+      WEBDAV_BACKUP_URL: 'https://cloud.example.test/dav',
+      VAPID_SUBJECT: 'mailto:admin@example.test',
+      BASE_URL: 'https://planer.example.test',
+      // Ausserhalb des ENV_SCHEMA: der Installer darf auch die Zeilen nicht
+      // verlieren, die er gar nicht kennt.
+      LOG_LEVEL: 'debug',
+    };
+    writeFileSync(
+      join(dir, '.env'),
+      Object.entries(before).map(([k, v]) => `${k}=${v}`).join('\n') + '\n',
+    );
+
+    await withServer(dir, async base => {
+      // Der Rerun, wie der Wizard ihn schickt: ein bewusst geänderter Wert,
+      // alle übrigen Felder leer, weil sie leer starten.
+      const r = await fetch(`${base}/api/save-env`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          env: {
+            TZ: 'Europe/Vienna',
+            DATA_DIR: '', EMAIL_SMTP_HOST: '', EMAIL_SMTP_PASS: '',
+            OIDC_ISSUER: '', WEBDAV_BACKUP_URL: '', VAPID_SUBJECT: '', BASE_URL: '',
+          },
+        }),
+      });
+      assert.equal(r.status, 200);
+    });
+
+    const after = readEnvFile(join(dir, '.env'));
+    for (const [key, value] of Object.entries(before)) {
+      assert.equal(after[key], value, `${key} hat den Rerun nicht überlebt`);
+    }
+    // Ein tatsächlich gesendeter Wert muss weiterhin gewinnen, sonst wäre der
+    // Installer wirkungslos geworden.
+    assert.equal(after.TZ, 'Europe/Vienna', 'ein gesendeter Wert muss den alten überschreiben');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('install.sh baut OAuth-Callbacks und die Schluss-Adresse aus der Basis-URL', () => {
+  // Der Dialog fragt seit dem BASE_URL-Schritt die oeffentliche Origin ab, die
+  // Callbacks wurden aber weiter aus Host und Port zusammengesetzt. Hinter
+  // einem Proxy bekam Google damit eine Redirect-URI mit falschem Schema und
+  // dem internen Port - der OAuth-Flow konnte gar nicht abschliessen, und
+  // genau fuer diesen Fall ist die Frage da. Dasselbe galt fuer die
+  // "Oeffnen"-Adresse am Ende: sie zeigte auf einen Host, den der Nutzer von
+  // aussen nicht erreicht.
+  const src = installShSource();
+
+  for (const path of [
+    '/api/v1/calendar/google/callback',
+    '/api/v1/documents/storage/google-drive/callback',
+  ]) {
+    const uses = [...src.matchAll(new RegExp(`([^"\\s]*)${path.replaceAll('/', '\\/')}`, 'g'))];
+    assert.ok(uses.length > 0, `keine Verwendung von ${path} gefunden`);
+    for (const [, prefix] of uses) {
+      assert.match(prefix, /\$\{YUVOMI_BASE_URL\}$/,
+        `${path} wird aus "${prefix}" gebaut statt aus YUVOMI_BASE_URL`);
+    }
+  }
+
+  assert.match(src, /local url="\$\{YUVOMI_BASE_URL:-/,
+    'die Schluss-Adresse muss die Basis-URL nutzen');
+  // Der Setup-Aufruf selbst geht weiterhin an den lokalen Port: der Installer
+  // spricht den Container direkt an, nicht ueber den Proxy.
+  assert.match(src, /-X POST "http:\/\/localhost:\$\{YUVOMI_PORT\}\/api\/v1\/auth\/setup"/,
+    'der Setup-Aufruf muss lokal bleiben');
+});
+
+test('der Download liefert die geschriebene .env, nicht eine Nachbildung im Browser', async () => {
+  // Die Abschlussseite baute ihre Kopie aus dem Browser-Zustand. Seit der Server
+  // beim Rerun bewahrt, was der Client nicht schickt, ist das die falsche
+  // Quelle: der Download enthielt weder die übernommenen Schlüssel noch die
+  // beiden Secrets, die der Wizard bewusst nie zu sehen bekommt. Wer die Datei
+  // als Sicherung beiseitelegte und später zurückspielte, warf genau das weg,
+  // was der Rerun gerettet hatte - und die Sicherung der einzigen
+  // Verschlüsselungsschlüssel war gar keine.
+  const dir = mkdtempSync(join(tmpdir(), 'oikos-dl-'));
+  try {
+    const contents = 'SESSION_SECRET=geheim-x\nDB_ENCRYPTION_KEY=geheim-y\nDATA_DIR=/mnt/tank\n';
+    writeFileSync(join(dir, '.env'), contents);
+    await withServer(dir, async base => {
+      const r = await fetch(`${base}/api/env-file`);
+      assert.equal(r.status, 200);
+      assert.match(r.headers.get('content-disposition'), /attachment; filename="\.env"/);
+      assert.equal(await r.text(), contents, 'der Download muss die Datei sein, Byte für Byte');
+
+      // Dieselbe Loopback-Schranke wie jede andere API-Route: die Datei enthält
+      // die Verschlüsselungsschlüssel.
+      const cross = await fetch(`${base}/api/env-file`, { headers: { Origin: 'https://evil.test' } });
+      assert.equal(cross.status, 403, 'Cross-Origin muss abgelehnt werden');
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('die Abschlussseite baut die .env nicht mehr im Browser nach', () => {
+  const html = readFileSync(new URL('../tools/installer/install.html', import.meta.url), 'utf8');
+  assert.match(html, /a\.href = '\/api\/env-file';/,
+    'der Download muss die Datei vom Server holen');
+  // Die Nachbildung konnte prinzipiell nicht stimmen und ist entfallen; kehrt
+  // sie zurück, kehrt der Bug mit ihr zurück.
+  assert.doesNotMatch(html, /function renderEnvClient/,
+    'renderEnvClient ist ersatzlos entfallen - der Browser kennt die bewahrten Werte nicht');
+});
+
+test('ein Rerun schreibt gueltige Compose-Syntax unveraendert zurueck', async () => {
+  // readEnvFile/decodeEnvValue kennen nur doppelte Anfuehrungszeichen. Werden
+  // ALLE Zeilen darueber geparst und neu gerendert, wird aus `PASS='a b'` der
+  // Wert mit Quotes und aus `DIR=./data # x` der Wert mit Kommentar - der Rerun
+  // aendert still das Passwort oder mountet ein anderes Verzeichnis. Zeilen,
+  // die niemand anfasst, gehoeren deshalb Zeichen fuer Zeichen zurueck.
+  const dir = mkdtempSync(join(tmpdir(), 'oikos-verbatim-'));
+  try {
+    const tricky = [
+      'SESSION_SECRET=alt-session',
+      "EMAIL_SMTP_PASS='a b'",
+      'DATA_DIR=./data # storage',
+      'OIDC_ISSUER=https://auth.example.test',
+    ];
+    writeFileSync(join(dir, '.env'), `${tricky.join('\n')}\n`);
+    await withServer(dir, async base => {
+      const r = await fetch(`${base}/api/save-env`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ env: { TZ: 'Europe/Berlin' } }),
+      });
+      assert.equal(r.status, 200);
+    });
+    const after = readFileSync(join(dir, '.env'), 'utf8');
+    for (const line of tricky.slice(1)) {
+      assert.ok(after.includes(line), `Zeile wurde neu interpretiert statt uebernommen: ${line}`);
+    }
+    assert.match(after, /^TZ=Europe\/Berlin$/m, 'ein gesendeter Wert muss weiterhin geschrieben werden');
+    assert.ok(after.includes('SESSION_SECRET=alt-session'), 'das bestehende Secret muss bleiben');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('der Installer bleibt nach dem Setup erreichbar, solange der Download aussteht', () => {
+  // Vorher: harte zwei Sekunden nach /api/create-admin. Solange der Download
+  // eine Blob-Kopie im Browser war, ging das - er brauchte den Server nicht.
+  // Seit er die echte Datei holt, war der Knopf fuer jeden tot, der laenger
+  // brauchte, und die Seite meldete trotzdem "gesichert".
+  const src = readFileSync(new URL('../tools/installer/install-server.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(src, /server\.close\(\(\) => process\.exit\(0\)\);\s*\}, 2000\)/,
+    'der harte Zwei-Sekunden-Shutdown darf nicht zurueckkehren');
+  assert.match(src, /beginPostSetupShutdown\(\);\s*\n\s*resetIdle\(server\);/,
+    'nach dem Setup muss der verlaengerbare Nachlauf greifen');
+  // Jeder Request setzt ihn zurueck - sonst waere die Frist wieder starr.
+  assert.match(src, /idleTimer = setTimeout\([\s\S]*?\}, idleMs\);/,
+    'der Idle-Timer muss die veraenderliche Frist benutzen');
 });

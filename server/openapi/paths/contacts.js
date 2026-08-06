@@ -1,4 +1,4 @@
-import { op, jsonBody, idParam } from '../helpers.js';
+import { op, jsonBody, idParam, stringPathParam } from '../helpers.js';
 
 export function contactsPaths() {
   return {
@@ -15,8 +15,8 @@ export function contactsPaths() {
       patch: op({ summary: 'Reorder contact categories', tag: 'Contacts', stateChanging: true, requestBody: jsonBody(null) }),
     },
     '/api/v1/contacts/categories/{key}': {
-      put: op({ summary: 'Rename contact category', tag: 'Contacts', params: [idParam('key', 'Category key')], stateChanging: true, requestBody: jsonBody(null) }),
-      delete: op({ summary: 'Delete contact category', tag: 'Contacts', params: [idParam('key', 'Category key')], stateChanging: true }),
+      put: op({ summary: 'Rename contact category', tag: 'Contacts', params: [stringPathParam('key', 'Category key')], stateChanging: true, requestBody: jsonBody(null) }),
+      delete: op({ summary: 'Delete contact category', tag: 'Contacts', params: [stringPathParam('key', 'Category key')], stateChanging: true }),
     },
     '/api/v1/contacts/cardav/accounts': {
       get: op({ summary: 'List CardDAV accounts', tag: 'Contacts' }),

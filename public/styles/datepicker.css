@@ -251,7 +251,10 @@ yuvomi-datepicker[disabled] .ydp__trigger {
 
 .ydp-cal__day[aria-selected="true"] {
   background: var(--active-module-accent, var(--color-accent));
-  color: var(--color-text-on-accent);
+  /* Die Modul-Akzente hellen im Dark-Modus durchgehend auf; auf den hellsten
+   * (Notizen, Vorrat) trug weisser Text nur 1,44:1. --color-ink-on-vivid kippt
+   * mit dem Modus und hält in beiden Themes mindestens 4,99:1. */
+  color: var(--color-ink-on-vivid);
   font-weight: var(--font-weight-semibold);
 }
 
@@ -342,7 +345,7 @@ yuvomi-datepicker[disabled] .ydp__trigger {
 
 .ydp-time__opt[aria-selected="true"] {
   background: var(--active-module-accent, var(--color-accent));
-  color: var(--color-text-on-accent);
+  color: var(--color-ink-on-vivid);
   font-weight: var(--font-weight-semibold);
 }
 

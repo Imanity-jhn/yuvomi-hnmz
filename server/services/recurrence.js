@@ -140,6 +140,36 @@ function nextOccurrenceAfter(baseDateStr, rrule, notBeforeStr) {
 }
 
 /**
+ * Das nächste Fälligkeitsdatum, nachdem etwas Wiederkehrendes erledigt wurde.
+ *
+ * Zwei Verankerungen, und die Wahl gehört dem einzelnen Vorgang (#658):
+ *
+ * - `fromCompletion: false` (Vorgabe): die Serie hängt am Fälligkeitsdatum. Das
+ *   Raster bleibt stehen, egal wann jemand abhakt - richtig für alles, was an
+ *   einem äußeren Takt hängt (Müllabfuhr, Miete, Vereinsabend). Übersprungene
+ *   Vorkommen werden aufgeholt, damit die nächste Instanz nicht selbst schon
+ *   überfällig entsteht.
+ * - `fromCompletion: true`: die Serie hängt am Tag des Abhakens. Richtig für
+ *   alles, dessen Intervall erst mit der Handlung beginnt (Filter reinigen,
+ *   Pflanzen düngen). Ein Aufholen entfällt: das Ergebnis liegt bei jedem
+ *   positiven Intervall ohnehin in der Zukunft.
+ *
+ * Bewusst hier und nicht in der Route: #647 will dieselbe „ab dem Moment, wo du
+ * es angefasst hast"-Rechnung für zurücksetzbare Countdowns.
+ *
+ * @param {object}  opts
+ * @param {string}  opts.anchorDate      Fälligkeitsdatum der erledigten Instanz (YYYY-MM-DD)
+ * @param {string}  opts.rule            RRULE-String
+ * @param {string}  opts.completedOn     Tag des Abhakens (YYYY-MM-DD)
+ * @param {boolean} [opts.fromCompletion] true = ab Erledigungstag rechnen
+ * @returns {string|null} Nächstes Datum als YYYY-MM-DD oder null (Serienende)
+ */
+function nextDueAfterCompletion({ anchorDate, rule, completedOn, fromCompletion = false }) {
+  if (fromCompletion) return completedOn ? nextOccurrence(completedOn, rule) : null;
+  return nextOccurrenceAfter(anchorDate, rule, completedOn);
+}
+
+/**
  * Prüft, ob ein Datum zum BYDAY-Wochentagsfilter der Regel passt.
  * Ohne BYDAY (oder ohne parsebare Regel) gilt jedes Datum als passend – dann
  * steuern allein DTSTART und nextOccurrence die Serie. Fängt Serien ab, deren
@@ -156,4 +186,6 @@ function matchesRRuleByday(dateStr, rrule) {
   return parsed.byday.includes(day.getUTCDay());
 }
 
-export { parseRRule, nextOccurrence, nextOccurrenceAfter, matchesRRuleByday };
+export {
+  parseRRule, nextOccurrence, nextOccurrenceAfter, nextDueAfterCompletion, matchesRRuleByday,
+};

@@ -66,19 +66,38 @@ function cfgDelete(key) {
  * @returns {{ enabled: boolean, url: string|null, username: string|null,
  *             password: string|null, remotePath: string, keep: number }}
  */
+/**
+ * Eine env-Variable zaehlt nur als gesetzt, wenn sie auch einen Wert traegt.
+ *
+ * Deploy-Descriptoren, die jede Variable von Hand aufzaehlen (Portainer,
+ * Unraid), reichen optionale Felder als leeren String durch. Ein leerer String
+ * ist definiert und nicht nullish, gewann also gegen alles in der Datenbank:
+ * ein Haushalt konnte WebDAV-Backups in den Einstellungen einrichten, die UI
+ * nahm es an, und wirksam wurde nichts davon. Dasselbe Kriterium nutzt
+ * isEnvControlled() in services/email.js.
+ */
+function envValue(raw) {
+  // Getrimmt wird nur GEPRUEFT, zurueck kommt der Originalwert. Ein Passwort
+  // darf mit einem Leerzeichen anfangen oder enden - wer es trimmt, macht aus
+  // einer gueltigen Zugangsdatei eine ungueltige, und das faellt erst beim
+  // naechsten Backup auf.
+  return raw !== undefined && String(raw).trim() !== '' ? String(raw) : undefined;
+}
+
 export function getConfig() {
-  const enabled = ENV_ENABLED !== undefined
-    ? ENV_ENABLED === 'true' || ENV_ENABLED === '1'
+  const envEnabled = envValue(ENV_ENABLED);
+  const enabled = envEnabled !== undefined
+    ? envEnabled === 'true' || envEnabled === '1'
     : cfgGet('webdav_backup_enabled') === '1';
 
-  const url      = ENV_URL  ?? cfgGet('webdav_backup_url')      ?? null;
-  const username = ENV_USER ?? cfgGet('webdav_backup_username')  ?? null;
-  const password = ENV_PASS ?? cfgGet('webdav_backup_password')  ?? null;
+  const url      = envValue(ENV_URL)  ?? cfgGet('webdav_backup_url')      ?? null;
+  const username = envValue(ENV_USER) ?? cfgGet('webdav_backup_username')  ?? null;
+  const password = envValue(ENV_PASS) ?? cfgGet('webdav_backup_password')  ?? null;
 
-  const rawPath  = ENV_PATH ?? cfgGet('webdav_backup_path') ?? '/yuvomi/backups/';
+  const rawPath  = envValue(ENV_PATH) ?? cfgGet('webdav_backup_path') ?? '/yuvomi/backups/';
   const remotePath = rawPath.endsWith('/') ? rawPath : `${rawPath}/`;
 
-  const keepRaw  = ENV_KEEP ?? cfgGet('webdav_backup_keep') ?? '7';
+  const keepRaw  = envValue(ENV_KEEP) ?? cfgGet('webdav_backup_keep') ?? '7';
   const keep     = Math.max(1, parseInt(keepRaw, 10) || 7);
 
   return { enabled, url, username, password, remotePath, keep };

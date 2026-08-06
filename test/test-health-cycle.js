@@ -8,15 +8,19 @@
  */
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync, readdirSync } from 'node:fs';
 
 const {
   FLOW_LEVELS, FLOW_VALUES, flowLevel,
   SYMPTOM_TYPES, SYMPTOM_VALUES, symptomType,
-  MOOD_TYPES, moodType,
+  MOOD_TYPES, MOOD_VALUES, moodType,
   PHASE,
   daysBetween, sortPeriodsAsc, cycleGaps, periodLengths,
   cycleStats, predictCycle, buildCycleCalendar, cycleRing, pregnancyInfo,
 } = await import('../public/utils/health-cycle.js');
+
+const de = JSON.parse(readFileSync(new URL('../public/locales/de.json', import.meta.url), 'utf8'));
+const translate = (key) => key.split('.').reduce((value, segment) => value?.[segment], de);
 
 // Baut eine Historie aus Startdaten mit fester Periodenlänge (Tage).
 function periods(starts, periodLen = 5) {
@@ -52,8 +56,31 @@ test('SYMPTOM_TYPES / MOOD_TYPES: vollständige labelKeys + icons', () => {
   assert.ok(SYMPTOM_VALUES.includes('cramps'));
   assert.equal(symptomType('cramps').value, 'cramps');
   assert.equal(symptomType('unknown'), null);
-  for (const m of MOOD_TYPES) assert.ok(m.labelKey.startsWith('health.cycle.mood.'));
+  for (const m of MOOD_TYPES) {
+    assert.ok(m.labelKey.startsWith('health.cycle.mood.'));
+    assert.equal(typeof m.icon, 'string');
+  }
   assert.equal(moodType('great').value, 'great');
+  assert.equal(moodType('unknown'), null);
+});
+
+// MOOD_VALUES ist die Auswahl-Reihenfolge der Stimmungs-Chips, nicht nur eine
+// Menge: von "great" nach "anxious". Wie bei FLOW_VALUES/SYMPTOM_VALUES hält der
+// Guard die abgeleitete Liste an ihre Presets gebunden.
+test('MOOD_VALUES: aus MOOD_TYPES abgeleitet, feste Reihenfolge', () => {
+  assert.deepEqual(MOOD_VALUES, MOOD_TYPES.map((m) => m.value));
+  assert.deepEqual(MOOD_VALUES, ['great', 'good', 'neutral', 'sensitive', 'sad', 'irritable', 'anxious']);
+  assert.equal(new Set(MOOD_VALUES).size, MOOD_VALUES.length);
+  assert.ok(Object.isFrozen(MOOD_VALUES));
+});
+
+// Die startsWith-Prüfungen oben belegen nur das Präfix. Ein Preset ohne
+// Übersetzung würde dort durchrutschen und erst in der UI als roher Key auffallen.
+test('jeder Zyklus-Preset-labelKey ist in de.json übersetzt', () => {
+  const presets = [...FLOW_LEVELS, ...SYMPTOM_TYPES, ...MOOD_TYPES];
+  for (const p of presets) {
+    assert.equal(typeof translate(p.labelKey), 'string', `${p.labelKey} fehlt in de.json`);
+  }
 });
 
 // --------------------------------------------------------
@@ -330,4 +357,38 @@ test('buildCycleCalendar: keine Projektion im Schwangerschafts-Modus', () => {
 test('cycleRing: null im Schwangerschafts-Modus', () => {
   const p = predictCycle(periods(['2026-05-01'], 5), { pregnancy_mode: 1, pregnancy_due_date: '2027-01-01' }, '2026-06-01');
   assert.equal(cycleRing(p), null);
+});
+
+// Der Kalenderkopf steht in `grid-template-columns: repeat(7, 1fr)`
+// (.cycle-cal__weekdays in styles/health.css): sieben feste Spalten, die nicht
+// mitwachsen. Ein langer Tagesname laeuft dort in die Nachbarspalte, statt den
+// Kopf breiter zu machen - auf schmalen Telefonen wird die Zeile unlesbar.
+//
+// Deshalb hier eine Obergrenze statt einer Sichtpruefung: Arabisch stand nach
+// der Uebersetzungsrunde auf den vollen Namen (الثلاثاء, acht Zeichen), weil
+// die Werte aus health.meds.weekday uebernommen wurden. Deren Schalter ist ein
+// flex-wrap-Element mit Innenabstand und darf lang sein - derselbe Text an zwei
+// Orten heisst eben nicht, dass beide Orte gleich viel Platz haben.
+test('die Wochentage im Zyklus-Kalender passen in sieben feste Spalten', () => {
+  const segmenter = new Intl.Segmenter('en', { granularity: 'grapheme' });
+  const graphemes = (value) => [...segmenter.segment(value)].length;
+  const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+  const LIMIT = 4;
+
+  const dir = new URL('../public/locales/', import.meta.url);
+  const files = readdirSync(dir).filter((name) => name.endsWith('.json'));
+  assert.ok(files.length >= 20, 'Locale-Dateien nicht gefunden');
+
+  for (const file of files) {
+    const locale = JSON.parse(readFileSync(new URL(file, dir), 'utf8'));
+    const weekday = locale.health?.cycle?.weekday;
+    assert.ok(weekday, `${file}: health.cycle.weekday fehlt`);
+    for (const day of DAYS) {
+      const label = weekday[day];
+      assert.ok(
+        graphemes(label) <= LIMIT,
+        `${file}: "${label}" (${day}) ist ${graphemes(label)} Zeichen lang, erlaubt sind ${LIMIT} - der Kalenderkopf hat feste Spalten`,
+      );
+    }
+  }
 });

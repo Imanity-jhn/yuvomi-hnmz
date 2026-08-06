@@ -593,7 +593,11 @@ export async function render(container, { user }) {
     isAdmin ? api.get('/modules?admin=1') : Promise.resolve({ data: [] }),
   ]);
 
-  const preferences = preferencesResult.status === 'fulfilled' ? (preferencesResult.value?.data ?? {}) : {};
+  // getPreferences() liefert bereits das entpackte Preferences-Objekt (kein
+  // `{ data }`-Envelope wie api.get). Ein zusätzliches `?.data` machte
+  // `preferences` dauerhaft leer: disabled_modules war nie gesetzt, jeder
+  // Re-Render nach einem Toggle hakte die Checkbox wieder an (#615).
+  const preferences = preferencesResult.status === 'fulfilled' ? (preferencesResult.value ?? {}) : {};
   const thirdPartyModules = modulesResult.status === 'fulfilled' ? (modulesResult.value?.data ?? []) : [];
 
   const rows = buildRows(preferences, thirdPartyModules);

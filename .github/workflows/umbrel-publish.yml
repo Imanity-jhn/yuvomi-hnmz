@@ -104,6 +104,19 @@ jobs:
           git config --global user.name "$OWNER"
           git config --global user.email "$ACTOR@users.noreply.github.com"
 
+          # Check the credential once, before anything uses it. `gh repo fork`
+          # below ends in `|| true`, so a bad token used to be swallowed there and
+          # surfaced two lines later as git's "URL rejected: Malformed input to a
+          # URL function" - which points at the clone URL, not at the secret
+          # (2026-08-05). Reporting the login also catches a token that is valid
+          # but belongs to the wrong account.
+          TOKEN_USER="$(gh api user --jq .login 2>/dev/null || true)"
+          if [ -z "$TOKEN_USER" ]; then
+            echo "::error::UMBREL_FORK_TOKEN was rejected by the API. A stray newline or space in the secret value is the usual cause (piping it through 'echo' adds one). Re-set it with: gh auth token | tr -d '[:space:]' | gh secret set UMBREL_FORK_TOKEN --repo $OWNER/yuvomi"
+            exit 1
+          fi
+          echo "UMBREL_FORK_TOKEN authenticates as: $TOKEN_USER"
+
           gh repo fork "$UPSTREAM" --clone=false || true
 
           git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/$FORK.git" fork
@@ -129,23 +142,53 @@ jobs:
           fi
           # releaseNotes from the GitHub release body (JSON-encoded string is valid YAML)
           python3 - <<'PY'
-          import json, os, re
+          import json, os, re, sys
           body = os.environ.get("RELEASE_BODY", "").strip()
+
+          # The upstream value is a BLOCK scalar spanning many indented lines:
+          #
+          #   releaseNotes: >-
+          #     Loans can now track whether …
+          #     assign installments to an account …
+          #
+          # Matching only "^releaseNotes:.*$" replaced its first line and left the
+          # indented continuation behind, so the file became invalid YAML and the
+          # PR carried a broken manifest (seen on the v1.79.0 release). Consume the
+          # whole block: up to the next line starting a top-level key, or EOF.
           p = "yuvomi/umbrel-app.yml"
           t = open(p).read()
-          t = re.sub(
-            r"^releaseNotes:.*$",
-            lambda _: "releaseNotes: " + json.dumps(body),
+
+          # Markdown belongs in a changelog, not in an app-store field: strip the
+          # "### Added" headings and bullet markers so the store shows prose.
+          lines = []
+          for line in body.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+              if lines and lines[-1] != "":
+                lines.append("")
+              continue
+            lines.append(re.sub(r"^[-*]\s+", "", line))
+          notes = "\n".join(lines).strip()
+
+          t, n = re.subn(
+            r"^releaseNotes:.*?(?=^[A-Za-z]|\Z)",
+            lambda _: "releaseNotes: " + json.dumps(notes) + "\n",
             t,
             count=1,
-            flags=re.M,
+            flags=re.M | re.S,
           )
+          if n != 1:
+            sys.exit("::error::releaseNotes block not found in yuvomi/umbrel-app.yml")
           open(p, "w").write(t)
           PY
 
           echo "--- updated ---"
           grep -E '^(version|releaseNotes):' yuvomi/umbrel-app.yml
           grep 'image:' yuvomi/docker-compose.yml
+
+          # A malformed manifest must never reach the maintainers' PR: fail here
+          # instead. python3 on ubuntu-latest ships PyYAML.
+          python3 -c "import yaml,sys; yaml.safe_load(open('yuvomi/umbrel-app.yml')); yaml.safe_load(open('yuvomi/docker-compose.yml')); print('YAML OK')"
 
           if git diff --quiet -- yuvomi/; then
             echo "Catalog already at v$VERSION — nothing to do."
@@ -156,12 +199,37 @@ jobs:
           git commit -m "yuvomi: update to v$VERSION"
           git push --force origin "$BRANCH"
 
-          EXISTING="$(gh pr list --repo "$UPSTREAM" --head "$OWNER:$BRANCH" --state open --json number -q '.[0].number' 2>/dev/null || true)"
-          if [ -z "$EXISTING" ]; then
-            gh pr create --repo "$UPSTREAM" --base master --head "$OWNER:$BRANCH" \
-              --title "yuvomi: update to v$VERSION" \
-              --body "Automated update of Yuvomi to v$VERSION (multi-arch image pinned by digest). Source: https://github.com/$OWNER/yuvomi/releases/tag/v$VERSION"
-          else
-            echo "PR #$EXISTING already open — force-push updated it to v$VERSION."
+          # An open PR is the NORMAL state here: the branch is long-lived and every
+          # release force-pushes onto it. Only the first release of a catalog cycle
+          # actually opens one.
+          #
+          # `gh pr list --head` matches the branch name alone. The "owner:branch"
+          # form that a cross-repo PR needs matches nothing there, so the open PR
+          # looked absent, `gh pr create` refused with "already exists" and turned a
+          # working run red - the manifest was on the branch and the PR carried it
+          # (v1.80.0, PR #5956). The REST endpoint does understand "owner:branch".
+          open_pr() {
+            gh api "repos/$UPSTREAM/pulls?head=$OWNER:$BRANCH&state=open" \
+              --jq '.[0].number // empty' 2>/dev/null || true
+          }
+
+          EXISTING="$(open_pr)"
+          if [ -n "$EXISTING" ]; then
+            echo "PR #$EXISTING already open - the force-push above updated it to v$VERSION."
             gh pr edit "$EXISTING" --repo "$UPSTREAM" --title "yuvomi: update to v$VERSION" || true
+            exit 0
           fi
+
+          gh pr create --repo "$UPSTREAM" --base master --head "$OWNER:$BRANCH" \
+            --title "yuvomi: update to v$VERSION" \
+            --body "Automated update of Yuvomi to v$VERSION (multi-arch image pinned by digest). Source: https://github.com/$OWNER/yuvomi/releases/tag/v$VERSION" \
+          || {
+            # A PR that appeared between the lookup and here is not a failure either:
+            # the update sits on the branch, so the PR carries it regardless.
+            AFTER="$(open_pr)"
+            if [ -z "$AFTER" ]; then
+              echo "::error::Could not open the catalog PR, and none is open."
+              exit 1
+            fi
+            echo "::notice::PR #$AFTER was opened concurrently; it carries v$VERSION."
+          }

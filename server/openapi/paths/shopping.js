@@ -18,6 +18,15 @@ export function shoppingPaths() {
       patch: op({ summary: 'Reorder shopping categories', tag: 'Shopping', stateChanging: true, requestBody: jsonBody(null) }),
     },
     '/api/v1/shopping/suggestions': { get: op({ summary: 'Get shopping suggestions', tag: 'Shopping' }) },
+    '/api/v1/shopping/items/undo-transfer': {
+      post: op({
+        summary: 'Undo a kitchen transfer to a shopping list',
+        description: 'Removes the items created by one transfer (the `added_ids` of the response) and clears the `on_shopping_list` flag on the meal ingredients they came from. Unknown ids are skipped; `removed` reports what actually went back.',
+        tag: 'Shopping',
+        stateChanging: true,
+        requestBody: jsonBody(null),
+      }),
+    },
     '/api/v1/shopping/items/{itemId}': {
       patch: op({ summary: 'Update shopping item', tag: 'Shopping', params: [idParam('itemId', 'Item ID')], stateChanging: true, requestBody: jsonBody(null) }),
       delete: op({ summary: 'Delete shopping item', tag: 'Shopping', params: [idParam('itemId', 'Item ID')], stateChanging: true }),

@@ -12,9 +12,14 @@ import { register } from 'node:module';
 import * as nodeAssert from 'node:assert/strict';
 import express from 'express';
 import { MIGRATIONS_SQL } from '../server/db-schema-test.js';
-import { hydrateBirthday, syncBirthdayArtifacts } from '../server/services/birthdays.js';
-import { getUpcomingEvents } from '../server/services/calendar-events.js';
 import { addLocalDays, toLocalDateKey } from '../public/utils/date.js';
+
+// Dynamisch geladen, weil beide Module inzwischen server/db.js in ihren
+// Import-Graphen ziehen: statische Imports laufen vor der DB_PATH-Zuweisung
+// oben, sodass db.js eine echte yuvomi.db im Repo anlegen würde
+// (`test:db-isolation` wacht darüber).
+const { hydrateBirthday, syncBirthdayArtifacts } = await import('../server/services/birthdays.js');
+const { getUpcomingEvents } = await import('../server/services/calendar-events.js');
 
 register('./test-browser-loader.mjs', import.meta.url);
 
@@ -706,6 +711,14 @@ test('Dashboard-Endpoint: dringende Aufgaben, anstehende Termine, Einkaufslisten
   `).run(today, owner, owner).lastInsertRowid;
   routeDb.prepare('INSERT INTO task_assignments (task_id, user_id) VALUES (?, ?)').run(taskId, owner);
 
+  // Abgelegte Aufgabe (#688): steht weiter auf 'open' und wäre damit vor dem Fix
+  // in "Heute auf einen Blick" gelandet - dort ließ sie sich aber nicht öffnen,
+  // weil die Liste sie ausblendet.
+  routeDb.prepare(`
+    INSERT INTO tasks (title, priority, status, due_date, visibility, created_by, assigned_to, archived_at)
+    VALUES ('Widget Abgelegt', 'urgent', 'open', ?, 'all', ?, ?, '2026-08-01T10:00:00Z')
+  `).run(today, owner, owner);
+
   // Anstehender Termin mit Zuweisung → deckt die upcomingEvents-Map (assigned_users).
   const eventId = routeDb.prepare(`
     INSERT INTO calendar_events (title, start_datetime, visibility, created_by, assigned_to)
@@ -737,6 +750,11 @@ test('Dashboard-Endpoint: dringende Aufgaben, anstehende Termine, Einkaufslisten
     nodeAssert.ok(Array.isArray(urgent.assigned_users), 'assigned_users ist ein Array (addAssignedUsers lief)');
     nodeAssert.equal(urgent.assigned_users.length, 1, 'die eine Zuweisung ist enthalten');
     nodeAssert.equal(urgent.assigned_users_json, undefined, 'das rohe JSON-Feld wird entfernt');
+    nodeAssert.equal(
+      body.urgentTasks.find((t) => t.title === 'Widget Abgelegt'),
+      undefined,
+      'abgelegte Aufgaben bleiben aus "Heute auf einen Blick" (#688)',
+    );
 
     const upcoming = body.upcomingEvents.find((e) => e.title === 'Widget Termin');
     nodeAssert.ok(upcoming, 'anstehender Termin erscheint im Widget');

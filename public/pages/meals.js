@@ -11,12 +11,14 @@ import { t, formatDate, formatDayMonth, formatDateInput, parseDateInput, isDateI
 import { esc } from '/utils/html.js';
 import { renderSkeletonList } from '/utils/skeleton.js';
 import { DEFAULT_CATEGORY_NAME } from '/utils/shopping-categories.js';
-import { renderKitchenTabsBar, refreshKitchenBadges } from '/utils/kitchen-tabs.js';
+import { renderKitchenTabsBar } from '/utils/kitchen-tabs.js';
+import { resolveShoppingTarget, announceTransfer, mountMissingShoppingList } from '/utils/kitchen-transfer.js';
 import { ingredientRowHTML } from '/utils/ingredient-row.js';
 import { addLocalDays, startOfLocalWeekKey, toLocalDateKey } from '/utils/date.js';
 import { normalizeRecipeMealTypes, recipeSupportsMealType } from '/utils/recipe-meal-types.js';
-import { mountEmptyState, emptyStateEl } from '/utils/empty-state.js';
+import { mountEmptyState, mountLoadError, emptyStateEl } from '/utils/empty-state.js';
 import { mealPayloadFromRecipe } from '/utils/recipe-to-meal.js';
+import { findPageFab } from '/utils/fab.js';
 
 // --------------------------------------------------------
 // Konstanten
@@ -48,6 +50,10 @@ let state = {
   categories:       [],     // Einkaufskategorien für Zutaten
   modal:            null,
   visibleMealTypes: ['breakfast', 'lunch', 'dinner', 'snack'],
+  /** Gefangener Fehler des letzten Wochen-Ladevorgangs, sonst null.
+   *  Ohne dieses Feld ist eine fehlgeschlagene Woche von einer leeren Woche
+   *  nicht zu unterscheiden - und der Renderer zeigte den Leerzustand. */
+  loadError:        null,
 };
 
 // Container-Referenz für Hilfsfunktionen (wird in render() gesetzt)
@@ -144,16 +150,20 @@ function buildRandomMealAssignments({ weekStart, visibleMealTypes, meals, recipe
 // --------------------------------------------------------
 
 async function loadWeek(week) {
+  const currentWeek = getMondayOf(week);
+  state.currentWeek = currentWeek;
   try {
-    const currentWeek = getMondayOf(week);
     const res = await api.get(`/meals?week=${currentWeek}`);
-    state.meals       = Array.isArray(res.data) ? res.data : [];
-    state.currentWeek = currentWeek;
+    state.meals     = Array.isArray(res.data) ? res.data : [];
+    state.loadError = null;
   } catch (err) {
     console.error('[Meals] loadWeek Fehler:', err);
-    state.meals       = [];
-    state.currentWeek = getMondayOf(week);
-    window.yuvomi?.showToast(t('meals.loadError'), 'danger');
+    state.meals     = [];
+    // Der Fehler wird bis zum Renderer getragen statt in einen Toast gelegt.
+    // Ein Toast verschwindet nach Sekunden, der falsche Leerzustand darunter
+    // blieb stehen - von den beiden Meldungen überlebte also genau die
+    // irreführende (Critique P0, 2026-07-30).
+    state.loadError = err;
   }
 }
 
@@ -263,7 +273,7 @@ export async function render(container, { user }) {
   wireRecipeSidebar();
   wireRailToggle();
 
-  container.querySelector('#fab-new-meal').addEventListener('click', () => {
+  findPageFab('fab-new-meal').addEventListener('click', () => {
     const firstType = state.visibleMealTypes[0] ?? 'lunch';
     openMealModal({ mode: 'create', date: today, mealType: firstType });
   });
@@ -342,6 +352,25 @@ function renderWeekGrid() {
 
   _container.querySelector('#week-label').textContent =
     formatWeekLabel(state.currentWeek);
+
+  // Fehlgeschlagene Woche: Fehlerzustand statt Leerzustand. Muss VOR der
+  // Leer-Prüfung stehen - `state.meals` ist nach einem Fehler ebenfalls leer,
+  // und die Reihenfolge ist das Einzige, was die beiden Fälle trennt.
+  if (state.loadError) {
+    grid.removeAttribute('aria-busy');
+    mountLoadError(grid, {
+      title: t('meals.loadError'),
+      description: t('common.loadErrorDescription'),
+      error: state.loadError,
+      retryLabel: t('common.retry'),
+      onRetry: async () => {
+        grid.setAttribute('aria-busy', 'true');
+        await loadWeek(state.currentWeek);
+        renderWeekGrid();
+      },
+    });
+    return;
+  }
 
   // Leere Woche: Leerzustand statt Slot-Raster.
   //
@@ -508,6 +537,14 @@ function renderRecipeSidebar() {
     titleEl.className = 'recipe-sidebar__card-title';
     titleEl.textContent = recipe.title;
     card.appendChild(titleEl);
+
+    if (recipe.source === 'mealie') {
+      const sourceBadge = document.createElement('span');
+      sourceBadge.className = 'source-badge source-badge--mealie';
+      sourceBadge.textContent = t('recipes.sourceMealie');
+      if (recipe.mealie_account_name) sourceBadge.title = recipe.mealie_account_name;
+      card.appendChild(sourceBadge);
+    }
 
     // Mahlzeiten-Chips nur bei echter Teilmenge: ein Rezept, das zu allen (oder
     // keinem) Typ passt, trägt mit "überall"-Chips null Information und ist dann
@@ -693,7 +730,7 @@ function wireGrid(grid) {
     }
 
     if (action === 'transfer-meal') {
-      await transferMeal(parseInt(btn.dataset.mealId, 10));
+      await transferMeal(parseInt(btn.dataset.mealId, 10), btn);
     }
   });
 
@@ -1198,7 +1235,14 @@ function openMealModal(opts) {
         if (btn) btn.closest('.ingredient-row').remove();
       });
 
-      // Einkaufslisten-Transfer
+      // Einkaufslisten-Transfer. Ohne Liste steht hier statt des toten
+      // Auswahlfelds die geteilte Antwort samt Ausweg - `beforeLeave` schließt
+      // das Modal, sonst bliebe es über dem Einkaufs-Tab stehen.
+      mountMissingShoppingList(
+        panel.querySelector('#transfer-missing'),
+        { beforeLeave: () => closeModal({ force: true }) },
+      );
+
       panel.querySelector('#transfer-btn')?.addEventListener('click', async () => {
         const selectEl = panel.querySelector('#transfer-list-select');
         const listId   = parseInt(selectEl?.value, 10);
@@ -1208,14 +1252,22 @@ function openMealModal(opts) {
         try {
           const res = await api.post(`/meals/${state.modal.meal.id}/to-shopping-list`, { listId });
           if (res.data.transferred > 0) {
-            window.yuvomi?.showToast(t('meals.transferSuccess', {
-              count: res.data.transferred,
-              list: state.lists.find((l) => l.id === listId)?.name ?? '',
-            }), 'success');
-            refreshKitchenBadges();
             await loadWeek(state.currentWeek);
             closeModal({ force: true });
             renderWeekGrid();
+            // Dieselbe Meldung, Standzeit und Rücknahme wie am Slot-Knopf: es ist
+            // derselbe Transfer, nur ein anderer Auslöser.
+            announceTransfer({
+              message: t('meals.transferSuccess', {
+                count: res.data.transferred,
+                list: state.lists.find((l) => l.id === listId)?.name ?? '',
+              }),
+              addedIds: res.data.added_ids ?? [],
+              onUndone: async () => {
+                await loadWeek(state.currentWeek);
+                renderWeekGrid();
+              },
+            });
           } else {
             window.yuvomi?.showToast(t('meals.transferAlreadyDone'), 'info');
             btn.disabled = false;
@@ -1224,6 +1276,20 @@ function openMealModal(opts) {
           window.yuvomi?.showToast(err.data?.error ?? t('common.unknownError'), 'danger');
           btn.disabled = false;
         }
+      });
+
+      // Das Wiederholungs-Ende gehört zur Wiederholung, nicht zur Mahlzeit: es
+      // zeigt sich nur, wenn die Serie überhaupt im Spiel ist - beim Anlegen mit
+      // gesetztem Schalter, beim Bearbeiten im Serien-Umfang.
+      const repeatUntilGroup = panel.querySelector('#modal-repeat-until-group');
+      const repeatToggle     = panel.querySelector('#modal-repeat-weekly');
+      const editScopeSelect  = panel.querySelector('#modal-edit-scope');
+
+      repeatToggle?.addEventListener('change', () => {
+        repeatUntilGroup.hidden = !repeatToggle.checked;
+      });
+      editScopeSelect?.addEventListener('change', () => {
+        repeatUntilGroup.hidden = editScopeSelect.value !== 'series';
       });
 
       panel.querySelector('#modal-cancel').addEventListener('click', closeModal);
@@ -1241,9 +1307,7 @@ function buildModalContent({ mode, date, mealType, meal }) {
     `<option value="${mt.key}" ${mt.key === mealType ? 'selected' : ''}>${mt.label}</option>`
   ).join('');
 
-  const listOpts = state.lists.length
-    ? state.lists.map((l) => `<option value="${l.id}">${esc(l.name)}</option>`).join('')
-    : `<option value="" disabled>${t('meals.noShoppingLists')}</option>`;
+  const listOpts = state.lists.map((l) => `<option value="${l.id}">${esc(l.name)}</option>`).join('');
 
   const ingRows = isEdit && meal.ingredients?.length
     ? meal.ingredients.map((ing) => ingredientRowHTML({
@@ -1257,10 +1321,20 @@ function buildModalContent({ mode, date, mealType, meal }) {
 
   const hasIngOpen = isEdit && meal.ingredients?.some((i) => !i.on_shopping_list);
 
-  const recipeOptions = [
-    `<option value="">${t('meals.savedRecipePlaceholder')}</option>`,
-    ...state.recipes.map((r) => `<option value="${r.id}" ${isEdit && meal.recipe_id === r.id ? 'selected' : ''}>${esc(r.title)}</option>`),
-  ].join('');
+  const recipeOptionHtml = (r) => `<option value="${r.id}" ${isEdit && meal.recipe_id === r.id ? 'selected' : ''}>${esc(r.title)}</option>`;
+  // Optgroups nur, sobald Mealie-Rezepte wirklich vorkommen: ohne Mirror-
+  // Account bleibt die flache Liste von vorher unverändert (kein UI-Rauschen).
+  const hasMirroredRecipes = state.recipes.some((r) => r.source === 'mealie');
+  const recipeOptions = hasMirroredRecipes
+    ? [
+      `<option value="">${t('meals.savedRecipePlaceholder')}</option>`,
+      `<optgroup label="${esc(t('recipes.sourceNative'))}">${state.recipes.filter((r) => r.source !== 'mealie').map(recipeOptionHtml).join('')}</optgroup>`,
+      `<optgroup label="${esc(t('recipes.sourceMealie'))}">${state.recipes.filter((r) => r.source === 'mealie').map(recipeOptionHtml).join('')}</optgroup>`,
+    ].join('')
+    : [
+      `<option value="">${t('meals.savedRecipePlaceholder')}</option>`,
+      ...state.recipes.map(recipeOptionHtml),
+    ].join('');
 
   const advancedOpen = isEdit && (!!meal.recipe_id || !!meal.notes || !!meal.recipe_url || isRecurring);
 
@@ -1304,6 +1378,12 @@ function buildModalContent({ mode, date, mealType, meal }) {
         <option value="single">${t('meals.editScopeSingle')}</option>
         <option value="series">${t('meals.editScopeSeries')}</option>
       </select>
+    </div>
+    <div class="form-group" id="modal-repeat-until-group" hidden>
+      <label class="form-label" for="modal-repeat-until">${t('meals.recurrenceUntilLabel')}</label>
+      <yuvomi-datepicker type="date" id="modal-repeat-until"
+                         value="${meal.recurrence_end_date ? formatDateInput(meal.recurrence_end_date) : ''}"></yuvomi-datepicker>
+      <p class="form-hint">${t('meals.recurrenceUntilHint')}</p>
     </div>` : '') : `
     <div class="meal-recurrence-option">
       <label class="toggle">
@@ -1312,6 +1392,11 @@ function buildModalContent({ mode, date, mealType, meal }) {
         <span>${t('meals.recurrenceLabel')}</span>
       </label>
       <p class="form-hint">${t('meals.recurrenceHint')}</p>
+      <div class="form-group" id="modal-repeat-until-group" hidden>
+        <label class="form-label" for="modal-repeat-until">${t('meals.recurrenceUntilLabel')}</label>
+        <yuvomi-datepicker type="date" id="modal-repeat-until" value=""></yuvomi-datepicker>
+        <p class="form-hint">${t('meals.recurrenceUntilHint')}</p>
+      </div>
     </div>`}`;
 
   return `
@@ -1352,10 +1437,18 @@ function buildModalContent({ mode, date, mealType, meal }) {
         <i data-lucide="shopping-cart" class="icon-sm" aria-hidden="true"></i>
         ${t('meals.transferLabel')}
       </div>
+      ${state.lists.length ? `
       <select class="shopping-transfer__select" id="transfer-list-select">${listOpts}</select>
       <button class="btn btn--secondary shopping-transfer__btn" id="transfer-btn" type="button">
         ${t('meals.transferNow')}
-      </button>
+      </button>`
+      // Ohne Liste stand hier ein Auswahlfeld mit einem deaktivierten
+      // `<option>` als Begründung und daneben ein Knopf, der nichts tat - ein
+      // Bedienelement, das den Grund seiner Nutzlosigkeit in sich trägt, ist die
+      // schlechteste der vier Formen dieses Zustands, weil es bedienbar aussieht
+      // (Audit 2026-07-30, P1-A). Der Platzhalter wird beim Verdrahten aus dem
+      // geteilten Baustein gefüllt.
+      : '<div id="transfer-missing" class="shopping-transfer__missing"></div>'}
     </div>` : ''}
 
     <div class="modal-panel__footer modal-panel__footer--plain">
@@ -1381,9 +1474,29 @@ async function saveModal(overlay) {
   const repeat_weekly = state.modal?.mode === 'create'
     ? Boolean(overlay.querySelector('#modal-repeat-weekly')?.checked)
     : false;
+  const scope = overlay.querySelector('#modal-edit-scope')?.value || 'single';
+  // Das Wiederholungs-Ende zählt nur, solange die Serie im Spiel ist: beim
+  // Anlegen mit gesetztem Schalter, beim Bearbeiten im Serien-Umfang. Sonst
+  // steht im Feld zwar ein Wert, er gehört aber zu keiner der beiden Absichten.
+  const seriesScoped   = state.modal?.mode === 'create' ? repeat_weekly : scope === 'series';
+  const repeatUntilEl  = overlay.querySelector('#modal-repeat-until');
+  const repeatUntilRaw = seriesScoped ? (repeatUntilEl?.value ?? '') : '';
+  // Leeres Feld heißt „ohne Ende" und geht als leerer String raus: der Server
+  // unterscheidet das ausdrücklich vom fehlenden Feld (Ende bleibt unverändert).
+  const repeat_until = repeatUntilRaw ? parseDateInput(repeatUntilRaw) : '';
 
   if (!date || !isDateInputValid(dateRaw)) {
     reportFieldError(overlay.querySelector('#modal-date'), t('calendar.invalidDate'));
+    return;
+  }
+
+  if (repeatUntilRaw && (!repeat_until || !isDateInputValid(repeatUntilRaw))) {
+    reportFieldError(repeatUntilEl, t('calendar.invalidDate'));
+    return;
+  }
+
+  if (repeat_until && repeat_until < date) {
+    reportFieldError(repeatUntilEl, t('meals.recurrenceUntilBeforeStart'));
     return;
   }
 
@@ -1401,14 +1514,12 @@ async function saveModal(overlay) {
     const { mode, meal } = state.modal;
 
     if (mode === 'create') {
-      const res     = await api.post('/meals', { date, meal_type, title, notes, recipe_url, recipe_id, ingredients, repeat_weekly });
+      const res     = await api.post('/meals', { date, meal_type, title, notes, recipe_url, recipe_id, ingredients, repeat_weekly, repeat_until });
       state.meals.push(res.data);
     } else {
-      const scope = overlay.querySelector('#modal-edit-scope')?.value || 'single';
-
       if (scope === 'series') {
         // Ganze Serie: Template + alle Instanzen inkl. Zutaten serverseitig aktualisieren.
-        await api.put(`/meals/${meal.id}?scope=series`, { meal_type, title, notes, recipe_url, recipe_id, ingredients });
+        await api.put(`/meals/${meal.id}?scope=series`, { meal_type, title, notes, recipe_url, recipe_id, ingredients, repeat_until });
       } else {
         // Nur diese Instanz
         await api.put(`/meals/${meal.id}`, { date, meal_type, title, notes, recipe_url, recipe_id });
@@ -1459,20 +1570,27 @@ function collectModalIngredients(overlay) {
 async function deleteMeal(mealId) {
   const meal = state.meals.find((m) => m.id === mealId);
 
-  // Wiederkehrende Mahlzeit: Einzeltermin oder ganze Serie löschen.
+  // Wiederkehrende Mahlzeit: Einzeltermin, alles ab hier oder ganze Serie löschen.
+  // „Ab hier" ist der Ausweg, wenn die Serie in der Vergangenheit sinnvoll war und
+  // nur nach vorn enden soll - ohne ihn blieb nur, jedes künftige Vorkommen
+  // einzeln zu löschen, während die nächste Woche schon wieder eines erzeugte (#619).
   if (meal?.recurrence_template_id) {
     const choice = await selectModal(t('meals.deleteRecurringTitle'), [
       { value: 'single', label: t('meals.deleteScopeSingle') },
+      { value: 'future', label: t('meals.deleteScopeFuture') },
       { value: 'series', label: t('meals.deleteScopeSeries') },
     ]);
     if (choice === null) return;
 
-    if (choice === 'series') {
+    if (choice === 'series' || choice === 'future') {
       try {
-        await api.delete(`/meals/${mealId}?scope=series`);
+        await api.delete(`/meals/${mealId}?scope=${choice}`);
         await loadWeek(state.currentWeek);
         renderWeekGrid();
-        window.yuvomi?.showToast(t('meals.seriesDeletedToast'), 'success');
+        window.yuvomi?.showToast(
+          choice === 'future' ? t('meals.seriesEndedToast') : t('meals.seriesDeletedToast'),
+          'success',
+        );
       } catch (err) {
         window.yuvomi?.showToast(err.data?.error ?? t('common.unknownError'), 'danger');
       }
@@ -1503,41 +1621,43 @@ async function deleteMeal(mealId) {
 // Zutaten → Einkaufsliste (Quick-Transfer vom Slot aus)
 // --------------------------------------------------------
 
-async function transferMeal(mealId) {
-  if (!state.lists.length) {
-    window.yuvomi?.showToast(t('meals.noShoppingLists'), 'danger');
-    return;
-  }
+async function transferMeal(mealId, btn) {
+  // Vorprüfung, Listenwahl und die Antwort auf „es gibt keine Liste" liegen im
+  // geteilten Baustein (utils/kitchen-transfer.js).
+  const target = await resolveShoppingTarget(state.lists);
+  if (!target) return;
 
-  let listId = state.lists[0].id;
-
-  if (state.lists.length > 1) {
-    const options = state.lists.map((l) => ({ value: l.id, label: l.name }));
-    const choice = await selectModal(t('common.toShoppingListWhich'), options);
-    if (choice === null) return;
-    listId = Number(choice);
-  }
-
+  if (btn) btn.disabled = true;
   try {
-    const res = await api.post(`/meals/${mealId}/to-shopping-list`, { listId });
+    const res = await api.post(`/meals/${mealId}/to-shopping-list`, { listId: target.id });
     if (res.data.transferred > 0) {
+      await loadWeek(state.currentWeek);
+      renderWeekGrid();
       // Der Toast nennt die ZIEL-Liste. „5 Zutaten übernommen." sagte nicht, wohin -
       // und bei mehreren Listen ist genau das die Frage, die offen bleibt (Critique
       // 2026-07-30, P1). Der Kreislauf endet nicht mit „übernommen", sondern in
       // einer bestimmten Liste.
-      window.yuvomi?.showToast(t('meals.transferSuccess', {
-        count: res.data.transferred,
-        list: state.lists.find((l) => l.id === listId)?.name ?? '',
-      }), 'success');
-      // Der Einkaufs-Tab zeigt jetzt eine andere Zahl.
-      refreshKitchenBadges();
-      await loadWeek(state.currentWeek);
-      renderWeekGrid();
+      //
+      // `onUndone` zeichnet die Woche neu: die Rücknahme setzt serverseitig auch
+      // `on_shopping_list` zurück, die Zutaten sind danach wieder offen - und die
+      // Kachel zeigt den Übernahme-Knopf wieder an.
+      announceTransfer({
+        message: t('meals.transferSuccess', { count: res.data.transferred, list: target.name }),
+        addedIds: res.data.added_ids ?? [],
+        onUndone: async () => {
+          await loadWeek(state.currentWeek);
+          renderWeekGrid();
+        },
+      });
     } else {
       window.yuvomi?.showToast(t('meals.transferAlreadyDone'), 'info');
     }
   } catch (err) {
     window.yuvomi?.showToast(err.data?.error ?? t('common.errorGeneric'), 'danger');
+  } finally {
+    // Die Kachel wird nach einem Erfolg neu gezeichnet; der Knopf hier ist dann
+    // schon ersetzt. Das Zurücksetzen gilt dem Fehlerfall und dem Nichts-zu-tun-Fall.
+    if (btn?.isConnected) btn.disabled = false;
   }
 }
 

@@ -4130,6 +4130,815 @@ const MIGRATIONS = [
       UPDATE google_calendar_selection SET sync_token = NULL;
     `,
   },
+  {
+    version: 111,
+    description: 'meal recurrence: optional end date (#619)',
+    up: `
+      -- Eine wöchentliche Mahlzeit lief bisher ohne Horizont: jede aufgeschlagene
+      -- Woche materialisierte eine weitere Instanz, ohne dass die Serie je hätte
+      -- enden können (#619). end_date ist die Grenze; NULL bleibt bewusst
+      -- „unbegrenzt", damit bestehende Serien unverändert weiterlaufen.
+      ALTER TABLE meal_recurrence_templates ADD COLUMN end_date TEXT;
+    `,
+  },
+  {
+    version: 112,
+    description: 'budget entries: receipt/document attachments (#583)',
+    up: `
+      -- Belege an Buchungen (#583). Eigene Tabelle statt einer Spalte auf
+      -- budget_entries, weil ein Kauf mehr als einen Beleg tragen kann
+      -- (Kassenbon + Rechnung + Garantie). Spiegelt bewusst expense_attachments,
+      -- damit Split-Expenses und Budget dieselbe Form haben.
+      --
+      -- Kein kind-Feld: expense_attachments führt eines, das dort nie gesetzt
+      -- wird. Eine Spalte, die immer denselben Wert hätte, bleibt hier weg.
+      --
+      -- ON DELETE CASCADE auf beiden Seiten: verschwindet die Buchung, ist die
+      -- Verknüpfung sinnlos; verschwindet das Dokument, zeigt sie ins Leere. Das
+      -- Dokument selbst bleibt beim Löschen der Buchung erhalten - es lebt im
+      -- Dokumenten-Modul weiter und kann dort an anderer Stelle hängen.
+      CREATE TABLE IF NOT EXISTS budget_entry_attachments (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        entry_id    INTEGER NOT NULL REFERENCES budget_entries(id) ON DELETE CASCADE,
+        document_id INTEGER NOT NULL REFERENCES family_documents(id) ON DELETE CASCADE,
+        created_by  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        UNIQUE(entry_id, document_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_budget_entry_attachments_entry
+        ON budget_entry_attachments(entry_id);
+      CREATE INDEX IF NOT EXISTS idx_budget_entry_attachments_document
+        ON budget_entry_attachments(document_id);
+    `,
+  },
+  {
+    version: 113,
+    description: 'CalDAV VTODO: push local changes and deletions back to the server (#617)',
+    up: `
+      -- Der VTODO-Spiegel war einseitig: eine hier abgehakte, umbenannte oder
+      -- gelöschte Aufgabe blieb auf dem CalDAV-Server unverändert stehen, und der
+      -- nächste Inbound-Lauf machte die lokale Änderung wieder rückgängig. Die
+      -- Rückrichtung braucht dieselben drei Dinge wie die Termine (#593):
+      --
+      --   Weg zum Objekt  → external_object_url
+      --   Absicht merken  → outbound_dirty
+      --   Aufgeben können → outbound_attempts
+      --
+      -- Nullable und ohne Backfill: für bereits gespiegelte Einträge ist die URL
+      -- noch nicht bekannt. Der nächste Inbound-Lauf trägt sie nach, und bis dahin
+      -- löst der Sync das Objekt über die UID des laufenden Abrufs auf.
+      ALTER TABLE tasks ADD COLUMN external_object_url TEXT;
+      ALTER TABLE tasks ADD COLUMN outbound_dirty      INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE tasks ADD COLUMN outbound_attempts   INTEGER NOT NULL DEFAULT 0;
+
+      ALTER TABLE shopping_items ADD COLUMN external_object_url TEXT;
+      ALTER TABLE shopping_items ADD COLUMN outbound_dirty      INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE shopping_items ADD COLUMN outbound_attempts   INTEGER NOT NULL DEFAULT 0;
+
+      -- Eigene Tombstone-Tabelle statt calendar_pending_deletions: dort ist der
+      -- Schlüssel (source, calendar_external_id, event_external_id) auf Kalender
+      -- und Termin zugeschnitten, während eine VTODO-Löschung ihr Konto und ihr
+      -- Modul kennen muss - tasks und shopping_items sind getrennte Ziele mit
+      -- eigenen UID-Räumen. Die Fehler- und Aufgeberegeln bleiben trotzdem
+      -- geteilt (calendar-outbound.js: outboundFailureAction).
+      --
+      -- Die Zeile überlebt bewusst den gelöschten Eintrag: danach ist die Zeile
+      -- weg, aus der UID und Objekt-URL sonst zu holen wären.
+      CREATE TABLE IF NOT EXISTS caldav_todo_pending_deletions (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id INTEGER NOT NULL REFERENCES caldav_accounts(id) ON DELETE CASCADE,
+        module     TEXT    NOT NULL CHECK(module IN ('tasks', 'shopping')),
+        uid        TEXT    NOT NULL,
+        object_url TEXT,
+        attempts   INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        created_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        UNIQUE(account_id, module, uid)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_caldav_todo_deletions_account
+        ON caldav_todo_pending_deletions(account_id);
+    `,
+  },
+  {
+    version: 114,
+    description: 'Tasks: repair the category default left behind by v83 (#586)',
+    // Der Rebuild droppt `tasks` und nimmt dabei alle Indizes und die drei
+    // Suchindex-Trigger mit - beide werden unten vollständig neu angelegt. Ohne
+    // Fremdschlüssel-Pause würde das DROP die referenzierenden Zeilen
+    // (task_assignments, task_documents, reward_ledger, Unteraufgaben) per
+    // CASCADE mitreißen.
+    foreignKeysOff: true,
+    up: `
+      -- v83 hat die Kategorien in eine eigene Tabelle überführt und den Bestand
+      -- von 'Sonstiges' auf den Key 'misc' gezogen, den Spalten-Default der
+      -- Tabelle aber stehen lassen. Seitdem trägt jede Zeile, die ohne
+      -- ausdrückliche Kategorie entsteht, einen Key, den es in task_categories
+      -- nicht gibt. Über den CalDAV-Spiegel passiert genau das bei jeder
+      -- eingespielten Aufgabe (#586): sie landet in einer Kategorie, die in
+      -- keinem Dropdown und keinem Filter auftaucht, und springt beim ersten
+      -- Speichern im Modal still auf die erste echte Kategorie.
+      CREATE TABLE tasks_new (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        title               TEXT    NOT NULL,
+        description         TEXT,
+        category            TEXT    NOT NULL DEFAULT 'misc',
+        priority            TEXT    NOT NULL DEFAULT 'none'
+                                    CHECK(priority IN ('none', 'low', 'medium', 'high', 'urgent')),
+        status              TEXT    NOT NULL DEFAULT 'open'
+                                    CHECK(status IN ('open', 'in_progress', 'done', 'archived')),
+        due_date            TEXT,
+        due_time            TEXT,
+        assigned_to         INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_by          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        is_recurring        INTEGER NOT NULL DEFAULT 0,
+        recurrence_rule     TEXT,
+        parent_task_id      INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
+        created_at          TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        updated_at          TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        start_date          TEXT,
+        external_uid        TEXT,
+        external_source     TEXT    NOT NULL DEFAULT 'local',
+        external_account_id INTEGER,
+        points              INTEGER NOT NULL DEFAULT 0,
+        visibility          TEXT    NOT NULL DEFAULT 'all',
+        external_object_url TEXT,
+        outbound_dirty      INTEGER NOT NULL DEFAULT 0,
+        outbound_attempts   INTEGER NOT NULL DEFAULT 0
+      );
+
+      INSERT INTO tasks_new (
+        id, title, description, category, priority, status, due_date, due_time,
+        assigned_to, created_by, is_recurring, recurrence_rule, parent_task_id,
+        created_at, updated_at, start_date, external_uid, external_source,
+        external_account_id, points, visibility, external_object_url,
+        outbound_dirty, outbound_attempts
+      )
+      SELECT
+        id, title, description, category, priority, status, due_date, due_time,
+        assigned_to, created_by, is_recurring, recurrence_rule, parent_task_id,
+        created_at, updated_at, start_date, external_uid, external_source,
+        external_account_id, points, visibility, external_object_url,
+        outbound_dirty, outbound_attempts
+      FROM tasks;
+
+      -- Den AUTOINCREMENT-Hochstand mitnehmen. Ein Rebuild kopiert nur die
+      -- überlebenden Zeilen, also fällt sqlite_sequence auf deren höchste ID
+      -- zurück. Wurde vor dem Upgrade die höchste Aufgabe gelöscht, vergäbe die
+      -- nächste Aufgabe eine schon einmal benutzte ID. Die Tabelle reminders zeigt
+      -- entity_type/entity_id auf Aufgaben, ohne Fremdschlüssel und ohne
+      -- Aufräumen beim Löschen - eine verwaiste Erinnerung fiele damit einer
+      -- fremden neuen Aufgabe zu.
+      CREATE TEMP TABLE _tasks_seq AS
+        SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'tasks'), 0) AS seq;
+
+      DROP TABLE tasks;
+      ALTER TABLE tasks_new RENAME TO tasks;
+
+      -- Auch wenn keine einzige Aufgabe überlebt, greift das: eine Kopie mit
+      -- null Zeilen legt für tasks_new trotzdem einen sqlite_sequence-Eintrag
+      -- an (seq = 0), den das RENAME mitnimmt. Das UPDATE hebt ihn dann an.
+      UPDATE sqlite_sequence
+         SET seq = (SELECT seq FROM _tasks_seq)
+       WHERE name = 'tasks' AND seq < (SELECT seq FROM _tasks_seq);
+
+      DROP TABLE _tasks_seq;
+
+      -- Bestand einsammeln: nicht nur 'Sonstiges', sondern jeden Key, für den es
+      -- keine Kategorie (mehr) gibt. Nach v83 konnten weitere entstehen.
+      UPDATE tasks SET category = 'misc'
+      WHERE category NOT IN (SELECT key FROM task_categories);
+
+      CREATE INDEX IF NOT EXISTS idx_tasks_status     ON tasks(status);
+      CREATE INDEX IF NOT EXISTS idx_tasks_assigned   ON tasks(assigned_to);
+      CREATE INDEX IF NOT EXISTS idx_tasks_parent     ON tasks(parent_task_id);
+      CREATE INDEX IF NOT EXISTS idx_tasks_start_date ON tasks(start_date);
+      CREATE INDEX IF NOT EXISTS idx_tasks_external
+        ON tasks(external_source, external_account_id, external_uid);
+
+      -- Die Suchindex-Trigger hingen an der gedroppten Tabelle. Fehlen sie, läuft
+      -- die Suche still auf einem einfrierenden Index weiter.
+      DROP TRIGGER IF EXISTS trg_search_tasks_ai;
+      DROP TRIGGER IF EXISTS trg_search_tasks_au;
+      DROP TRIGGER IF EXISTS trg_search_tasks_ad;
+
+      CREATE TRIGGER trg_search_tasks_ai AFTER INSERT ON tasks BEGIN
+        INSERT INTO search_index (entity, entity_id, title, body)
+        VALUES ('task', NEW.id, COALESCE(NEW.title, ''), COALESCE(NEW.description, ''));
+      END;
+
+      CREATE TRIGGER trg_search_tasks_au AFTER UPDATE ON tasks BEGIN
+        DELETE FROM search_index WHERE entity = 'task' AND entity_id = OLD.id;
+        INSERT INTO search_index (entity, entity_id, title, body)
+        VALUES ('task', NEW.id, COALESCE(NEW.title, ''), COALESCE(NEW.description, ''));
+      END;
+
+      CREATE TRIGGER trg_search_tasks_ad AFTER DELETE ON tasks BEGIN
+        DELETE FROM search_index WHERE entity = 'task' AND entity_id = OLD.id;
+      END;
+    `,
+  },
+  {
+    version: 115,
+    description: 'Tasks: free-form tags, mirrored from VTODO CATEGORIES (#586)',
+    up: `
+      -- Tags sind das Gegenstück zu VTODO CATEGORIES und bewusst NICHT die
+      -- Kategorie: eine Aufgabe liegt in genau einer Kategorie (einer Schublade),
+      -- trägt aber beliebig viele Tags (Etiketten). CATEGORIES auf category
+      -- abzubilden hieße, alle Werte ab dem zweiten zu verlieren und beim Push
+      -- die Tags zu löschen, die der Server kennt und Yuvomi nie gesehen hat.
+      --
+      -- Freitext statt verwalteter Liste: die Werte kommen von fremden Servern,
+      -- eine Registry würde sich bei jedem Sync mit Fremdwerten füllen und in
+      -- jedem Kategorie-Dropdown auftauchen.
+      -- Die Spalte tag ist die Schreibweise für die Anzeige, tag_key der
+      -- Vergleichsschlüssel (NFC + kleingeschrieben, gebildet in JS). Der
+      -- Schlüssel ist keine Bequemlichkeit: SQLites COLLATE NOCASE faltet nur
+      -- ASCII, "Äpfel" wäre über "äpfel" nicht auffindbar. Der Primärschlüssel
+      -- hängt am Schlüssel, damit dieselbe Aufgabe ein Etikett nicht in zwei
+      -- Schreibweisen tragen kann.
+      CREATE TABLE IF NOT EXISTS task_tags (
+        task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        tag     TEXT    NOT NULL,
+        tag_key TEXT    NOT NULL,
+        PRIMARY KEY (task_id, tag_key)
+      );
+
+      -- Für den ?tag=-Filter und die Vorschlagsliste.
+      CREATE INDEX IF NOT EXISTS idx_task_tags_key ON task_tags(tag_key);
+    `,
+  },
+  {
+    version: 116,
+    description: 'Shopping items: tags mirrored from VTODO CATEGORIES (#586)',
+    up: `
+      -- Einkaufsposten spiegeln dieselbe VTODO-Eigenschaft wie Aufgaben: eine
+      -- CalDAV-Erinnerungsliste kann auf beide Module zeigen (#617), und bis
+      -- hierher fielen die CATEGORIES eines Einkaufspostens stillschweigend weg.
+      --
+      -- Bewusst NICHT auf shopping_items.category abgebildet: die Kategorie ist
+      -- hier der Gang im Laden, eine verwaltete Liste mit Icon und Sortierung.
+      -- Fremdwerte hineinzuspülen hieße, diese Liste bei jedem Sync wachsen zu
+      -- lassen - derselbe Fehler, den v115 für Aufgaben vermeidet.
+      CREATE TABLE IF NOT EXISTS shopping_item_tags (
+        item_id INTEGER NOT NULL REFERENCES shopping_items(id) ON DELETE CASCADE,
+        tag     TEXT    NOT NULL,
+        tag_key TEXT    NOT NULL,
+        PRIMARY KEY (item_id, tag_key)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_shopping_item_tags_key ON shopping_item_tags(tag_key);
+    `,
+  },
+  {
+    version: 117,
+    description: 'Search index: tags belong to the searchable text (#586)',
+    up: `
+      -- Ein Tag ist Freitext und damit Inhalt. Die Aufgabenliste filtert danach,
+      -- die globale Suche fand ihn bisher nicht - dasselbe Wort führte je nach
+      -- Eingabefeld zu einem Treffer oder zu keinem.
+      --
+      -- Die Tags liegen in eigenen Tabellen, die bestehenden Trigger hängen aber
+      -- an tasks bzw. shopping_items und sehen nur die Zeile. Es braucht deshalb
+      -- beides: erweiterte Trigger auf der Hauptzeile UND eigene Trigger auf den
+      -- Tag-Tabellen, sonst bliebe eine reine Tag-Änderung unindiziert.
+      --
+      -- Alle Neuaufnahmen laufen als INSERT ... SELECT über die Haupttabelle.
+      -- Das ist kein Stil, sondern der Schutz gegen das Löschen: beim Entfernen
+      -- einer Aufgabe räumt CASCADE die Tag-Zeilen ab und feuert den
+      -- Tag-Trigger. Ein VALUES-INSERT legte dann eine Karteileiche für eine
+      -- Aufgabe an, die es nicht mehr gibt; das SELECT findet nichts und fügt
+      -- folgerichtig nichts ein.
+
+      DROP TRIGGER IF EXISTS trg_search_tasks_ai;
+      DROP TRIGGER IF EXISTS trg_search_tasks_au;
+      DROP TRIGGER IF EXISTS trg_search_tasks_ad;
+      DROP TRIGGER IF EXISTS trg_search_items_ai;
+      DROP TRIGGER IF EXISTS trg_search_items_au;
+      DROP TRIGGER IF EXISTS trg_search_items_ad;
+
+      CREATE TRIGGER trg_search_tasks_ai AFTER INSERT ON tasks BEGIN
+        INSERT INTO search_index (entity, entity_id, title, body)
+        SELECT 'task', t.id, COALESCE(t.title, ''),
+               TRIM(COALESCE(t.description, '') || ' ' ||
+                    COALESCE((SELECT group_concat(tag, ' ') FROM task_tags WHERE task_id = t.id), ''))
+        FROM tasks t WHERE t.id = NEW.id;
+      END;
+
+      CREATE TRIGGER trg_search_tasks_au AFTER UPDATE ON tasks BEGIN
+        DELETE FROM search_index WHERE entity = 'task' AND entity_id = OLD.id;
+        INSERT INTO search_index (entity, entity_id, title, body)
+        SELECT 'task', t.id, COALESCE(t.title, ''),
+               TRIM(COALESCE(t.description, '') || ' ' ||
+                    COALESCE((SELECT group_concat(tag, ' ') FROM task_tags WHERE task_id = t.id), ''))
+        FROM tasks t WHERE t.id = NEW.id;
+      END;
+
+      CREATE TRIGGER trg_search_tasks_ad AFTER DELETE ON tasks BEGIN
+        DELETE FROM search_index WHERE entity = 'task' AND entity_id = OLD.id;
+      END;
+
+      CREATE TRIGGER trg_search_task_tags_ai AFTER INSERT ON task_tags BEGIN
+        DELETE FROM search_index WHERE entity = 'task' AND entity_id = NEW.task_id;
+        INSERT INTO search_index (entity, entity_id, title, body)
+        SELECT 'task', t.id, COALESCE(t.title, ''),
+               TRIM(COALESCE(t.description, '') || ' ' ||
+                    COALESCE((SELECT group_concat(tag, ' ') FROM task_tags WHERE task_id = t.id), ''))
+        FROM tasks t WHERE t.id = NEW.task_id;
+      END;
+
+      CREATE TRIGGER trg_search_task_tags_ad AFTER DELETE ON task_tags BEGIN
+        DELETE FROM search_index WHERE entity = 'task' AND entity_id = OLD.task_id;
+        INSERT INTO search_index (entity, entity_id, title, body)
+        SELECT 'task', t.id, COALESCE(t.title, ''),
+               TRIM(COALESCE(t.description, '') || ' ' ||
+                    COALESCE((SELECT group_concat(tag, ' ') FROM task_tags WHERE task_id = t.id), ''))
+        FROM tasks t WHERE t.id = OLD.task_id;
+      END;
+
+      CREATE TRIGGER trg_search_items_ai AFTER INSERT ON shopping_items BEGIN
+        INSERT INTO search_index (entity, entity_id, title, body)
+        SELECT 'item', i.id, COALESCE(i.name, ''),
+               TRIM(COALESCE(i.notes, '') || ' ' ||
+                    COALESCE((SELECT group_concat(tag, ' ') FROM shopping_item_tags WHERE item_id = i.id), ''))
+        FROM shopping_items i WHERE i.id = NEW.id;
+      END;
+
+      CREATE TRIGGER trg_search_items_au AFTER UPDATE ON shopping_items BEGIN
+        DELETE FROM search_index WHERE entity = 'item' AND entity_id = OLD.id;
+        INSERT INTO search_index (entity, entity_id, title, body)
+        SELECT 'item', i.id, COALESCE(i.name, ''),
+               TRIM(COALESCE(i.notes, '') || ' ' ||
+                    COALESCE((SELECT group_concat(tag, ' ') FROM shopping_item_tags WHERE item_id = i.id), ''))
+        FROM shopping_items i WHERE i.id = NEW.id;
+      END;
+
+      CREATE TRIGGER trg_search_items_ad AFTER DELETE ON shopping_items BEGIN
+        DELETE FROM search_index WHERE entity = 'item' AND entity_id = OLD.id;
+      END;
+
+      CREATE TRIGGER trg_search_item_tags_ai AFTER INSERT ON shopping_item_tags BEGIN
+        DELETE FROM search_index WHERE entity = 'item' AND entity_id = NEW.item_id;
+        INSERT INTO search_index (entity, entity_id, title, body)
+        SELECT 'item', i.id, COALESCE(i.name, ''),
+               TRIM(COALESCE(i.notes, '') || ' ' ||
+                    COALESCE((SELECT group_concat(tag, ' ') FROM shopping_item_tags WHERE item_id = i.id), ''))
+        FROM shopping_items i WHERE i.id = NEW.item_id;
+      END;
+
+      CREATE TRIGGER trg_search_item_tags_ad AFTER DELETE ON shopping_item_tags BEGIN
+        DELETE FROM search_index WHERE entity = 'item' AND entity_id = OLD.item_id;
+        INSERT INTO search_index (entity, entity_id, title, body)
+        SELECT 'item', i.id, COALESCE(i.name, ''),
+               TRIM(COALESCE(i.notes, '') || ' ' ||
+                    COALESCE((SELECT group_concat(tag, ' ') FROM shopping_item_tags WHERE item_id = i.id), ''))
+        FROM shopping_items i WHERE i.id = OLD.item_id;
+      END;
+
+      -- Bestand neu einlesen: die Tags der bereits gespiegelten Zeilen stehen
+      -- sonst erst nach der nächsten Bearbeitung im Index.
+      DELETE FROM search_index WHERE entity IN ('task', 'item');
+      INSERT INTO search_index (entity, entity_id, title, body)
+        SELECT 'task', id, COALESCE(title, ''),
+               TRIM(COALESCE(description, '') || ' ' ||
+                    COALESCE((SELECT group_concat(tag, ' ') FROM task_tags WHERE task_id = tasks.id), ''))
+        FROM tasks;
+      INSERT INTO search_index (entity, entity_id, title, body)
+        SELECT 'item', id, COALESCE(name, ''),
+               TRIM(COALESCE(notes, '') || ' ' ||
+                    COALESCE((SELECT group_concat(tag, ' ') FROM shopping_item_tags WHERE item_id = shopping_items.id), ''))
+        FROM shopping_items;
+    `,
+  },
+  {
+    version: 118,
+    description: 'Mealie integration: mealie_accounts table + recipe mirror columns',
+    up: `
+      CREATE TABLE IF NOT EXISTS mealie_accounts (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        name        TEXT    NOT NULL,
+        base_url    TEXT    NOT NULL,
+        api_token   TEXT    NOT NULL,
+        enabled     INTEGER NOT NULL DEFAULT 1,
+        created_by  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        updated_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        last_sync   TEXT,
+        last_error  TEXT,
+        -- Eine Rezepttabelle je Mealie-Server: die UNIQUE-Bedingung verhindert,
+        -- dass derselbe Server zweimal angelegt wird und alle Rezepte doppelt
+        -- gespiegelt ankommen.
+        UNIQUE(base_url)
+      );
+
+      CREATE TRIGGER IF NOT EXISTS trg_mealie_accounts_updated_at
+        AFTER UPDATE ON mealie_accounts FOR EACH ROW
+        BEGIN UPDATE mealie_accounts SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = OLD.id; END;
+
+      -- mealie_account_id NULL = eigenes Rezept; gesetzt = Spiegel dieses Kontos.
+      ALTER TABLE recipes ADD COLUMN mealie_account_id INTEGER
+        REFERENCES mealie_accounts(id) ON DELETE CASCADE;
+      -- Mealies eigener Slug/Id, Schlüssel für den Upsert bei jedem Sync-Lauf.
+      ALTER TABLE recipes ADD COLUMN mealie_recipe_id TEXT;
+      -- Mealies updatedAt: unveränderte Rezepte überspringt der Sync damit.
+      ALTER TABLE recipes ADD COLUMN mealie_updated_at TEXT;
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_recipes_mealie_unique
+        ON recipes(mealie_account_id, mealie_recipe_id) WHERE mealie_account_id IS NOT NULL;
+    `,
+  },
+  {
+    version: 119,
+    description: 'Mealie integration: separate public link URL from the server-reachable sync URL',
+    up: `
+      -- base_url muss vom Server aus erreichbar sein (oft ein Docker-internes
+      -- Compose-Hostname) und ist damit für den Browser des Nutzers meist tot.
+      -- external_url trägt die von außen erreichbare Adresse für die Deep-Links.
+      ALTER TABLE mealie_accounts ADD COLUMN external_url TEXT;
+    `,
+  },
+  {
+    version: 120,
+    description: 'Mealie integration: store recipe slug and image flag for link rebuild and thumbnails',
+    up: `
+      -- Slug persistieren: recipe_url wird bei jedem Sync neu daraus gebaut, ohne
+      -- erneuten Abruf. Sonst erreichte eine geänderte external_url nur Rezepte,
+      -- die sich in Mealie selbst wieder ändern.
+      ALTER TABLE recipes ADD COLUMN mealie_slug TEXT;
+      ALTER TABLE recipes ADD COLUMN mealie_has_image INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
+  {
+    version: 121,
+    description: 'Invite links: admins invite members instead of setting their password',
+    up: `
+      -- Bauplan wie password_resets: nur der Hash liegt in der DB, der Klartext-
+      -- Token verlässt den Server genau einmal. Anders als beim Reset wird der
+      -- Datensatz beim Einlösen NICHT gelöscht, sondern markiert: das hält die
+      -- Spur "wer hat wen eingeladen" und trägt den Zustand fürs Admin-UI.
+      CREATE TABLE IF NOT EXISTS invites (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        token_hash       TEXT    NOT NULL,
+        email            TEXT,
+        username         TEXT,
+        display_name     TEXT,
+        role             TEXT    NOT NULL DEFAULT 'member'
+                                 CHECK(role IN ('admin', 'member')),
+        -- kein CHECK: FAMILY_ROLES wächst, eine append-only-Migration darf das
+        -- nicht einfrieren. Validierung passiert in der Route.
+        family_role      TEXT    NOT NULL DEFAULT 'other',
+        created_by       INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        expires_at       INTEGER NOT NULL,
+        accepted_at      TEXT,
+        accepted_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        revoked_at       TEXT,
+        created_at       TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_invites_hash ON invites(token_hash);
+      CREATE INDEX IF NOT EXISTS idx_invites_open ON invites(expires_at)
+        WHERE accepted_at IS NULL AND revoked_at IS NULL;
+    `,
+  },
+  {
+    version: 122,
+    description: 'Tasks: link a recurring follow-up instance to the completion that created it (#650)',
+    up: `
+      -- Ohne diese Spur ist das Abhaken einer Serie nicht umkehrbar: die beim
+      -- Erledigen erzeugte Folgeinstanz war von einer regulaeren Aufgabe nicht
+      -- zu unterscheiden, blieb beim Zuruecknehmen stehen und stand dann neben
+      -- der wieder geoeffneten Aufgabe (#650). parent_task_id kann das nicht
+      -- tragen, das bedeutet "Unteraufgabe".
+      ALTER TABLE tasks ADD COLUMN recurrence_origin_id INTEGER
+        REFERENCES tasks(id) ON DELETE SET NULL;
+
+      CREATE INDEX IF NOT EXISTS idx_tasks_recurrence_origin
+        ON tasks(recurrence_origin_id) WHERE recurrence_origin_id IS NOT NULL;
+    `,
+  },
+  {
+    version: 123,
+    description: 'CalDAV: detach mirrored tasks and shopping items from deleted accounts (#617)',
+    up: `
+      -- tasks.external_account_id und shopping_items.external_account_id sind
+      -- bloße INTEGER-Spalten (v45): löscht jemand ein CalDAV-Konto, nimmt
+      -- CASCADE nur mit, was dem Konto selbst gehört - Kalender- und
+      -- Listenauswahl und die offenen VTODO-Löschungen. Die gespiegelten
+      -- Zeilen bleiben stehen, mit einer Kennung, die auf nichts mehr zeigt.
+      --
+      -- Das war nicht nur unsauber, sondern eine Sackgasse: beim Löschen so
+      -- einer Zeile merkt queueTodoDeletion() sie in
+      -- caldav_todo_pending_deletions vor - und DIE Tabelle hat den
+      -- Fremdschlüssel sehr wohl. Der INSERT scheiterte, der Eintrag ließ sich
+      -- lokal gar nicht mehr löschen, während die entfernte Kopie ohne Konto
+      -- ohnehin unerreichbar ist.
+      --
+      -- Der Fremdschlüssel lässt sich in SQLite nicht nachträglich an eine
+      -- bestehende Spalte hängen; das hieße beide Tabellen samt Indizes,
+      -- Suchtriggern und den auf sie zeigenden Tabellen neu bauen. Diese
+      -- Migration räumt darum den Bestand, und caldavSync.deleteAccount
+      -- entkoppelt künftig selbst, bevor das Konto verschwindet.
+      --
+      -- Entkoppelt heißt lokal, nicht halb-extern: ohne Konto gibt es keine
+      -- Liste, in die etwas zurückginge, keinen Inbound, der die Zeile noch
+      -- anfasst, und keine UID, die noch etwas bedeutet. Was bleibt, ist eine
+      -- gewöhnliche Aufgabe bzw. ein gewöhnlicher Einkaufsposten.
+      UPDATE tasks
+         SET external_source     = 'local',
+             external_uid        = NULL,
+             external_account_id = NULL,
+             external_object_url = NULL,
+             outbound_dirty      = 0,
+             outbound_attempts   = 0
+       WHERE external_account_id IS NOT NULL
+         AND external_account_id NOT IN (SELECT id FROM caldav_accounts);
+
+      UPDATE shopping_items
+         SET external_source     = 'local',
+             external_uid        = NULL,
+             external_account_id = NULL,
+             external_object_url = NULL,
+             outbound_dirty      = 0,
+             outbound_attempts   = 0
+       WHERE external_account_id IS NOT NULL
+         AND external_account_id NOT IN (SELECT id FROM caldav_accounts);
+    `,
+  },
+  {
+    version: 124,
+    description: 'Split guests stay confined when their group is deleted (group_id ON DELETE SET NULL)',
+    up: `
+      -- Rechteausweitung: split_expense_guest_users traegt zwei Aussagen in
+      -- einer Zeile - DASS ein Konto beschraenkt ist (die Existenz der Zeile,
+      -- die server/index.js abfragt) und WORAUF (group_id). Das CASCADE aus
+      -- v40 hat beim Loeschen der Gruppe die ganze Zeile mitgenommen und damit
+      -- auch die erste Aussage geloescht. Der zugehoerige users-Eintrag blieb
+      -- unveraendert bestehen: aus einem Gast wurde ein haushaltsweit
+      -- berechtigtes Konto, das die uebrige API erreicht. Eine Gruppe ohne
+      -- Ausgaben und Ausgleiche laesst sich loeschen (409-Guard in
+      -- routes/split-expenses.js), der Weg dorthin stand also jedem
+      -- Gruppen-Owner offen.
+      --
+      -- SET NULL loescht nur noch die Zuordnung. Der Gast bleibt ein Gast und
+      -- sieht nichts mehr - die Routen behandeln group_id IS NULL als "keine
+      -- Gruppe", nicht als "keine Beschraenkung".
+      --
+      -- SQLite kann eine FK-Aktion nicht per ALTER aendern, daher der Rebuild.
+      -- Keine Tabelle referenziert split_expense_guest_users, das DROP zieht
+      -- also nichts mit sich; foreignKeysOff ist dafuer nicht noetig.
+      CREATE TABLE split_expense_guest_users_new (
+        user_id    INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        group_id   INTEGER REFERENCES expense_groups(id) ON DELETE SET NULL,
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+      );
+
+      INSERT INTO split_expense_guest_users_new (user_id, group_id, created_by, created_at)
+        SELECT user_id, group_id, created_by, created_at FROM split_expense_guest_users;
+
+      DROP TABLE split_expense_guest_users;
+      ALTER TABLE split_expense_guest_users_new RENAME TO split_expense_guest_users;
+
+      -- Der Index hing an der gedroppten Tabelle und muss neu angelegt werden.
+      CREATE INDEX IF NOT EXISTS idx_split_guest_group ON split_expense_guest_users(group_id);
+    `,
+  },
+  {
+    version: 125,
+    description: 'CalDAV: remember that a reminder-list discovery ran, even when it found nothing (#617)',
+    up: `
+      -- Die Aufgabenseite sucht beim ersten Oeffnen selbst nach Listen, statt
+      -- einen leeren Zustand zu zeigen. "Zum ersten Mal" liess sich bisher nur
+      -- daran ablesen, dass caldav_reminder_selection fuer das Konto leer ist -
+      -- fuer einen Server ohne VTODO-Sammlungen bleibt sie das aber fuer immer,
+      -- und jeder Aufruf der Seite haette erneut den Server befragt.
+      --
+      -- Der Zeitstempel trennt die beiden Faelle: NULL heisst "nie gesucht",
+      -- gesetzt heisst "gesucht, Ergebnis gilt". Bestandskonten starten auf NULL
+      -- und suchen damit genau einmal.
+      ALTER TABLE caldav_accounts ADD COLUMN reminders_discovered_at TEXT;
+    `,
+  },
+  {
+    version: 126,
+    description: 'Budget loans: lending direction (lent vs. borrowed) and an optional account for the installments (#638)',
+    up: `
+      -- Das Darlehensmodul wurde fuer verliehenes Geld gebaut: die Rate war immer
+      -- eine Einnahme (positiver Betrag, income-Kategorie). Mit den Zinsfeldern
+      -- aus #569 kam der aufgenommene Kredit dazu, ohne dass die Buchung nachzog -
+      -- eine Hypothekenrate erschien deshalb als Einnahme (#638).
+      --
+      -- 'lent'     = der Haushalt hat verliehen, die Rate kommt herein (Einnahme).
+      -- 'borrowed' = der Haushalt hat aufgenommen, die Rate geht raus (Ausgabe).
+      -- Default 'lent', damit Bestandsdaten ihr heutiges Verhalten behalten; wer
+      -- ein Darlehen auf 'borrowed' umstellt, bekommt die bereits gebuchten Raten
+      -- von der Route mit umgebucht.
+      ALTER TABLE budget_loans ADD COLUMN direction TEXT NOT NULL DEFAULT 'lent';
+
+      -- Bis hierher hatte der Raten-Eintrag nie eine Kontozuordnung, eine Rate
+      -- konnte also kein Konto belasten. Das Konto haengt am Darlehen und wird auf
+      -- neue Raten vererbt (rueckwirkend umbuchen wuerde historische Kontosalden
+      -- verfaelschen, ein Bankwechsel mitten in der Laufzeit ist legitim).
+      ALTER TABLE budget_loans ADD COLUMN account_id INTEGER REFERENCES budget_accounts(id) ON DELETE SET NULL;
+    `,
+  },
+  {
+    version: 127,
+    description: 'Tasks: repeat from the completion day instead of the due date (#658)',
+    up: `
+      -- Bis hierher rechnete die Serie ausschliesslich vom Faelligkeitsdatum:
+      -- eine woechentliche Aufgabe, faellig Samstag und erst Montag erledigt, war
+      -- wieder am Samstag faellig - also fuenf Tage spaeter, nicht sieben. Fuer
+      -- Termine ist das richtig (der Muellabfuhrtag verschiebt sich nicht, weil
+      -- man die Tonne spaeter rausstellt), fuer Pflegeintervalle ist es falsch
+      -- (der Filter haelt ab dem Wechsel, nicht ab dem geplanten Wechsel).
+      --
+      -- Beides ist legitim, also entscheidet es die Aufgabe selbst. Default 0:
+      -- Bestandsserien behalten ihre faelligkeitsverankerte Rechnung.
+      ALTER TABLE tasks ADD COLUMN recurrence_from_completion INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
+  {
+    version: 128,
+    description: 'Budget: recurrence as unit + count, weekly included, skips keyed by day (#636)',
+    up: `
+      -- Das Intervall war eine Liste aus drei Rhythmen (monthly/half_year/yearly).
+      -- Alle zwei Wochen, alle drei Monate, alle zwei Jahre: nicht abbildbar,
+      -- obwohl genau solche Vertraege der Alltag sind (#636). Es wird deshalb zu
+      -- Einheit + Anzahl.
+      ALTER TABLE budget_entries ADD COLUMN recurrence_interval_count INTEGER NOT NULL DEFAULT 1;
+
+      -- 'half_year' faellt als eigener Schluessel weg: es IST monatlich x 6. Zwei
+      -- Schreibweisen fuer denselben Rhythmus haetten sonst dauerhaft
+      -- nebeneinander gestanden, und jede Auswertung muesste beide kennen.
+      -- Verlustfrei: derselbe Abstand, dieselbe Glaettung.
+      UPDATE budget_entries
+         SET recurrence_interval = 'monthly', recurrence_interval_count = 6
+       WHERE recurrence_interval = 'half_year';
+
+      -- Eine geloeschte Instanz wurde als uebersprungener MONAT vermerkt. Das war
+      -- richtig, solange eine Serie hoechstens ein Vorkommen pro Monat hatte -
+      -- bei einer Wochenserie haette das Loeschen eines Dienstags die drei
+      -- uebrigen Wochen gleich mit unterdrueckt. Der Vermerk haengt jetzt am
+      -- Faelligkeitstag, wie das Vorkommen selbst.
+      CREATE TABLE budget_recurrence_skipped_new (
+        parent_id INTEGER NOT NULL REFERENCES budget_entries(id) ON DELETE CASCADE,
+        date      TEXT    NOT NULL,
+        PRIMARY KEY (parent_id, date)
+      );
+
+      -- Bestand umrechnen: der Tag ergibt sich aus dem Starttag der Serie, am
+      -- Monatsende gekappt - dieselbe Regel, nach der die Instanz entstanden waere.
+      INSERT OR IGNORE INTO budget_recurrence_skipped_new (parent_id, date)
+      SELECT s.parent_id,
+             s.month || '-' || substr('0' || MIN(
+               CAST(strftime('%d', p.date) AS INTEGER),
+               CAST(strftime('%d', date(s.month || '-01', '+1 month', '-1 day')) AS INTEGER)
+             ), -2)
+        FROM budget_recurrence_skipped s
+        JOIN budget_entries p ON p.id = s.parent_id;
+
+      DROP TABLE budget_recurrence_skipped;
+      ALTER TABLE budget_recurrence_skipped_new RENAME TO budget_recurrence_skipped;
+    `,
+  },
+  {
+    version: 129,
+    description: 'Budget: recurring series can book only after confirmation (#637)',
+    up: `
+      -- Nicht jeder Dienst bucht am selben Tag und auf den Cent genau ab. Eine
+      -- Serie kann deshalb verlangen, dass jede erzeugte Buchung erst bestaetigt
+      -- wird - mit der Moeglichkeit, Betrag und Datum dabei zu korrigieren (#637).
+      ALTER TABLE budget_entries ADD COLUMN recurrence_confirm INTEGER NOT NULL DEFAULT 0;
+
+      -- 1 = erwartet, noch nicht gebucht. Solche Zeilen sind sichtbar, zaehlen
+      -- aber in keiner Summe mit: genau die Diskrepanz zum Kontoauszug, die den
+      -- Wunsch ausgeloest hat, entstuende sonst weiter.
+      --
+      -- Default 0 und die Zustimmung je Serie sind zusammen die Ruecksicht auf
+      -- den Bestand: ohne beides fielen bestehende Serien beim Update aus den
+      -- Summen, und jeder Haushalt saehe ueber Nacht andere Zahlen.
+      ALTER TABLE budget_entries ADD COLUMN is_pending INTEGER NOT NULL DEFAULT 0;
+
+      CREATE INDEX IF NOT EXISTS idx_budget_pending
+        ON budget_entries(is_pending) WHERE is_pending = 1;
+    `,
+  },
+  {
+    version: 130,
+    description: 'health: caregivers may record for a dependent member (#584)',
+    up: `
+      -- Fieber messen und Medikamente geben tut im Alltag ein Elternteil, nicht
+      -- das Kind selbst. Bis hierher war das unmoeglich: jedes INSERT im
+      -- Gesundheitsmodul setzte user_id hart auf den angemeldeten Nutzer, also
+      -- konnte jede Person ausschliesslich fuer sich selbst eintragen (#584).
+      --
+      -- Die Beziehung ist gerichtet und explizit: subject_id ist die betreute
+      -- Person, caregiver_id die eintragende. Sie wird NICHT aus family_role
+      -- abgeleitet ("dad/mom duerfen fuer alle child"), obwohl die Rollen es
+      -- hergaeben. Eine solche Automatik haette bestehenden Installationen beim
+      -- Update stillschweigend Mitleser fuer die privaten Gesundheitsdaten jeder
+      -- Person mit der Rolle 'child' gegeben - auch fuer den 17-Jaehrigen, der
+      -- die Rolle nur traegt, weil sie am besten passte. Wer fuer wen eintragen
+      -- darf, entscheidet ein Admin pro Person; ohne Eintrag aendert sich nichts.
+      --
+      -- Das Recht umfasst Lesen UND Schreiben der Daten der betreuten Person,
+      -- auch der als 'private' markierten. Nur schreiben zu duerfen waere
+      -- unbrauchbar: der eingetragene Fieberwert verschwaende fuer die
+      -- eintragende Person im selben Moment aus der Ansicht.
+      CREATE TABLE IF NOT EXISTS health_care_grants (
+        subject_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        caregiver_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        PRIMARY KEY (subject_id, caregiver_id),
+        -- Niemand ist sein eigener Betreuer: der Eigentuemer darf ohnehin alles,
+        -- und eine solche Zeile waere eine zweite Wahrheit ueber dasselbe Recht.
+        CHECK (subject_id <> caregiver_id)
+      );
+
+      -- Die haeufigste Abfrage ist "fuer wen darf ich eintragen?" (Sicht des
+      -- Betreuers); der Primaerschluessel deckt nur die Gegenrichtung ab.
+      CREATE INDEX IF NOT EXISTS idx_health_care_grants_caregiver
+        ON health_care_grants(caregiver_id);
+    `,
+  },
+  {
+    version: 131,
+    description: 'Budget: issuing bank and credit limit on credit-card accounts (#541)',
+    up: `
+      -- Nur die beiden Felder, die für sich stehen: die Bank als Beschriftung, das
+      -- Limit als Bezugsgröße für den verfügbaren Rahmen. Abrechnungs- und
+      -- Fälligkeitstag kommen mit der Abrechnungslogik, weil erst die festlegt,
+      -- welchen Zeitraum ein solcher Tag begrenzt.
+      ALTER TABLE budget_accounts ADD COLUMN credit_bank TEXT;
+      ALTER TABLE budget_accounts ADD COLUMN credit_limit REAL;
+    `,
+  },
+  {
+    version: 132,
+    description: 'Tasks: archive as its own axis instead of a status value (#688)',
+    up: `
+      -- Das Archiv lag bisher IM Statusfeld. Wer eine erledigte Aufgabe ablegte,
+      -- überschrieb damit ihr 'done' - die Aufgabe kam als unerledigt zurück, und
+      -- syncTaskRewards stornierte im selben Zug die Punkte-Gutschrift (#688).
+      -- Ablegen und Erledigen sind zwei Aussagen; sie brauchen zwei Felder.
+      ALTER TABLE tasks ADD COLUMN archived_at TEXT;
+
+      -- Bestandsdaten: der frühere Status ist nicht mehr rekonstruierbar. 'done'
+      -- ist die einzige belastbare Annahme - archiviert wird, was durch ist (so
+      -- beschreibt es auch docs/SPEC.md), und das Archiv blendet die Zeile ohnehin
+      -- aus. Ein Zurückholen zeigt sie dann als erledigt statt als offen, was der
+      -- gemeldeten Erwartung entspricht. Punkte werden bewusst NICHT nachgebucht:
+      -- reward_ledger hat für diese Aufgaben keine offene Buchung, und ein
+      -- nachträglicher Geldsegen aus einer Migration wäre die schlechtere Überraschung.
+      UPDATE tasks
+         SET archived_at = COALESCE(updated_at, created_at, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+             status      = 'done'
+       WHERE status = 'archived';
+
+      CREATE INDEX IF NOT EXISTS idx_tasks_archived ON tasks(archived_at);
+    `,
+  },
+  {
+    version: 133,
+    description: 'Shopping: manual item order within a category (#678)',
+    up: `
+      -- Die Artikelreihenfolge war bisher die Eingabereihenfolge: die Liste
+      -- sortierte nach Kategorie, dann created_at. Wer seine Liste nach dem
+      -- Ladenlayout ordnen will, konnte bisher nur die KATEGORIEN umsortieren
+      -- (shopping_categories.sort_order) - innerhalb einer Kategorie gab es
+      -- keinen Griff. Diese Spalte ist dieser Griff.
+      ALTER TABLE shopping_items ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;
+
+      -- Bestand durchnummerieren, damit die heute sichtbare Reihenfolge exakt
+      -- erhalten bleibt. Ab 1, weil 0 dem Trigger unten als Marke "noch nicht
+      -- eingeordnet" dient.
+      UPDATE shopping_items SET sort_order = (
+        SELECT COUNT(*) + 1 FROM shopping_items AS prev
+         WHERE prev.list_id  = shopping_items.list_id
+           AND prev.category = shopping_items.category
+           AND (prev.created_at < shopping_items.created_at
+                OR (prev.created_at = shopping_items.created_at AND prev.id < shopping_items.id))
+      );
+
+      -- Neue Artikel ans Ende ihrer Kategorie. Bewusst als Trigger und nicht in
+      -- den Insert-Aufrufen: es gibt NEUN Einfügewege (shopping, meals, recipes,
+      -- housekeeping, mcp/tools, caldav-reminders-sync). Als Regel an der Tabelle
+      -- gilt sie auch für den zehnten, der sie sonst vergessen hätte; ein Artikel
+      -- mit sort_order 0 wäre sonst still nach oben gesprungen.
+      CREATE TRIGGER IF NOT EXISTS trg_shopping_items_sort_order
+        AFTER INSERT ON shopping_items FOR EACH ROW WHEN NEW.sort_order = 0
+        BEGIN
+          UPDATE shopping_items SET sort_order = COALESCE((
+            SELECT MAX(sort_order) FROM shopping_items
+             WHERE list_id = NEW.list_id AND category = NEW.category AND id != NEW.id
+          ), 0) + 1 WHERE id = NEW.id;
+        END;
+
+      CREATE INDEX IF NOT EXISTS idx_shopping_items_sort
+        ON shopping_items(list_id, category, sort_order);
+    `,
+  },
 ];
 
 /**

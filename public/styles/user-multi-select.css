@@ -92,8 +92,8 @@
 }
 
 .user-ms__option:has(.user-ms__checkbox:focus-visible) {
-  outline: 2px solid var(--active-module-accent, var(--module-accent, var(--color-accent)));
-  outline-offset: 2px;
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
 }
 
 /* Checkbox visuell entfernen, aber fokussierbar/zugänglich lassen. */

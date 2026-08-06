@@ -13,6 +13,19 @@
   <meta name="theme-color" content="#fafaf8" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#1a1a18" media="(prefers-color-scheme: dark)">
   <link rel="canonical" href="https://yuvomi.cloud/datenschutz.html">
+  <meta name="color-scheme" content="light dark">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Yuvomi">
+  <meta property="og:locale" content="de_DE">
+  <meta property="og:title" content="Datenschutzerklärung - Yuvomi">
+  <meta property="og:description" content="Datenschutzerklärung für die Website yuvomi.cloud. Betrifft nicht eure selbstgehostete Instanz.">
+  <meta property="og:url" content="https://yuvomi.cloud/datenschutz.html">
+  <meta property="og:image" content="https://yuvomi.cloud/og-image.png">
+  <meta property="og:image:alt" content="Yuvomi - der selbstgehostete Familienplaner">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Datenschutzerklärung - Yuvomi">
+  <meta name="twitter:description" content="Datenschutzerklärung für die Website yuvomi.cloud. Betrifft nicht eure selbstgehostete Instanz.">
+  <meta name="twitter:image" content="https://yuvomi.cloud/twitter-image.png">
   <link rel="icon" type="image/svg+xml" href="logo.svg">
 
   <style>
@@ -110,6 +123,7 @@
     .nav-logo {
       display: inline-flex;
       align-items: center;
+      min-height: 44px;
       gap: 10px;
       font-weight: 700;
       font-size: 18px;
@@ -208,10 +222,16 @@
     table { border-collapse: collapse; width: 100%; margin: 8px 0 16px; font-size: 14px; }
     th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; vertical-align: top; }
     th { background: var(--bg-alt); font-weight: 600; color: var(--text-2); }
-    /* Wide tables scroll inside their own box on phones instead of forcing page overflow. */
+    /* Wide tables scroll inside their own box on phones instead of forcing page
+       overflow. The box does the scrolling, not the table: `display: block` on a
+       <table> strips its table role in the accessibility tree, so the phone
+       layout used to hand screen-reader users four unrelated cell runs. */
+    .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
     @media (max-width: 600px) {
-      table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; }
+      .table-scroll table { white-space: nowrap; }
     }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+      overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 
     .small { font-size: 13px; color: var(--text-3); }
 
@@ -239,11 +259,60 @@
     main h2 { scroll-margin-top: 24px; }
     .toc { margin: 28px 0 10px; padding: 20px 22px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg); }
     .toc-title { font-size: 0.72rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-3); margin: 0 0 12px; }
-    .toc-list { margin: 0; padding-left: 1.5em; display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 5px 24px; }
+    .toc-list { margin: 0; padding-left: 1.5em; display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 0 24px; }
     .toc-list li { margin: 0; }
-    .toc-list a { color: var(--text-2); font-size: 0.9rem; line-height: 1.5; text-decoration: none; }
+    /* 44px targets. These are a list of links, not links inside a sentence, so
+       the inline exception to SC 2.5.8 does not cover them - they measured 18px.
+       The row gap goes to 0 because the padding now does that work. */
+    .toc-list a { color: var(--text-2); font-size: 0.9rem; line-height: 1.5; text-decoration: none;
+      display: inline-flex; align-items: center; min-height: 44px; padding: 2px 0; }
     .toc-list a:hover { color: var(--accent); text-decoration: underline; }
     @media (max-width: 560px) { .toc-list { grid-template-columns: 1fr; } }
+  
+    /* These two pages relied on the UA default focus ring; match the other pages. */
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+
+    /* Skip link: index and install put 26 focusable nodes between the top of the
+       page and the content, so keyboard users need a way past the nav. */
+    .skip-link { position: absolute; left: -9999px; top: 0; z-index: 200; }
+    .skip-link:focus { left: 8px; top: 8px; padding: 12px 18px; display: inline-flex; align-items: center; min-height: 44px;
+      background: var(--surface); color: var(--text-1);
+      border: 1px solid var(--border); border-radius: var(--r-md); box-shadow: var(--shadow-md); font-weight: 600; }
+  
+    /* 14 dense legal sections with a table of contents at the very top and no way
+       back to it on a phone. Appears only once you are past the first screen. */
+    .to-top { position: fixed; right: 16px; bottom: 16px; z-index: 90;
+      display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 16px;
+      background: var(--surface); color: var(--text-1); border: 1px solid var(--border);
+      border-radius: var(--r-full); box-shadow: var(--shadow-md); font-size: 0.85rem; font-weight: 600;
+      opacity: 0; visibility: hidden; transform: translateY(8px); transition: opacity .2s, transform .2s, visibility .2s; }
+    .to-top.show { opacity: 1; visibility: visible; transform: none; }
+    .to-top:hover { text-decoration: none; border-color: var(--border-strong); }
+    .to-top svg { width: 15px; height: 15px; }
+  
+    /* These two pages had no reduced-motion guard at all. */
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+      }
+      .to-top { transition: none; }
+    }
+
+    /* Print. A privacy notice is the page on this site most likely to end up on
+       paper or in a PDF, and it printed with the floating "Nach oben" pill over
+       the text and every external reference as bare underlined words. */
+    @media print {
+      html { scroll-behavior: auto; }
+      body { background: #fff; color: #000; }
+      .skip-link, .to-top, .back-link { display: none !important; }
+      header.top, .info-block, .toc { background: transparent; }
+      .info-block, .toc, table, tr { break-inside: avoid; }
+      h2 { break-after: avoid; }
+      a[href^="http"]::after { content: " (" attr(href) ")"; font-size: 0.85em; word-break: break-all; }
+    }
   </style>
   <script>
     /* Honor the theme the visitor picked on the main pages (no toggle here). */
@@ -256,6 +325,7 @@
   </script>
 </head>
 <body>
+<a class="skip-link" href="#main-content">Zum Inhalt springen</a>
 
 <header class="top">
   <div class="wrap">
@@ -277,7 +347,7 @@
   </div>
 </header>
 
-<main>
+<main id="main-content" tabindex="-1">
   <div class="wrap">
 
     <h1>Datenschutzerklärung</h1>
@@ -395,7 +465,9 @@
       Damit Ihre Anzeige-Präferenzen über Seitenaufrufe hinweg erhalten bleiben, speichert die Website
       folgende Werte im <em>localStorage</em> Ihres Browsers:
     </p>
+    <div class="table-scroll" role="region" tabindex="0" aria-labelledby="ds-5-caption">
     <table>
+      <caption id="ds-5-caption" class="sr-only">Im lokalen Browser-Speicher abgelegte Werte mit Inhalt, Zweck und Speicherdauer</caption>
       <thead>
         <tr>
           <th>Schlüssel</th>
@@ -419,6 +491,7 @@
         </tr>
       </tbody>
     </table>
+    </div>
     <p>
       <strong>Rechtsgrundlage:</strong> § 25 Abs. 2 Nr. 2 TDDDG. Die Speicherung dieser Präferenzen ist
       unbedingt erforderlich, damit der von Ihnen ausdrücklich gewünschte Telemediendienst - die
@@ -547,7 +620,7 @@
 <footer class="bot">
   <div class="wrap">
     <span>&copy; <span id="year">2026</span> Ulas Kalayci · Yuvomi</span>
-    <nav>
+    <nav aria-label="Fußzeile">
       <a href="index.html">Startseite</a>
       <a href="impressum.html">Impressum</a>
       <a href="datenschutz.html">Datenschutz</a>
@@ -560,5 +633,13 @@
   document.getElementById('year').textContent = new Date().getFullYear();
 </script>
 
+<a class="to-top" href="#main-content" id="toTop"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>Nach oben</a>
+<script>
+(function(){
+  var b = document.getElementById('toTop'); if (!b) return;
+  function sync(){ b.classList.toggle('show', scrollY > 600); }
+  addEventListener('scroll', sync, { passive: true }); sync();
+})();
+</script>
 </body>
 </html>

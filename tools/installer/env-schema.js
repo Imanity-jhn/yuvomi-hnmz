@@ -25,8 +25,16 @@ export const ENV_SCHEMA = [
   { key: 'APPLE_APP_SPECIFIC_PASSWORD', type: 'user',    label: 'App-Specific Password',    required: false, group: 'apple',   writeToEnv: true },
   { key: 'APPLE_CALDAV_URL',            type: 'default', label: 'CalDAV URL',               default: 'https://caldav.icloud.com', group: 'apple', writeToEnv: true },
   { key: 'SYNC_INTERVAL_MINUTES',       type: 'default', label: 'Sync Interval (minutes)', default: '15',   group: 'sync',    writeToEnv: true },
+  // ICS-Abos: der SSRF-Guard blockt Feeds im eigenen LAN (Home Assistant, *arr).
+  // Ohne diesen Schalter scheitert genau der häufigste Self-Hoster-Fall stumm.
+  { key: 'ICS_SUBSCRIPTION_ALLOW_PRIVATE_NETWORK', type: 'default', label: 'Allow ICS Feeds from Private Network', default: 'false', required: false, group: 'sync', writeToEnv: true },
   { key: 'TZ',                          type: 'default', label: 'Timezone',                 default: 'UTC',  group: 'system',  writeToEnv: true },
   { key: 'OIKOS_HTTP_PORT',             type: 'default', label: 'HTTP Port',                default: '3000', group: 'system',  writeToEnv: true },
+  // Host-Ordner für Datenbank und App-Daten. Der Container-Pfad steht fest, der
+  // Host-Pfad ist auf einem NAS der erste Handgriff (Daten aufs Array, nicht
+  // neben die Compose-Datei). Ohne Eintrag im Installer musste er von Hand in
+  // die .env - und ein zweiter Lauf hätte ihn wieder gelöscht.
+  { key: 'DATA_DIR',                    type: 'default', label: 'Host Data Folder',         default: './data', required: false, group: 'system', writeToEnv: true },
   // Absolute Origin für Passwort-Reset-Links & Push. Vom Installer aus Schema/Host/Port
   // abgeleitet, nie aus dem Request-Host-Header (Reset-Poisoning-Schutz).
   { key: 'BASE_URL',                    type: 'default', label: 'Base URL',                 default: '',     group: 'system',  writeToEnv: true },
@@ -39,6 +47,10 @@ export const ENV_SCHEMA = [
   { key: 'OIDC_CLIENT_ID',              type: 'user',    label: 'OIDC Client ID',           required: false, group: 'oidc',    writeToEnv: true },
   { key: 'OIDC_CLIENT_SECRET',          type: 'user',    label: 'OIDC Client Secret',       required: false, group: 'oidc',    writeToEnv: true },
   { key: 'OIDC_REDIRECT_URI',           type: 'user',    label: 'OIDC Redirect URI',        required: false, group: 'oidc',    writeToEnv: true },
+  // Manche IdPs (u. a. Authentik in Standardkonfiguration) liefern kein
+  // email_verified. Ohne diesen Schalter verweigert die Anmeldung dort die
+  // Kontoverknüpfung, ohne dass irgendwo stünde, warum.
+  { key: 'OIDC_TRUST_EMAIL_WITHOUT_VERIFIED_CLAIM', type: 'default', label: 'Trust Email Without Verified Claim', default: 'false', required: false, group: 'oidc', writeToEnv: true },
   // Automatische Backups.
   { key: 'BACKUP_ENABLED',              type: 'default', label: 'Backups Enabled',          default: 'true', group: 'backup',  writeToEnv: true },
   { key: 'BACKUP_SCHEDULE',             type: 'default', label: 'Backup Schedule (cron)',   default: '0 2 * * *', group: 'backup', writeToEnv: true },
@@ -56,10 +68,19 @@ export const ENV_SCHEMA = [
   // Optionaler lokaler Ordner-Speicher (Host-Mount) für neu hochgeladene Dokumentdateien.
   { key: 'DOCUMENT_STORAGE_LOCAL_ENABLED',   type: 'default', label: 'Local Document Storage Enabled',   default: 'false',      required: false, group: 'documentStorage', writeToEnv: true },
   { key: 'DOCUMENT_STORAGE_LOCAL_PATH',      type: 'default', label: 'Local Document Storage Path',      default: '/documents', required: false, group: 'documentStorage', writeToEnv: true },
+  // Der Host-Ordner, der auf DOCUMENT_STORAGE_LOCAL_PATH gemountet wird. Fehlte
+  // er, blieb das Volume-Ziel auf /documents stehen, während die App woanders
+  // hinschrieb: die Uploads landeten im Container-Overlay und waren beim
+  // nächsten `pull && up -d` weg, die DB-Referenzen blieben.
+  { key: 'DOCUMENT_STORAGE_LOCAL_DIR',       type: 'default', label: 'Local Document Storage Host Folder', default: './documents', required: false, group: 'documentStorage', writeToEnv: true },
   // Optionaler WebDAV-Speicher für neu hochgeladene Dokumentdateien.
   { key: 'DOCUMENT_STORAGE_WEBDAV_ENABLED',  type: 'default', label: 'WebDAV Document Storage Enabled',  default: 'false', required: false, group: 'documentStorage', writeToEnv: true },
   { key: 'DOCUMENT_STORAGE_WEBDAV_URL',      type: 'user',    label: 'WebDAV Document Storage URL',      required: false, group: 'documentStorage', writeToEnv: true },
   { key: 'DOCUMENT_STORAGE_WEBDAV_USERNAME', type: 'user',    label: 'WebDAV Document Storage Username', required: false, group: 'documentStorage', writeToEnv: true },
   { key: 'DOCUMENT_STORAGE_WEBDAV_PASSWORD', type: 'user',    label: 'WebDAV Document Storage Password', required: false, group: 'documentStorage', writeToEnv: true, secret: true },
   { key: 'DOCUMENT_STORAGE_WEBDAV_PATH',     type: 'user',    label: 'WebDAV Document Storage Path',     required: false, group: 'documentStorage', writeToEnv: true },
+  // Das typische WebDAV-Ziel eines Self-Hosters ist ein Nextcloud im LAN, und
+  // genau das blockt der SSRF-Guard. Der Wizard fragte die URL ab und bot
+  // keinen Ausweg an: das Feld scheiterte im häufigsten Fall stumm.
+  { key: 'DOCUMENT_STORAGE_WEBDAV_ALLOW_PRIVATE_NETWORK', type: 'default', label: 'Allow Private Network WebDAV Target', default: 'false', required: false, group: 'documentStorage', writeToEnv: true },
 ];

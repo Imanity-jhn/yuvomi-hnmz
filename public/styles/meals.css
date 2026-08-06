@@ -20,7 +20,7 @@
 .meals-page {
   display: flex;
   flex-direction: column;
-  height: calc(100dvh - var(--safe-area-inset-top) - var(--nav-bottom-height) - var(--safe-area-inset-bottom));
+  height: 100%;
   /* Full-bleed-Root (Issue #577): die Küchen-Tab-Leiste hängt außerhalb dieses
    * Roots im Router-Wrapper und lief schon immer voll durch — der Inhalt
    * darunter saß aber in einer 1280er-Insel und fluchtete nicht mit ihr.
@@ -43,7 +43,7 @@
 
 @media (min-width: 1024px) {
   .meals-page {
-    height: 100dvh;
+    height: 100%;
   }
 }
 
@@ -227,7 +227,6 @@
      * „+ Mahlzeit"-Button des Wochenscrolls verdeckt (Audit F3). Das Token
      * leitet sich aus der FAB-Geometrie ab (tokens.css) und ersetzt die frühere
      * lokale Formel, die --nav-bottom-height nicht mitzählte. */
-    padding-bottom: var(--fab-clearance);
   }
 
   .day-header {
@@ -687,6 +686,22 @@
 
 .shopping-transfer__btn {
   align-self: flex-start;
+}
+
+/* Ohne Einkaufsliste: die geteilte Antwort statt eines toten Auswahlfelds
+   (utils/kitchen-transfer.js, mountMissingShoppingList). Erbt Ausrichtung und
+   Abstand vom Container, damit der Ausweg-Knopf genau dort sitzt, wo sonst
+   „Jetzt übernehmen" steht. */
+.shopping-transfer__missing {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.shopping-transfer__hint {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
 }
 
 .meal-randomize-modal {

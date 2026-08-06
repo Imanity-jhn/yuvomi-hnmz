@@ -8,6 +8,7 @@ import express from 'express';
 import * as db from '../db.js';
 import { createLogger } from '../logger.js';
 import { str, collectErrors, id as validateId, MAX_TEXT, MAX_TITLE } from '../middleware/validate.js';
+import { documentVisibleSql } from '../services/document-access.js';
 import { getAdapter as defaultGetDmsAdapter } from '../services/dms/index.js';
 import { getStatus as getGoogleDriveStatus } from '../services/google-drive-storage.js';
 import {
@@ -63,8 +64,10 @@ const ALLOWED_MIME = new Set([
 // Nur diese Typen werden mit `Content-Disposition: inline` ausgeliefert. Bewusst
 // eine zweite, engere Allowlist (zusätzlich zur Upload-Prüfung): Sie schützt den
 // Preview-Endpunkt davor, jemals skriptfähige Inhalte (HTML, SVG) inline zu
-// rendern — selbst falls ALLOWED_MIME künftig erweitert wird. Spiegelt das
-// Client-seitige VIEWABLE_MIME in public/pages/documents.js.
+// rendern — selbst falls ALLOWED_MIME künftig erweitert wird. Das Client-Pendant
+// steht in public/utils/document-preview.js; die beiden Listen bleiben bewusst
+// unabhängig voneinander gepflegt, damit keine Frontend-Änderung mitentscheidet,
+// was inline ausgeliefert wird.
 const PREVIEWABLE_MIME = new Set([
   'application/pdf',
   'image/png',
@@ -110,14 +113,7 @@ function isAdmin(req) {
 }
 
 function canSeeSql(alias = 'd') {
-  return `(
-    ${alias}.created_by = @userId
-    OR ${alias}.visibility = 'family'
-    OR EXISTS (
-      SELECT 1 FROM family_document_access a
-      WHERE a.document_id = ${alias}.id AND a.user_id = @userId
-    )
-  )`;
+  return documentVisibleSql(alias);
 }
 
 function parseMemberIds(value) {

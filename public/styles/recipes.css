@@ -8,7 +8,7 @@
   --module-accent: var(--module-kitchen);
   display: flex;
   flex-direction: column;
-  height: calc(100dvh - var(--safe-area-inset-top) - var(--nav-bottom-height) - var(--safe-area-inset-bottom));
+  height: 100%;
   /* Full-bleed-Root (Issue #577): Content-Spalte über --page-inline-pad auf den
    * direkten Kindern, fluchtend mit der Küchen-Tab-Leiste darüber. */
   overflow: hidden;
@@ -16,7 +16,7 @@
 
 @media (min-width: 1024px) {
   .recipes-page {
-    height: 100dvh;
+    height: 100%;
   }
 }
 
@@ -34,6 +34,12 @@
   padding-inline: var(--page-inline-pad);
   padding-block-start: var(--space-4);
 }
+
+/* Der Stretch-und-Clip-Fix für lange, ungruppierte .kitchen-rows-Listen sitzt
+ * jetzt in kitchen-row.css selbst (align-self: start) - er galt hier zuerst
+ * nur für Rezepte, betrifft aber jede Küchenliste, deren Filter sie auf eine
+ * einzige flache Gruppe reduziert (z. B. Vorrat unter "fast leer"). Siehe
+ * dortigen Kommentar für die Messung. */
 
 /* --------------------------------------------------------
  * Rezeptzeile
@@ -60,9 +66,81 @@
   text-align: start;
 }
 
+/* `flex-basis: 0` statt der ererbten `auto` (kitchen-row.css): mit `auto`
+ * zieht der Browser für die Zeilenumbruch-Entscheidung die VOLLE, unumbrochene
+ * Textbreite als hypothetische Größe heran - bei einem langen Rezeptnamen
+ * passte die nicht neben das Vorschaubild, und statt NUR den Text intern
+ * umzubrechen, wanderte der GESAMTE Name in eine eigene Zeile (gemessen: „Alpha
+ * One Ingredient" blieb neben dem Bild, „Delta Twenty One Ingredients Recipe"
+ * fiel komplett darunter - zwei verschiedene Zeilenzahlen für dieselbe
+ * Zeilen-Vorlage, je nach Titellänge). Mit `flex-basis: 0` startet der Name bei
+ * null, „passt" also immer neben dem Bild, wächst danach in den Rest, und der
+ * Text bricht dort ganz normal per `overflow-wrap: anywhere` intern um. */
+.recipe-row__toggle .kitchen-row__name {
+  flex-basis: 0;
+}
+
 /* Zutatenzahl und Chevron bleiben beim Namen, statt an die Zeilenkante zu
  * wandern: sie beschriften, was das Aufklappen zeigt. */
 .recipe-row__toggle .kitchen-row__meta {
+  flex-shrink: 0;
+  /* Ohne feste Mindestbreite verschiebt sich alles, was VOR ihr im Flex-Fluss
+   * steht (das Mealie-Badge), von Zeile zu Zeile: der Name wächst per
+   * flex-grow auf genau so viel Platz, wie die Geschwister danach übrig
+   * lassen, und „1 ingredient" gegen „21 ingredients" ändert diesen Rest um
+   * mehrere Zeichenbreiten. `text-align: end` + `tabular-nums` statt eines
+   * ausgeschriebenen Zeichen-Zählers: die Zahl bleibt bündig zum Chevron,
+   * unabhängig von Ziffernanzahl oder Singular/Plural-Wortlänge der
+   * jeweiligen Sprache. */
+  min-width: 15ch;
+  text-align: end;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Unsichtbarer Slot um das Badge (siehe recipes.js): in der Breitfassung
+ * nimmt er per `display: contents` gar nicht am Flex-Layout teil, die Pille
+ * selbst ist dann das Flex-Item wie zuvor. Die Container-Query unten
+ * reaktiviert ihn als echtes Flex-Item mit eigener Zeile. */
+.recipe-row__badge-slot {
+  display: contents;
+}
+
+/* Vorschaubild aus Mealie (server/routes/recipes.js proxied die Bytes, siehe
+ * dortigen Kommentar - kein direkter <img src> auf Mealie möglich, der
+ * Bearer-Token darf den Client nie erreichen). Feste Größe statt intrinsischer:
+ * Mealie liefert Originalseitenverhältnisse, eine Zeile darf davon nicht
+ * abhängen. Der Slot ist ein <span>, das entweder ein <img> (echtes Bild) oder
+ * direkt den Platzhalter-Zustand trägt - Mealie liefert selbst KEIN
+ * generisches Platzhalterbild über die Medien-Route (die 404t bei fehlendem
+ * Bild, mealie-recipes/mealie#4804), das Icon kommt deshalb von uns. */
+.recipe-row__thumb {
+  width: var(--target-md);
+  height: var(--target-md);
+  flex-shrink: 0;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.recipe-row__thumb-img {
+  width: 100%;
+  height: 100%;
+  /* `object-fit: cover` schneidet statt zu verzerren. */
+  object-fit: cover;
+}
+
+.recipe-row__thumb--placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: var(--color-surface-2);
+  color: var(--color-text-tertiary);
+}
+
+/* Das Badge sitzt in derselben Flex-Zeile wie Name und Zutatenzahl - ohne
+ * eigenes flex-shrink würde ein langer Rezeptname es auf seine Buchstaben
+ * zusammendrücken, bevor der Name selbst umbricht (er trägt overflow-wrap
+ * bewusst, siehe .kitchen-row__name). */
+.recipe-row__toggle .source-badge {
   flex-shrink: 0;
 }
 
@@ -115,9 +193,19 @@
     flex-wrap: wrap;
   }
 
-  .recipe-row__toggle .kitchen-row__meta {
+  /* Eigene Zeile fürs Mealie-Badge, direkt unter dem Namen und über der
+   * Zutatenzahl - konsistent auf jeder Zeile, unabhängig von Titellänge oder
+   * Zutatenzahl-Wortbreite (siehe .recipe-row__badge-slot in recipes.js: der
+   * SLOT trägt die volle Breite, nicht die Pille selbst). */
+  .recipe-row__badge-slot {
+    display: flex;
     flex: 1 0 100%;
     order: 1;
+  }
+
+  .recipe-row__toggle .kitchen-row__meta {
+    flex: 1 0 100%;
+    order: 2;
   }
 }
 
@@ -189,9 +277,31 @@
  * .page-toolbar--in-group (layout.css); die frühere eigene .recipes-toolbar
  * entfällt samt Padding-Regeln, die der Kopf schon mitbringt. */
 
+/* Nur Positionierung, wie .pantry-search: das Bedienelement liegt in
+ * page-search.css. Der frühere Nachbau hier trug kein `min-width: 0` und konnte
+ * damit nicht unter die Mindestbreite des Inputs schrumpfen; der geteilte
+ * Baustein bringt es mit. */
 .recipes-search {
   flex: 1;
   max-width: 420px;
+}
+
+/* Herkunfts-Filter (Alle/Nativ/Mealie): Trigger im __actions-Slot des Kopfs
+ * (nur sichtbar, wenn Mirror-Rezepte existieren, siehe renderSourceFilter()),
+ * Panel über das geteilte .popover-menu (utils/popover-menu.js) - dieselbe
+ * Behandlung wie „Lagerorte verwalten" im Vorrat, statt einer eigenen
+ * Chip-Reihe, die auf schmalen Bildschirmen für drei Optionen eine ganze
+ * Kopf-Zeile kostete (fast immer nur "Alle" aktiv). */
+.recipes-source-filter-menu {
+  /* Schmaler als die Standardbreite (200px): drei kurze Wörter brauchen sie nicht. */
+  min-width: 160px;
+}
+
+/* Häkchen nur bei der aktiven Option - `visibility: hidden` statt
+ * `display: none`, damit die Textspalte für alle drei Einträge an derselben
+ * Stelle beginnt, unabhängig davon, welcher gerade ausgewählt ist. */
+.popover-menu__item-check--hidden {
+  visibility: hidden;
 }
 
 /* ENTFERNT mit dem Kartenraster:

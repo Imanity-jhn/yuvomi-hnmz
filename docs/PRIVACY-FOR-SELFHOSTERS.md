@@ -1,6 +1,6 @@
 # Datenschutz-Hinweise für Selfhoster (Yuvomi)
 
-> **Stand: 14.07.2026** - Diese Hinweise sind eine technisch orientierte
+> **Stand: 05.08.2026** - Diese Hinweise sind eine technisch orientierte
 > Hilfestellung für Betreiber. Prüfe die Aktualität von Angemessenheitsbeschlüssen
 > und DPF-Listungen selbst (siehe Abschnitt „Quellen").
 
@@ -30,6 +30,12 @@
    - 2.7 [Google-Drive-Dokumentspeicher](#27-google-drive-dokumentspeicher)
    - 2.8 [Abonnement-Integrationen](#28-abonnement-integrationen)
    - 2.9 [MCP-Endpoint (KI-/Agent-Zugriff)](#29-mcp-endpoint-ki-agent-zugriff)
+   - 2.10 [Web Push & Benachrichtigungs-Kanäle](#210-web-push--benachrichtigungs-kanäle)
+   - 2.11 [E-Mail-Versand (SMTP)](#211-e-mail-versand-smtp)
+   - 2.12 [Versions-/Changelog-Abruf (GitHub)](#212-versions-changelog-abruf-github)
+   - 2.13 [Mealie-Rezept-Sync](#213-mealie-rezept-sync)
+   - 2.14 [DMS-Anbindung (Paperless-ngx / Papra)](#214-dms-anbindung-paperless-ngx--papra)
+   - 2.15 [ICS-Kalender-Abos](#215-ics-kalender-abos)
 3. [Logging und Speicherbegrenzung](#3-logging-und-speicherbegrenzung-art-5-abs-1-lit-e-dsgvo)
 4. [Haushaltsausnahme](#4-haushaltsausnahme-art-2-abs-2-lit-c-dsgvo)
 5. [Verarbeitungsverzeichnis-Vorlage (Art. 30 DSGVO)](#5-verarbeitungsverzeichnis-vorlage-art-30-dsgvo)
@@ -77,12 +83,20 @@ Betreiber daraus resultieren.
 | Open-Meteo | `server/routes/weather.js` | ja (Default) | CH — Angemessenheitsbeschluss | nein (siehe 2.1) |
 | OpenWeatherMap | `server/routes/weather.js` | nur wenn `OPENWEATHER_API_KEY` gesetzt | UK — Angemessenheitsbeschluss | empfohlen (siehe 2.2) |
 | CalDAV/CardDAV-Server | `server/services/caldav-sync.js`, `server/services/cardav-sync.js` | nur wenn Nutzer einen Sync konfiguriert | abhängig vom Provider | ja, bei kommerziellen Anbietern (siehe 2.3) |
+| Google-Kalender-Sync (REST-API) | `server/services/google-calendar.js` | nur nach OAuth-Verbindung | USA/Google; DPF-Status prüfen | ja (siehe 2.3) |
 | OIDC-Provider | `server/auth.js`, `server/services/oidc.js` | nur wenn konfiguriert | abhängig vom Provider | meistens ja (siehe 2.4) |
 | WebDAV-Backup | `server/services/backup-webdav.js` | nur wenn konfiguriert | abhängig vom Provider | ja, bei kommerziellen Anbietern (siehe 2.5) |
 | WebDAV-Dokumentspeicher | `server/services/document-storage.js` | nur wenn konfiguriert | abhängig vom Provider | ja, bei kommerziellen Anbietern (siehe 2.6) |
 | Google-Drive-Dokumentspeicher | `server/services/google-drive-storage.js` | nur nach OAuth-Verbindung und expliziter Auswahl | USA/Google; DPF-Status prüfen | ja (siehe 2.7) |
 | Abonnement-Integrationen | `server/services/subscription-*` | nur wenn konfiguriert/ausgelöst | abhängig von Fixer, Benachrichtigungs- oder KI-Provider | abhängig vom Provider (siehe 2.8) |
-| MCP-Endpoint (KI-/Agent-Zugriff) | `server/index.js:338`, `server/mcp/*` | nur wenn Nutzer ein API-Token erstellt und einen MCP-Client anbindet | **lokaler Client: nein** · Cloud-Client: abhängig vom Anbieter | lokaler Client: nein · Cloud-Client: ggf. gegenüber dem Anbieter (siehe 2.9) |
+| MCP-Endpoint (KI-/Agent-Zugriff) | `server/index.js` (Mount `/mcp`), `server/mcp/*` | nur wenn Nutzer ein API-Token erstellt und einen MCP-Client anbindet | **lokaler Client: nein** · Cloud-Client: abhängig vom Anbieter | lokaler Client: nein · Cloud-Client: ggf. gegenüber dem Anbieter (siehe 2.9) |
+| Web Push | `server/services/push.js` | nur wenn ein Nutzer Push auf einem Gerät aktiviert | Push-Dienst des jeweiligen Browsers (Google/Apple/Mozilla) — USA möglich; Inhalte verschlüsselt | nein (siehe 2.10) |
+| Benachrichtigungs-Kanäle (Gotify/ntfy …) | `server/services/notification-channels.js`, `server/services/notification-providers/` | nur wenn ein Admin einen Kanal konfiguriert | abhängig vom Ziel (meist selbst gehostet) | i. d. R. nein (siehe 2.10) |
+| E-Mail-Versand (SMTP) | `server/services/email.js` | nur wenn SMTP konfiguriert | abhängig vom Provider | ja, bei kommerziellen Anbietern (siehe 2.11) |
+| Versions-/Changelog-Abruf | `server/routes/changelog.js` | ja — beim Öffnen des Änderungsverlaufs bzw. der Versionsprüfung (30-Min-Server-Cache) | USA — GitHub/Microsoft, DPF | nein (siehe 2.12) |
+| Mealie-Rezept-Sync | `server/services/mealie/` | nur wenn eine Mealie-Instanz verbunden ist | i. d. R. selbst gehostet | i. d. R. nein (siehe 2.13) |
+| DMS-Anbindung (Paperless-ngx/Papra) | `server/services/dms/` | nur wenn ein DMS verbunden ist | i. d. R. selbst gehostet | i. d. R. nein (siehe 2.14) |
+| ICS-Kalender-Abos | `server/services/ics-subscription.js` | nur wenn ein Nutzer einen Feed abonniert | abhängig vom Feed-Anbieter | nein (siehe 2.15) |
 
 ### 2.1 Open-Meteo (Wetter-Standard)
 
@@ -141,6 +155,14 @@ Betreiber daraus resultieren.
   | Google Workspace | USA (Google LLC) | DPF-zertifiziert; AVV + DPF-Status prüfen |
   | Mailbox-Provider Drittland (sonstige) | Einzelfall | individuelle TIA |
 - **AVV:** ja, bei kommerziellen Anbietern.
+- **Google-Kalender-Sync läuft nicht über CalDAV:** Yuvomi synchronisiert Google
+  über die **Google-Calendar-REST-API** mit eigenem OAuth-Flow
+  (`server/services/google-calendar.js`, Endpunkt `www.googleapis.com`).
+  Übertragen werden Termindaten der freigegebenen Kalender in beide Richtungen
+  sowie OAuth-Zugriffs-/Refresh-Token; die Token liegen in der Datenbank und
+  sind nur bei aktiviertem `DB_ENCRYPTION_KEY` verschlüsselt. Drittland- und
+  AVV-Bewertung wie in der Tabelle oben für Google (USA/DPF-Status prüfen,
+  Google-AVV/DPA abschließen) — analog zu Abschnitt 2.7.
 - **Empfehlung:** Trage die konkret eingerichteten Sync-Endpoints in dein
   Verarbeitungsverzeichnis (Abschnitt 5) ein — Yuvomi kennt sie nicht zentral,
   jeder Nutzer kann andere konfigurieren.
@@ -261,11 +283,13 @@ Konfiguration so, dass du auf einen EU-Provider umstellen könntest.
 - **Benachrichtigungsdienste:** Je nach Agent werden Name, Betrag, Währung und
   Fälligkeitsdatum eines Abonnements an SMTP, Discord, Telegram, Pushover,
   Gotify, Serverchan, Ntfy oder einen Webhook übertragen. Für private/LAN-Ziele
-  ist eine ausdrückliche Deployment-Freigabe erforderlich.
+  ist eine ausdrückliche Deployment-Freigabe erforderlich. Dieselben Kanäle
+  transportieren auch andere Erinnerungen der App — einschließlich
+  Medikamenten-Erinnerungen, siehe Abschnitt 2.10.
 
 ### 2.9 MCP-Endpoint (KI-/Agent-Zugriff)
 
-- **Code-Stellen:** `server/index.js:338` (Mount `/mcp`, nur mit
+- **Code-Stellen:** `server/index.js` (Mount `/mcp`, nur mit
   Authentifizierung), `server/mcp/server.js`, `server/mcp/protocol.js`,
   `server/mcp/tools.js`; Token-Verwaltung `server/scopes.js`.
 - **Was ist das?** Yuvomi stellt einen **MCP-Endpoint** bereit, über den ein
@@ -296,6 +320,106 @@ Konfiguration so, dass du auf einen EU-Provider umstellen könntest.
      Datenkategorien in die Datenschutzerklärung aufnehmen; AVV/DPF-Status prüfen.
   4. **Token widerrufbar halten:** Tokens einzeln widerrufbar; dokumentiere,
      welcher Client welches Token nutzt.
+
+### 2.10 Web Push & Benachrichtigungs-Kanäle
+
+- **Code-Stellen:** `server/services/push.js`, `server/services/push-scheduler.js`,
+  `server/services/medication-scheduler.js`; Haushalts-Kanäle:
+  `server/services/notification-channels.js`, `server/services/notification-providers/`.
+- **Web Push — aktiv nur, wenn:** ein Nutzer Push auf einem Gerät einschaltet
+  (Opt-in je Gerät unter Einstellungen → Persönlich → Benachrichtigungen).
+  Der **Server** sendet die Nachricht dann an den Push-Dienst des jeweiligen
+  Browsers — Google (FCM), Apple oder Mozilla, Verarbeitung in den USA möglich.
+- **Was der Push-Dienst sieht:** Die Nachrichten-**Inhalte** (z. B. der
+  Medikamentenname einer Erinnerung) sind nach dem Web-Push-Standard
+  (RFC 8291) **Ende-zu-Ende zwischen Server und Browser verschlüsselt** — der
+  Push-Dienst kann sie nicht lesen. Er sieht aber **Metadaten**: den
+  Geräte-Endpoint, Zeitpunkt, Häufigkeit und Größe der Nachrichten, die IP
+  deines Yuvomi-Servers und die `VAPID_SUBJECT`-Kontaktangabe.
+- **Besonderheit Gesundheitsdaten:** Erinnerungen des Medikamenten-Moduls
+  tragen den Medikamentennamen im (verschlüsselten) Inhalt. Aus den Metadaten
+  allein ist das nicht erkennbar; wer auch das Metadaten-Muster vermeiden
+  will, lässt Push für Gesundheits-Erinnerungen aus und nutzt die In-App-Anzeige.
+- **Haushalts-Kanäle (Gotify, ntfy …):** Diese senden Erinnerungs-Inhalte —
+  auch Medikamenten-Erinnerungen — im **Klartext** an den konfigurierten
+  Dienst. Bei einem selbst gehosteten Gotify/ntfy im eigenen Netz bleibt alles
+  bei dir; bei einem fremdbetriebenen Ziel (z. B. ntfy.sh) ist der Betreiber
+  Empfänger von Gesundheitsdaten (Art. 9 DSGVO) — dann nur mit ausdrücklicher
+  Einwilligung aller Betroffenen und AVV, besser: selbst hosten.
+- **AVV:** Für die Browser-Push-Dienste nicht abschließbar (Infrastruktur des
+  Browser-Herstellers); Transparenzhinweis in der Datenschutzerklärung genügt
+  nach h. M., da Inhalte verschlüsselt sind. Für fremdbetriebene
+  Gotify-/ntfy-Ziele: ja.
+
+### 2.11 E-Mail-Versand (SMTP)
+
+- **Code-Stelle:** `server/services/email.js`; genutzt vom
+  Passwort-Reset-Flow, von Einladungs-Mails, vom SMTP-Verbindungstest und von
+  Abonnement-Benachrichtigungen (Abschnitt 2.8).
+- **Aktiv nur, wenn:** SMTP konfiguriert ist (Env oder
+  Einstellungen → Administration → E-Mail).
+- **Was wird übertragen:** Empfänger-Adresse, Betreff/Inhalt der jeweiligen
+  Mail (Reset-Link mit Token, Einladungs-Link, Abo-Erinnerung), Absenderdaten
+  und die IP deines Yuvomi-Servers — an den von dir konfigurierten SMTP-Server.
+- **Drittland/AVV:** abhängig vom Mail-Provider — für EU-Provider
+  (Mailbox.org, Posteo, eigener mailcow) unkritisch; bei US-Providern gelten
+  dieselben DPF-/SCC-Überlegungen wie in Abschnitt 2.4. AVV bei kommerziellen
+  Anbietern abschließen; Mail-Metadaten fallen zusätzlich beim Provider an.
+
+### 2.12 Versions-/Changelog-Abruf (GitHub)
+
+- **Code-Stelle:** `server/routes/changelog.js` — ein authentifizierter Proxy,
+  der `api.github.com/repos/ulsklyc/yuvomi/releases` abruft.
+- **Standard aktiv:** ja. Der Abruf passiert, wenn ein angemeldeter Nutzer den
+  Änderungsverlauf öffnet bzw. die App nach einer neueren Version sieht
+  (Versions-Hinweis an der Navigation); die Antwort wird serverseitig
+  **30 Minuten gecacht**, sodass GitHub nicht bei jedem Klick kontaktiert wird.
+- **Was wird übertragen:** ausschließlich die IP deines Yuvomi-Servers und der
+  User-Agent `Yuvomi/1.0` — keine Nutzerdaten, keine Instanz-Kennung, keine
+  installierte Version. Anfragen gehen vom Backend aus, nie vom Browser.
+- **Drittland:** GitHub Inc./Microsoft, USA — DPF-zertifiziert (Status prüfen).
+- **AVV:** nein (keine Verarbeitung personenbezogener Nutzerdaten im Auftrag);
+  Transparenzhinweis in der Datenschutzerklärung genügt. Wer den Kanal ganz
+  vermeiden will, blockiert ausgehende Verbindungen zu `api.github.com` — die
+  App funktioniert dann vollständig weiter, nur Änderungsverlauf und
+  Versions-Hinweis bleiben leer.
+
+### 2.13 Mealie-Rezept-Sync
+
+- **Code-Stellen:** `server/services/mealie/`, `server/services/mealie-sync.js`.
+- **Aktiv nur, wenn:** ein Admin eine Mealie-Instanz verbindet
+  (Einstellungen → Synchronisation).
+- **Was wird übertragen:** API-Token, Rezeptdaten (Titel, Zutaten, Bilder-URLs)
+  in beide Richtungen sowie die Server-IP — an die konfigurierte
+  Mealie-Instanz.
+- **Drittland/AVV:** Mealie ist typischerweise selbst gehostet im eigenen
+  Netz — dann kein Drittland, kein AVV. Bei einer fremd betriebenen
+  Mealie-Instanz gelten die üblichen Prüfungen (Standort, AVV).
+
+### 2.14 DMS-Anbindung (Paperless-ngx / Papra)
+
+- **Code-Stellen:** `server/services/dms/` (`paperless.js`, `papra.js`),
+  `server/routes/dms.js`.
+- **Aktiv nur, wenn:** ein Admin ein Dokumenten-Management-System verbindet.
+- **Was wird übertragen:** API-Token, Dokument-Metadaten und -Inhalte im
+  Rahmen der Anbindung sowie die Server-IP — an das konfigurierte DMS.
+  Dokumente können besonders schützenswerte Inhalte tragen.
+- **Drittland/AVV:** Paperless-ngx/Papra sind typischerweise selbst gehostet —
+  dann kein Drittland, kein AVV. Bei gehosteten Angeboten: Standort und AVV
+  prüfen; für sensible Dokumente EU-/Selbsthosting bevorzugen.
+
+### 2.15 ICS-Kalender-Abos
+
+- **Code-Stelle:** `server/services/ics-subscription.js`.
+- **Aktiv nur, wenn:** ein Nutzer einen ICS-Feed abonniert.
+- **Was wird übertragen:** Der Server **ruft** die konfigurierte Feed-URL
+  regelmäßig **ab** (Intervall `SYNC_INTERVAL_MINUTES`). Zum Feed-Betreiber
+  fließen dabei nur die IP deines Yuvomi-Servers und die Feed-URL selbst —
+  die allerdings bei vielen Anbietern ein **privates Zugriffs-Token im Pfad**
+  trägt. Kalenderdaten fließen ausschließlich herein, nie hinaus.
+- **Drittland/AVV:** abhängig vom Feed-Anbieter; für reine Abrufe ohne
+  Personenbezug genügt der Transparenzhinweis. Feed-URLs mit eingebettetem
+  Token wie Zugangsdaten behandeln (sie erlauben jedem den Kalenderabruf).
 
 ---
 
@@ -416,6 +540,7 @@ konkrete Konfiguration ein und ergänze um eigene Verarbeitungen.
 | 6 | Dokumentablage | Gemeinsame Ablage und Kalenderanhänge | Art. 6 Abs. 1 lit. b/f | Nutzer und in Dokumenten genannte Personen | Dokumentdateien, Anhänge, Metadaten | <<lokaler Hoster, WebDAV-Provider oder Google Drive, falls aktiv>> | <<je nach Anbieter; Google ggf. USA>> | bis Löschung durch Nutzer, Provider-Papierkorb prüfen | TLS, eigener Pfad, AVV, Drive-ACL-Grenze, separates Backup |
 | 7 | Sicherheits-/Betriebs-Logs | Missbrauchserkennung, Fehlersuche | Art. 6 Abs. 1 lit. f | Nutzer / Login-Versuchende | IP bei fehlgeschlagenen Logins, Fehler-Stacktraces | nur lokal | nein | **max. 30 Tage** | Rotation, Zugangsbeschränkung |
 | 8 | MCP-/KI-Anbindung (falls genutzt) | Zugriff eines angebundenen KI-/Agent-Clients auf Instanzdaten | Art. 6 Abs. 1 lit. a/f; bei Art.-9-Daten zusätzlich Art. 9 Abs. 2 lit. a | Nutzer und in den Daten genannte Personen | je nach Token-Scope: Aufgaben, Termine, Einkauf, ggf. health/housekeeping | lokaler Client: keiner · Cloud: <<Anbieter>> | lokaler Client: nein · Cloud: <<je nach Anbieter>> | bis Token-Widerruf | Token-Scoping (Least Privilege), TLS; bei Cloud: AVV, DPF/SCCs+TIA |
+| 9 | Benachrichtigungen (Web Push / Kanäle / SMTP, falls genutzt) | Zustellung von Erinnerungen und Hinweisen | Art. 6 Abs. 1 lit. a/b; bei Medikamenten-Erinnerungen Art. 9 Abs. 2 lit. a | Nutzer der Instanz | Erinnerungsinhalte (ggf. Medikamentenname), Geräte-Endpoints, E-Mail-Adressen | Push-Dienst des Browsers (Inhalte verschlüsselt) · <<Gotify/ntfy-Ziel>> · <<SMTP-Provider>> | Push: USA möglich · sonst <<je nach Ziel>> | bis Abbestellung/Geräte-Abmeldung | RFC-8291-Verschlüsselung (Push), TLS, Selbsthosting der Kanäle |
 
 ### 5.3 Auftragsverarbeiter (Art. 28)
 

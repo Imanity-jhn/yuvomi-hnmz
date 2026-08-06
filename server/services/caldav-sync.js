@@ -13,7 +13,9 @@ import { assignDefaultToEvent } from './sync-assignment.js';
 import { pruneDeletedEvents } from './calendar-prune.js';
 import * as outbound from './calendar-outbound.js';
 import { processPendingDeletions, processPendingUpdates, flushAccount } from './caldav-outbound.js';
+import { detachAccountRows } from './caldav-todo-outbound.js';
 import { toICSDatetime, escapeICSText } from '../utils/ics-format.js';
+import { createCalDAVClient, supportsComponent } from '../utils/caldav-client.js';
 
 // Reused functions from apple-calendar.js
 import {
@@ -108,6 +110,17 @@ function getAllAccounts() {
 // Connection Testing
 // --------------------------------------------------------
 
+/**
+ * Nur Collections, die Termine aufnehmen. `fetchCalendars()` liefert jede
+ * Kalender-Collection des Kontos, also auch reine Aufgabenlisten - die landeten
+ * ungefiltert in der Kalenderauswahl und wurden als Speicherziel für Termine
+ * angeboten. Sabre/Nextcloud weist ein VEVENT darin mit 403 ab, Radicale nimmt es
+ * an und verschmutzt damit die Aufgabenliste anderer Clients (#617).
+ */
+function eventCalendars(calendars) {
+  return (calendars || []).filter(cal => supportsComponent(cal, 'VEVENT'));
+}
+
 async function testConnection(caldavUrl, username, password) {
   try {
     const { createDAVClient } = await import('tsdav');
@@ -167,7 +180,7 @@ async function addAccount(name, caldavUrl, username, password) {
 
   // Insert calendar selections (all enabled by default)
   const calendarData = [];
-  for (const cal of calendars) {
+  for (const cal of eventCalendars(calendars)) {
     const calColor = normalizeCalColor(cal.calendarColor) || '#4A90E2';
     const calName = cal.displayName || 'Unnamed Calendar';
 
@@ -179,7 +192,7 @@ async function addAccount(name, caldavUrl, username, password) {
     calendarData.push({ url: cal.url, name: calName, color: calColor, enabled: true });
   }
 
-  log.info(`Added CalDAV account "${name}" with ${calendars.length} calendars.`);
+  log.info(`Added CalDAV account "${name}" with ${calendarData.length} calendars.`);
 
   return { accountId, calendars: calendarData };
 }
@@ -227,7 +240,7 @@ async function updateAccount(accountId, { name, caldavUrl, username, password })
       db.get().prepare('DELETE FROM caldav_calendar_selection WHERE account_id = ?').run(accountId);
 
       // Insert new selections
-      for (const cal of calendars) {
+      for (const cal of eventCalendars(calendars)) {
         const calColor = normalizeCalColor(cal.calendarColor) || '#4A90E2';
         const calName = cal.displayName || 'Unnamed Calendar';
 
@@ -269,12 +282,26 @@ function deleteAccount(accountId) {
     throw new Error(`Account ${accountId} not found.`);
   }
 
-  // CASCADE will delete caldav_calendar_selection entries
-  db.get().prepare('DELETE FROM caldav_accounts WHERE id = ?').run(accountId);
+  // CASCADE räumt nur, was dem Konto selbst gehört: Kalender- und
+  // Listenauswahl und die offenen VTODO-Löschungen. Die gespiegelten Aufgaben
+  // und Einkaufsposten sind Nutzerdaten und bleiben - aber ihre
+  // external_account_id trägt keinen Fremdschlüssel und zeigte danach ins Leere
+  // (#617). Beim nächsten Löschen so einer Zeile scheiterte der Tombstone am
+  // Fremdschlüssel von caldav_todo_pending_deletions: die Aufgabe ließe sich
+  // lokal nicht mehr löschen, während die entfernte Kopie ohne Konto ohnehin
+  // unerreichbar ist. Also entkoppeln, bevor das Konto verschwindet - beides in
+  // einem Zug, damit keine Hälfte allein stehen bleibt.
+  const detached = db.get().transaction(() => {
+    const rows = detachAccountRows(accountId);
+    db.get().prepare('DELETE FROM caldav_accounts WHERE id = ?').run(accountId);
+    return rows;
+  })();
 
   // Events with calendar_ref_id to deleted account remain (orphaned but visible)
 
-  log.info(`Deleted CalDAV account ${accountId} ("${account.name}").`);
+  log.info(
+    `Deleted CalDAV account ${accountId} ("${account.name}"), detached ${detached} mirrored row(s).`
+  );
 
   return { success: true };
 }
@@ -321,7 +348,7 @@ async function getCalendars(accountId, { refresh = false } = {}) {
   db.get().prepare('DELETE FROM caldav_calendar_selection WHERE account_id = ?').run(accountId);
 
   const result = [];
-  for (const cal of calendars) {
+  for (const cal of eventCalendars(calendars)) {
     const calColor = normalizeCalColor(cal.calendarColor) || '#4A90E2';
     const calName = cal.displayName || 'Unnamed Calendar';
 
@@ -377,15 +404,7 @@ function updateCalendarSelection(accountId, calendarUrl, enabled) {
 const YIELD_EVERY = 50;
 
 /** Echter tsdav-Client für einen Account; in Tests durch eine Factory ersetzbar. */
-async function defaultClientFactory(account) {
-  const { createDAVClient } = await import('tsdav');
-  return createDAVClient({
-    serverUrl:          account.caldav_url,
-    credentials:        { username: account.username, password: account.password },
-    authMethod:         'Basic',
-    defaultAccountType: 'caldav',
-  });
-}
+const defaultClientFactory = createCalDAVClient;
 
 async function sync({ createClient } = {}) {
   const accounts = getAllAccounts();
@@ -502,6 +521,22 @@ async function sync({ createClient } = {}) {
 
         if (!serverCal) {
           log.warn(`Calendar ${selCal.calendar_url} not found on server, disabling.`);
+          db.get().prepare(`
+            UPDATE caldav_calendar_selection SET enabled = 0
+            WHERE account_id = ? AND calendar_url = ?
+          `).run(account.id, selCal.calendar_url);
+          continue;
+        }
+
+        // Konten, die vor dem Komponentenfilter angelegt wurden, tragen die
+        // Aufgabenlisten weiter als aktivierte Kalender: das Filtern beim Anlegen
+        // erreicht sie nicht mehr, und bis jemand von Hand aktualisiert bleibt eine
+        // Aufgabenliste ein Ziel für Termine (#617). Der Lauf hat die Komponenten
+        // ohnehin schon geladen, also wird die Auswahl hier nachgezogen. Vor dem
+        // Vermerken in `fetchedCalendars`, damit der Prune die bereits gespiegelten
+        // Termine dieses Kalenders in Ruhe lässt.
+        if (!supportsComponent(serverCal, 'VEVENT')) {
+          log.warn(`Calendar ${selCal.calendar_name} does not accept events, disabling.`);
           db.get().prepare(`
             UPDATE caldav_calendar_selection SET enabled = 0
             WHERE account_id = ? AND calendar_url = ?

@@ -64,3 +64,32 @@ test('buildOpenApiSpec spiegelt buildPaths() vollstaendig', () => {
   assert.ok(spec.tags.length > 0, 'tags fehlen in der Spec');
   assert.ok(Object.keys(spec.components.schemas).length > 0, 'schemas fehlen in der Spec');
 });
+
+test('kein Pfad-Parameter mit Namens-Bedeutung ist als Zahl deklariert', () => {
+  // idParam() setzt hart `type: integer`; fuer Namen und Schluessel gibt es
+  // stringPathParam(). Wird der falsche Helfer genommen, ist die Spec still
+  // falsch: ein Client, der daraus generiert, weigert sich bei
+  // `PUT /tasks/tags/Garten` oder schickt eine Zahl. Aufgefallen ist das beim
+  // Tag-Endpunkt (#586), der das Muster von der Kategorie-Zeile daneben geerbt
+  // hatte - beide waren betroffen, in Tasks wie in Contacts.
+  //
+  // Die Regel greift in der wirksamen Richtung: ein numerischer Parameter heisst
+  // `id` oder endet auf `Id`. Umgekehrt darf ein `id` durchaus ein String sein
+  // (Modul-IDs sind Slugs), deshalb wird nur die Zahl-Seite geprueft.
+  const paths = buildPaths();
+  const offenders = [];
+
+  for (const [path, operations] of Object.entries(paths)) {
+    for (const [method, operation] of Object.entries(operations)) {
+      for (const parameter of operation.parameters ?? []) {
+        if (parameter.in !== 'path') continue;
+        if (parameter.schema?.type !== 'integer') continue;
+        if (/^id$|Id$/.test(parameter.name)) continue;
+        offenders.push(`${method.toUpperCase()} ${path} -> {${parameter.name}}`);
+      }
+    }
+  }
+
+  assert.deepEqual(offenders, [],
+    `Diese Pfad-Parameter tragen einen Namen, sind aber als integer deklariert:\n${offenders.join('\n')}`);
+});

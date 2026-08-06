@@ -367,7 +367,7 @@ test('POST /shopping/:listId/import-pantry: unbekannter Vorratsartikel → skipp
   assert.equal((await call('POST', '/shopping/999999/import-pantry', { items: [] })).status, 404);
 });
 
-// Das Undo des Warenkorbs loescht genau die erzeugten Artikel und nichts sonst.
+// Das Undo des Warenkorbs nimmt genau den Uebertrag zurueck und nichts sonst.
 test('import-pantry: added_ids erlauben ein exaktes Zuruecknehmen', async () => {
   db.prepare('DELETE FROM pantry_items').run();
   const list = await call('POST', '/shopping', { name: 'Undo' });
@@ -384,9 +384,23 @@ test('import-pantry: added_ids erlauben ein exaktes Zuruecknehmen', async () => 
   assert.equal(r.body.data.added_ids.length, 2);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM shopping_items WHERE list_id = ?').get(listId).n, 3);
 
-  for (const id of r.body.data.added_ids) {
-    assert.equal((await call('DELETE', `/shopping/items/${id}`)).status, 200);
-  }
+  const undo = await call('POST', '/shopping/items/undo-transfer', { ids: r.body.data.added_ids });
+  assert.equal(undo.status, 200);
+  assert.equal(undo.body.data.removed, 2);
   const rest = db.prepare('SELECT name FROM shopping_items WHERE list_id = ?').all(listId);
   assert.deepEqual(rest.map((x) => x.name), ['Bleibt drin']);
+});
+
+// Ein Undo, das an einem inzwischen von Hand geloeschten Artikel scheitert, waere
+// die schlechtere Antwort: `removed` sagt, was tatsaechlich zurueckging.
+test('undo-transfer: unbekannte IDs werden uebergangen, leerer Body ist kein Fehler', async () => {
+  const empty = await call('POST', '/shopping/items/undo-transfer', {});
+  assert.equal(empty.status, 200);
+  assert.deepEqual(empty.body.data, { removed: 0 });
+
+  const list = await call('POST', '/shopping', { name: 'Teilweise' });
+  const added = await call('POST', `/shopping/${list.body.data.id}/items`, { name: 'Butter' });
+  const r = await call('POST', '/shopping/items/undo-transfer', { ids: [added.body.data.id, 999999, 'x'] });
+  assert.equal(r.body.data.removed, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM shopping_items WHERE list_id = ?').get(list.body.data.id).n, 0);
 });

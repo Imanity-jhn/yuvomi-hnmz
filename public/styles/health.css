@@ -166,7 +166,7 @@
 
 .health-vitals__range.is-active {
   background: var(--module-accent);
-  color: var(--color-text-on-accent);
+  color: var(--color-ink-on-vivid);
 }
 
 .health-vitals__add {
@@ -1995,11 +1995,45 @@ button.cycle-cal__day:not(:disabled):hover { background: var(--color-surface-2);
   margin-top: var(--space-4);
 }
 
-/* ---- Modal-Auswahlchips (Flow/Symptome) ---- */
+/* ---- Modal-Auswahlchips (Flow/Symptome/Stimmung) ----
+ * Hießen bis #609 .cycle-choice, weil sie nur im Zyklus-Tagebuch vorkamen. Die
+ * Stimmungs-Skala im Vitalwerte-Dialog braucht dieselbe Auswahlreihe; ein
+ * zweiter Chip-Baustein daneben wäre eine Kopie mit anderem Namen. */
 
-.cycle-choices { display: flex; gap: var(--space-2); flex-wrap: wrap; }
+.health-choices { display: flex; gap: var(--space-2); flex-wrap: wrap; }
 
-.cycle-choice {
+/* Die Stimmungs-Skala ist eine Reihe gleich breiter Stufen: die Ordnung von
+ * „sehr schlecht" nach „sehr gut" ist Teil der Information und darf nicht von
+ * der Textlänge der einzelnen Stufen verzerrt werden - daher eine feste
+ * Fünftel-Basis statt Inhaltsbreite. Der Umbruch auf sehr schmalen Geräten
+ * ergibt sich aus der Mindestbreite (Touch-Ziel), nicht aus einem eigenen
+ * Breakpoint: eine private Schwelle hier wäre eine Grenze, an der genau dieses
+ * eine Element anders umbricht als der Rest der App (tokens.css §11c). */
+.health-choices--scale .health-choice {
+  flex: 1 1 calc((100% - 4 * var(--space-2)) / 5);
+  min-width: var(--target-base);
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-1);
+  border-radius: var(--radius-md);
+  text-align: center;
+}
+
+/* Größer als die 15px der Chip-Reihe: das Gesicht ist hier der eigentliche
+ * Inhalt der Stufe, nicht die Verzierung eines Labels. */
+.health-choices--scale .health-choice svg {
+  width: var(--icon-lg);
+  height: var(--icon-lg);
+}
+
+.health-choices--scale .health-choice-label {
+  font-size: var(--text-xs);
+  line-height: 1.2;
+  overflow-wrap: break-word;
+  hyphens: manual;
+}
+
+.health-choice {
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
@@ -2014,9 +2048,9 @@ button.cycle-cal__day:not(:disabled):hover { background: var(--color-surface-2);
   transition: background var(--duration-xs) ease, border-color var(--duration-xs) ease;
 }
 
-.cycle-choice svg { width: 15px; height: 15px; }
+.health-choice svg { width: 15px; height: 15px; }
 
-.cycle-choice[aria-pressed="true"] {
+.health-choice[aria-pressed="true"] {
   border-color: var(--module-accent);
   background: color-mix(in oklab, var(--module-accent) 12%, transparent);
   color: var(--color-text-primary);
@@ -2058,7 +2092,7 @@ button.cycle-cal__day:not(:disabled):hover { background: var(--color-surface-2);
 @media (prefers-reduced-motion: reduce) {
   .cycle-ring__now { animation: none; }
   .cycle-cal__day { transition: none; }
-  .cycle-choice { transition: none; }
+  .health-choice { transition: none; }
 }
 
 /* Messwert-Historie unter dem Vitals-Chart (Audit R2, A2-08): kompakte Zeilen,

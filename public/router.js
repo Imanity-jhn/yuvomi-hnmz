@@ -10,7 +10,6 @@ import { clearApiCache } from '/sw-register.js';
 import { initI18n, getLocale, t, formatDate, formatTime } from '/i18n.js';
 import { esc } from '/utils/html.js';
 import { wireScrollFade } from '/utils/ux.js';
-import { installFabRetract } from '/utils/fab-scroll.js';
 import { init as initReminders, stop as stopReminders } from '/reminders.js';
 import { initPush, stopPush } from '/push.js';
 import { numberLocaleFor } from '/settings/region-presets.js';
@@ -19,6 +18,12 @@ import { getLastHealthRoute, HEALTH_ROUTES } from '/utils/health-tabs.js';
 import { activityType } from '/utils/health-activity.js';
 import { buildHelpRows } from '/utils/help.js';
 import { renderSkeletonList } from '/utils/skeleton.js';
+import { isNewerVersion, displayVersion } from '/utils/version.js';
+import {
+  rememberScrollPosition,
+  scrollPositionFor,
+  forgetScrollPositions,
+} from '/utils/scroll-restore.js';
 import { openModal, confirmModal } from '/components/modal.js';
 import '/components/datepicker.js';
 import { NAV_ICONS } from '/nav-icons.js';
@@ -38,6 +43,7 @@ const ROUTES = [
   { path: '/setup',    page: '/pages/setup.js',    requiresAuth: false, module: null        },
   { path: '/forgot-password', page: '/pages/forgot-password.js', requiresAuth: false, module: null },
   { path: '/reset-password',  page: '/pages/reset-password.js',  requiresAuth: false, module: null },
+  { path: '/join',     page: '/pages/join.js',     requiresAuth: false, module: null        },
   { path: '/',         page: '/pages/dashboard.js', requiresAuth: true, module: 'dashboard' },
   { path: '/tasks',    page: '/pages/tasks.js',     requiresAuth: true, module: 'tasks'     },
   { path: '/shopping', page: '/pages/shopping.js',  requiresAuth: true, module: 'shopping'  },
@@ -84,6 +90,14 @@ const isStandalone = window.matchMedia('(display-mode: standalone)').matches
   || navigator.standalone === true;
 
 /**
+ * System-Farbschema als langlebige MediaQueryList. Bewusst ein Modul-Binding
+ * und kein `window.matchMedia(...).addEventListener(...)` in einem Rutsch: ohne
+ * gehaltene Referenz darf die Engine die Liste einsammeln, und der Listener
+ * verstummt irgendwann still. Genutzt vom Auto-Modus-Nachzug des Modul-Akzents.
+ */
+const darkSchemeQuery = window.matchMedia?.('(prefers-color-scheme: dark)') ?? null;
+
+/**
  * Setzt die theme-color Meta-Tags (Light + Dark Variante).
  * @param {string} lightColor
  * @param {string} [darkColor] - Falls nicht angegeben, wird lightColor für beide gesetzt
@@ -102,6 +116,27 @@ function setThemeColor(lightColor, darkColor) {
 /** Liest eine CSS Custom Property vom :root */
 function getCSSToken(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+/**
+ * Setzt den Modul-Akzent der Route als Inline-Custom-Property auf <html>.
+ *
+ * Der Wert ist die AUFGELÖSTE Farbe, keine `var(--module-*)`-Kette: Dritt-
+ * anbieter-Module liefern einen literalen Hex-Wert, und ein nicht existierendes
+ * `--module-<name>` würde als var()-Kette „invalid at computed-value time"
+ * enden statt in den CSS-Fallback `var(--color-accent)` zu laufen.
+ *
+ * Preis dieser Auflösung: der Inline-Wert ist eine Momentaufnahme des aktuellen
+ * Themes. `--module-tasks` wechselt im Dark-Theme von #15803D auf #4ADE80 - die
+ * Momentaufnahme tut das nicht. Deshalb MUSS jeder Theme-Wechsel diese Funktion
+ * erneut aufrufen (applyTheme + der prefers-color-scheme-Listener für den
+ * Auto-Modus), sonst behält die ganze Shell den Akzent des alten Themes und
+ * Text darauf fiel im Dunkelmodus auf 2.71:1 statt 7.81:1 - unter WCAG AA.
+ */
+function applyModuleAccentForRoute(route) {
+  const accentToken = moduleAccentToken(route?.module);
+  const accent = route?.thirdPartyModule?.accent || (accentToken ? getCSSToken(accentToken) : '');
+  document.documentElement.style.setProperty('--active-module-accent', accent);
 }
 
 /** Setzt theme-color passend zum aktuellen Modul */
@@ -157,9 +192,72 @@ function loadPageStyle(moduleName, routeStyle = null) {
 // --------------------------------------------------------
 const moduleCache = new Map();
 
+// --------------------------------------------------------
+// Veraltete Shell nach SW-Update (#616)
+//
+// Der Browser führt pro Dokument genau eine Modul-Map. Ist ein geteiltes Modul
+// (z. B. /utils/empty-state.js) einmal geladen, wird jeder spätere Import
+// dagegen gebunden - auch der eines Seitenmoduls, das der neue Service Worker
+// frisch vom Netz geholt hat. Nach einem Update im laufenden Tab trifft dann
+// neues Seitenmodul auf alte Abhängigkeit, und ein in der neuen Version
+// hinzugekommener Export fliegt als SyntaxError auf. Die Modul-Map lässt sich
+// nicht leeren; nur ein Reload des Dokuments verwirft sie.
+//
+// Sobald ein Update angekündigt ist, wird deshalb kein Seitenmodul mehr
+// nachgeladen: importPage() löst die Navigation stattdessen in einen Reload
+// auf. Das Promise bleibt bewusst offen, damit renderPage() nicht mit einem
+// Fehlerbildschirm weiterläuft, den der Reload eine Sekunde später wegwirft.
+// --------------------------------------------------------
+let shellStale = false;
+
+// Reload-Schleifen-Bremse: ein durch einen Modulfehler ausgelöster Reload darf
+// sich nicht wiederholen, wenn der Fehler nach dem Reload fortbesteht (echter
+// Bug statt Versions-Mischzustand). Zeitbasiert statt einmalig, damit ein
+// späteres, echtes Update wieder reloaden darf.
+const RELOAD_GUARD_KEY = 'yuvomi-stale-shell-reload';
+const RELOAD_GUARD_MS  = 30000;
+
+function reloadOnce() {
+  try {
+    const last = parseInt(sessionStorage.getItem(RELOAD_GUARD_KEY) || '0', 10);
+    if (Date.now() - last < RELOAD_GUARD_MS) return false;
+    sessionStorage.setItem(RELOAD_GUARD_KEY, String(Date.now()));
+  } catch { /* sessionStorage gesperrt (Private Mode) → Reload trotzdem wagen */ }
+  location.reload();
+  return true;
+}
+
+/**
+ * Erkennt Fehler, die ein Reload heilt: ein gegen eine alte Abhängigkeit
+ * gebundenes Modul (SyntaxError) oder ein Modul, das gar nicht erst geladen
+ * werden konnte (TypeError). Offline ist Letzteres normal und kein Grund für
+ * einen Reload - dann greift die reguläre Fehlerbehandlung.
+ */
+function isStaleModuleError(err) {
+  if (err instanceof SyntaxError) return true;
+  return err instanceof TypeError && navigator.onLine;
+}
+
 async function importPage(pagePath) {
+  // Nur wenn der Reload wirklich angestoßen wurde, bleibt das Promise offen.
+  // Greift die Schleifen-Bremse, wird regulär importiert: ein hängendes
+  // Promise ohne folgenden Reload ließe die Seite dauerhaft im Skelett stehen.
+  if (shellStale && reloadOnce()) {
+    return new Promise(() => {});
+  }
   if (!moduleCache.has(pagePath)) {
-    moduleCache.set(pagePath, await import(pagePath));
+    try {
+      moduleCache.set(pagePath, await import(pagePath));
+    } catch (err) {
+      moduleCache.delete(pagePath);
+      // Zweiter Rettungsanker: das Update kam ohne Vorankündigung durch (der
+      // Service Worker kann den Tab zwischen zwei Fetches übernehmen). Reload
+      // statt Fehlerbildschirm - beim zweiten Mal fällt der Fehler durch.
+      if (isStaleModuleError(err) && reloadOnce()) {
+        return new Promise(() => {});
+      }
+      throw err;
+    }
   }
   return moduleCache.get(pagePath);
 }
@@ -178,6 +276,10 @@ const _prefetchedStyles = new Set();
 
 function prefetchRoute(path) {
   if (!path) return;
+  // Nach angekündigtem Update nichts mehr vorwärmen: ein modulepreload zieht den
+  // kompletten Modulgraph in die Modul-Map und würde neue Seitenmodule gegen die
+  // alten geteilten Module binden, bevor der Reload greift (#616).
+  if (shellStale) return;
   const route = allRoutes().find((r) => r.path === path);
   if (!route) return;
 
@@ -459,6 +561,17 @@ async function navigate(path, userOrPushState = true, pushState = true) {
     const basePath = path.split('?')[0];
     currentPath = basePath;
 
+    // Scrollstand der Seite festhalten, die gerade verlassen wird - er ist die
+    // Antwort auf ein späteres Browser-Zurück. Bewusst vor den Guards: was hier
+    // sichtbar ist, gilt unabhängig davon, ob die Navigation gleich umgeleitet
+    // wird. Der Scrollport ist #main-content selbst (== .app-content).
+    if (previousPath) {
+      rememberScrollPosition(previousPath, document.getElementById('main-content')?.scrollTop ?? 0);
+    }
+    // Vorwärts heißt oben anfangen, Zurück/Vor heißt weitermachen. Details und
+    // die Begründung gegen getDirection() in utils/scroll-restore.js.
+    const scrollTarget = scrollPositionFor(basePath, { restore: !pushState });
+
     // First-Run-Weiche: Solange kein Account existiert und niemand eingeloggt ist,
     // alle Routen außer /setup auf /setup umleiten.
     if (_setupRequired && !currentUser && basePath !== '/setup') {
@@ -591,6 +704,14 @@ async function navigate(path, userOrPushState = true, pushState = true) {
         handled = false;
       }
       if (handled) {
+        // Auch die Soft-Navigation wechselt den Inhalt (Settings-Blatt, Health-Tab)
+        // und muss den Scrollport nachziehen - hier zwangsläufig NACH dem Render,
+        // weil kein Teardown existiert, an den man sich hängen könnte.
+        const main = document.getElementById('main-content');
+        if (main) main.scrollTop = scrollTarget;
+        // Ein Tabwechsel kann einen neuen FAB anlegen (Health-Tabs) - der muss
+        // denselben Weg aus dem Scrollport nehmen wie beim vollen Rendern.
+        adoptPageFab();
         updateNav(topLevelSection(basePath));
         return;
       }
@@ -601,9 +722,7 @@ async function navigate(path, userOrPushState = true, pushState = true) {
     // Akzent. Sonst wechselte der 3px-Streifen der Tab-Leiste und der FAB beim
     // Tabwechsel die Farbe - dieselbe Botschaft wie ein echter Modulwechsel
     // (Critique 2026-07-29). Begründung am Token in tokens.css.
-    const accentToken = moduleAccentToken(route?.module);
-    const accent = route?.thirdPartyModule?.accent || (accentToken ? getCSSToken(accentToken) : '');
-    document.documentElement.style.setProperty('--active-module-accent', accent);
+    applyModuleAccentForRoute(route);
 
     // Optimistisches Chrome-Feedback: aktive Nav-Markierung + Indikator-Pille und
     // Statusbar-Farbe schon VOR dem Modul-Render setzen, sobald die Shell existiert.
@@ -616,7 +735,7 @@ async function navigate(path, userOrPushState = true, pushState = true) {
       updateThemeColorForRoute(route);
     }
 
-    await renderPage(route, previousPath);
+    await renderPage(route, previousPath, scrollTarget);
     // Autoritative Aktualisierung nach dem Render: deckt den Erstlade-Fall ab und
     // markiert ggf. seiten-interne [data-route]-Links (idempotent).
     // Settings-Blätter teilen sich den /settings Nav-Eintrag (aria-current).
@@ -735,6 +854,38 @@ function allRoutes() {
       thirdPartyModule: module,
     }));
   return [...ROUTES, ...moduleRoutes];
+}
+
+/**
+ * Die Route der gerade dargestellten Seite. Nötig für alles, was Chrome-Farben
+ * ausserhalb einer Navigation nachzieht (Theme-Wechsel, Rückkehr aus einem
+ * Overlay) - dort gibt es kein `route`-Objekt aus navigate() mehr.
+ */
+function currentRoute() {
+  return allRoutes().find((r) => r.path === currentPath);
+}
+
+/**
+ * Zieht die Statusbar-Farbe auf das jetzt gültige Theme nach.
+ *
+ * Der Modul-Akzent ist nicht die einzige eingefrorene Momentaufnahme:
+ * `updateThemeColorForRoute` löst `--module-<name>` über denselben `getCSSToken`
+ * auf und schreibt das Ergebnis in beide `<meta name="theme-color">`. Ein
+ * Attribut nimmt an keiner Kaskade teil, also behielt die Statusbar nach
+ * hell↔dunkel die Modulfarbe des alten Themes, während die Shell darunter längst
+ * umgeschaltet hatte - dieselbe Regel wie bei applyModuleAccentForRoute, nur für
+ * die zweite Momentaufnahme.
+ *
+ * Sichtbar nur in der installierten PWA: `setThemeColor` steigt außerhalb des
+ * Standalone-Modus früh aus. Deshalb fiel es neben dem Akzent-Befund nicht auf.
+ */
+function refreshThemeColorForTheme() {
+  // Liegt ein Modal über der Seite, gehört die Statusbar ihm: modal.js dunkelt
+  // sie beim Öffnen ab und stellt sie über restoreThemeColor selbst wieder her.
+  // Ein Nachziehen der Routenfarbe höbe die Abdunklung mitten im offenen Modal
+  // auf - der Fall tritt im Auto-Modus ein, wenn das System selbst umschaltet.
+  if (document.getElementById('shared-modal-overlay')) return;
+  updateThemeColorForRoute(currentRoute());
 }
 
 // Bestätigter Logout, überall aus der Navigation erreichbar (Sidebar-Footer +
@@ -900,8 +1051,9 @@ function buildMoreSheetBody() {
  * Lädt und rendert eine Seite dynamisch.
  * @param {{ path: string, page: string }} route
  * @param {string|null} previousPath - Pfad vor der Navigation (für Richtungsberechnung)
+ * @param {number} scrollTarget - Scrollstand der Zielseite (0 vorwärts, gemerkt bei popstate)
  */
-async function renderPage(route, previousPath = null) {
+async function renderPage(route, previousPath = null, scrollTarget = 0) {
   const app = document.getElementById('app');
   const loading = document.getElementById('app-loading');
 
@@ -935,6 +1087,8 @@ async function renderPage(route, previousPath = null) {
     else if (!document.querySelector('.nav-bottom') && currentUser) {
       renderAppShell(app);
       _navBuiltForUserId = currentUser.id;
+      // Nebenläufig und still: der Hinweis darf das erste Rendern nicht aufhalten.
+      checkForUpdate();
     } else if (currentUser && _navBuiltForUserId !== currentUser.id) {
       // Shell besteht bereits, aber der Nutzer hat gewechselt → Nav mit den
       // Modul-Rechten des aktuellen Nutzers neu aufbauen (#467).
@@ -958,6 +1112,21 @@ async function renderPage(route, previousPath = null) {
     pageWrapper.className = 'page-transition';
     pageWrapper.style.opacity = '0';
     content.replaceChildren(pageWrapper);
+    // Scrollport auf Anfang, solange er leer ist. `content` IST der Scrollport
+    // (#main-content == .app-content) und überlebt die Navigation; ohne diese
+    // Zeile öffnet die Zielseite auf dem Scrollstand der Vorseite.
+    //
+    // HIER, NICHT NACH DEM RENDER: Module scrollen beim Aufbau selbst - die
+    // Tagesansicht des Kalenders zur aktuellen Stunde, der Essensplan zum
+    // heutigen Tag. Ein Reset danach würde genau das wieder einkassieren. Die
+    // Wiederherstellung bei popstate darf und soll das dagegen überschreiben,
+    // sie steht deshalb unten hinter dem await.
+    content.scrollTop = 0;
+    // Der FAB der alten Seite lebt in der Shell und fiele sonst nicht mit ihrem
+    // Inhalt weg - er bliebe über der neuen Seite stehen, bis diese adoptiert.
+    // Hier und nicht eine Zeile höher: der Scroll-Reset gehört unmittelbar an
+    // den Inhaltstausch (Guard in test-mobile-scroll-layout.js).
+    clearPageFab();
     style.cleanup();
 
     // Teardown abgeschlossen: ein evtl. gemerktes Soft-Update-Ziel ist jetzt
@@ -972,6 +1141,11 @@ async function renderPage(route, previousPath = null) {
     // wodurch jedes vor dem Daten-await geseedete Skeleton beim Erstladen nie
     // erschien). Der Rest von render() (Daten + Verdrahtung) wird danach abgewartet.
     const renderPromise = module.render(pageWrapper, { user: currentUser });
+
+    // Schon jetzt umziehen, nicht erst nach den Daten: die meisten Seiten legen
+    // ihren FAB im synchronen Teil an, und er soll gar nicht erst im Scrollport
+    // erscheinen. Der zweite Aufruf unten holt die Nachzügler.
+    adoptPageFab();
 
     // Sichtbar machen und Einblend-Animation starten (Skeleton/Grundgerüst).
     pageWrapper.style.opacity = shouldAnimate ? '' : '1';
@@ -993,12 +1167,17 @@ async function renderPage(route, previousPath = null) {
 
     await renderPromise;
 
+    // Browser-Zurück/-Vor: gemerkten Stand wiederherstellen, jetzt wo der Inhalt
+    // seine volle Höhe hat. Best effort - ist die Seite kürzer als beim Verlassen
+    // (gefilterte Liste, gelöschter Eintrag), klemmt der Browser auf sein Maximum.
+    if (scrollTarget > 0) content.scrollTop = scrollTarget;
+
     // Ab hier kann das Modul Soft-Navigationen bedienen (sofern es update() bietet).
     _renderedModule = module;
     _renderedModuleName = route.module;
 
     // FAB Long Loop: Einstiegsanimation nach FAB_SEEN_MAX Views pro Modul deaktivieren
-    const pageFab = pageWrapper.querySelector('.page-fab');
+    const pageFab = adoptPageFab();
     if (pageFab) {
       // Shortcut-Discoverability (Audit P3): der 'n'-Chord öffnet den FAB — als
       // Tooltip-Titel + aria-keyshortcuts sichtbar bzw. vorlesbar machen.
@@ -1015,14 +1194,6 @@ async function renderPage(route, previousPath = null) {
         localStorage.setItem(fabKey, String(fabCount));
       }
       document.documentElement.classList.toggle('fab-anim-done', fabCount >= FAB_SEEN_MAX);
-
-      // Der FAB fährt beim Abwärtsscrollen weg, damit er nicht über der
-      // Zeilenaktion liegt, nach der der Nutzer gerade sucht (gemessen bis 53.2%
-      // Überdeckung, Critique 2026-07-30). Idempotent und ohne Lebenszyklus: die
-      // Funktion installiert genau einen Document-Listener in der Capture-Phase
-      // und löst den aktuellen FAB erst zum Ereigniszeitpunkt auf. Deshalb hier
-      // aufrufbar, obwohl der FAB pro Seite neu entsteht.
-      installFabRetract();
     }
 
     // Read-only-Modus (#467): Bei „Nur lesen"-Modulen die Anlege-Affordance (FAB)
@@ -1266,6 +1437,13 @@ function renderAppShell(container) {
   main.id = 'main-content';
   main.tabIndex = -1;
 
+  // Wohnort des Page-FAB, außerhalb des Scrollports (#634). Der Knopf gehört
+  // inhaltlich zur Seite, aber nicht in den scrollenden Container - Begründung
+  // an `.fab-layer` in layout.css und an adoptPageFab().
+  const fabLayer = document.createElement('div');
+  fabLayer.className = 'fab-layer';
+  fabLayer.id = 'fab-layer';
+
   const bottomNav = document.createElement('nav');
   bottomNav.className = 'nav-bottom';
   bottomNav.setAttribute('aria-label', t('nav.navigation'));
@@ -1409,7 +1587,7 @@ function renderAppShell(container) {
     lgBackdrop.appendChild(blob);
   }
 
-  const shellNodes = [skipLink, lgBackdrop, sidebar, main, bottomNav];
+  const shellNodes = [skipLink, lgBackdrop, sidebar, main, fabLayer, bottomNav];
   if (backdrop)   shellNodes.push(backdrop);
   if (moreSheet)  shellNodes.push(moreSheet);
   shellNodes.push(searchOverlay, toastContainerPolite, toastContainerAssertive, routeAnnouncer);
@@ -1444,6 +1622,46 @@ function renderAppShell(container) {
   // Hauptnavigation im Leerlauf vorwärmen — die erste Modulnavigation soll
   // ohne Kaltstart-Wasserfall auskommen.
   warmPrimaryRoutes();
+}
+
+/**
+ * Den Page-FAB der aktuellen Seite in die App-Shell heben (#634).
+ *
+ * WARUM AUS DEM SCROLLPORT HERAUS. Der FAB ist `position: fixed`, hing aber im
+ * Modul-Root und damit INNERHALB von `.app-content` - dem Container, der auf
+ * den meisten Routen scrollt. Auf iOS bekommt ein solcher Scroller einen
+ * eigenen Compositor-Layer, und ein fixiertes Kind darin ist dort nicht
+ * verlässlich viewport-fest: es wird gegen den gescrollten Inhalt statt gegen
+ * den Viewport aufgelöst, wandert beim Laden mit der wachsenden Liste nach
+ * unten aus dem Bild und kommt ohne Repaint nicht zurück. Genau das
+ * beschreibt der Melder in #634 - erst mittig rechts, dann weg, und zwar in
+ * den Modulen, in denen .app-content wirklich scrollt (Aufgaben, Vorrat),
+ * während er anderswo nach dem Laden an seinen Platz springt.
+ *
+ * Dieselbe Falle hatte die Bottom-Nav schon einmal: sie ist deshalb längst
+ * `position: relative` und ein Flex-Kind der Shell (Begründung an `.nav-bottom`
+ * in layout.css). Der FAB war das letzte fixierte Element im Scrollport.
+ *
+ * Der Modulakzent geht dabei nicht verloren: die Layer liest ihn aus
+ * `--active-module-accent`, das applyModuleAccentForRoute() ohnehin bei jeder
+ * Navigation (und bei jedem Theme-Wechsel) auf <html> setzt.
+ *
+ * Idempotent: Der Aufruf sucht einen FAB im Inhalt und zieht ihn um; ist
+ * keiner da, bleibt der bereits umgezogene stehen. Ein DOM-Umzug behält
+ * Event-Listener, Referenzen (health/housekeeping/rewards halten ihren FAB)
+ * bleiben gültig.
+ */
+function adoptPageFab() {
+  const layer = document.getElementById('fab-layer');
+  if (!layer) return null;
+  const fresh = document.querySelector('#main-content .page-fab');
+  if (fresh) layer.replaceChildren(fresh);
+  return layer.firstElementChild;
+}
+
+/** FAB der alten Seite abräumen - zusammen mit deren Inhalt, nicht später. */
+function clearPageFab() {
+  document.getElementById('fab-layer')?.replaceChildren();
 }
 
 const FAB_SEEN_KEY = (module) => `yuvomi:fabSeen:${module}`;
@@ -1587,6 +1805,94 @@ function showHelpModal() {
   if (window.lucide) window.lucide.createIcons({ el: panel });
 }
 
+// --------------------------------------------------------
+// Update-Hinweis (#490)
+// --------------------------------------------------------
+
+// Zuletzt vom Server gemeldete neueste Release-Version. Persistiert, damit der
+// Punkt nach einem Reload sofort wieder steht, statt bis zur nächsten Prüfung
+// zu verschwinden und dann grundlos zurückzukommen.
+const UPDATE_LATEST_KEY = 'yuvomi.update.latest';
+// Version, für die der Nutzer den Änderungsverlauf zuletzt geöffnet hat.
+const UPDATE_SEEN_KEY = 'yuvomi.update.seen';
+const UPDATE_CHECKED_AT_KEY = 'yuvomi.update.checkedAt';
+// Der Server hält GitHub-Releases 30 Minuten im Cache; häufigeres Fragen wäre
+// reiner Verkehr für eine Information, die sich um Wochen bewegt.
+const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+/** Neuere Version, die noch niemand angesehen hat - oder '' wenn alles gesehen/aktuell. */
+function pendingUpdateVersion() {
+  const latest = localStorage.getItem(UPDATE_LATEST_KEY) || '';
+  if (!latest) return '';
+  if (!isNewerVersion(latest, getAppVersion())) return '';
+  const seen = localStorage.getItem(UPDATE_SEEN_KEY) || '';
+  if (seen && !isNewerVersion(latest, seen)) return '';
+  return latest;
+}
+
+/**
+ * Setzt bzw. entfernt den Punkt an allen Einstiegen zum Änderungsverlauf.
+ * Auf Mobil liegt der Eintrag im „Mehr"-Sheet - ohne Punkt am Sheet-Button
+ * bliebe der Hinweis dort unsichtbar, deshalb bekommt auch dieser einen.
+ */
+function toggleUpdateDot(el, on) {
+  const existing = el.querySelector('.nav-dot');
+  if (!on) { existing?.remove(); return; }
+  if (existing) return;
+  const dot = document.createElement('span');
+  dot.className = 'nav-dot';
+  dot.setAttribute('aria-hidden', 'true');
+  // Am Icon-Well hängt der Punkt auch in der eingeklappten Sidebar am richtigen
+  // Fleck; die Listenzeile im „Mehr"-Sheet hat keins.
+  (el.querySelector('.nav-item__icon-wrap') ?? el).appendChild(dot);
+}
+
+/**
+ * Der Punkt ist rein visuell - die Ansage steckt im Namen des Elements.
+ * Ohne `version` bleibt der Name unverändert.
+ */
+function withUpdateHint(label, version) {
+  if (!version) return label;
+  return `${label} - ${t('changelog.updateAvailable', { version: displayVersion(version) })}`.trim();
+}
+
+function applyUpdateBadge() {
+  const version = pendingUpdateVersion();
+  for (const el of document.querySelectorAll('.nav-item--changelog, .more-item--changelog, #more-btn')) {
+    toggleUpdateDot(el, Boolean(version));
+  }
+  // Den Namen des „Mehr"-Buttons setzt setMoreButtonState bei jeder Navigation
+  // neu; sein Zusatz gehört deshalb dorthin und nicht hierher, sonst wäre er
+  // nach dem ersten Seitenwechsel wieder weg.
+  for (const el of document.querySelectorAll('.nav-item--changelog, .more-item--changelog')) {
+    const label = withUpdateHint(t('nav.changelog'), version);
+    el.setAttribute('aria-label', label);
+    if (el.hasAttribute('title')) el.setAttribute('title', label);
+  }
+}
+
+/**
+ * Fragt den Änderungsverlauf-Proxy nach der neuesten Version. Bewusst still:
+ * schlägt der Abruf fehl (kein Netz, GitHub nicht erreichbar), bleibt der zuletzt
+ * bekannte Stand stehen - eine Fehlermeldung für eine Nebeninformation wäre Lärm.
+ */
+async function checkForUpdate({ force = false } = {}) {
+  const lastCheck = Number(localStorage.getItem(UPDATE_CHECKED_AT_KEY) || 0);
+  const age = Date.now() - lastCheck;
+  if (!force && lastCheck && age >= 0 && age < UPDATE_CHECK_INTERVAL_MS) {
+    applyUpdateBadge();
+    return;
+  }
+
+  try {
+    const payload = await api.get('/changelog');
+    const latest = String(payload?.data?.latest_version || '').trim();
+    localStorage.setItem(UPDATE_CHECKED_AT_KEY, String(Date.now()));
+    if (latest) localStorage.setItem(UPDATE_LATEST_KEY, latest);
+  } catch { /* still: siehe oben */ }
+  applyUpdateBadge();
+}
+
 function versionText(value) {
   return String(value || '').trim() || t('changelog.unknownVersion');
 }
@@ -1665,11 +1971,28 @@ function renderChangelog(panel, payload) {
   panel.querySelector('#changelog-current-version').textContent = versionText(currentVersion);
   panel.querySelector('#changelog-latest-version').textContent = versionText(latestVersion);
 
+  // Steht ein Update an, ist das die Nachricht - ob die laufende Version in der
+  // GitHub-Liste auftaucht, interessiert dann niemanden mehr.
+  const updateAvailable = isNewerVersion(latestVersion, currentVersion);
   const note = panel.querySelector('#changelog-version-note');
-  note.textContent = data.current_in_releases
-    ? t('changelog.currentFound')
-    : t('changelog.currentMissing');
-  note.classList.toggle('changelog-version-note--warning', !data.current_in_releases);
+  if (updateAvailable) {
+    note.textContent = t('changelog.updateAvailable', { version: displayVersion(latestVersion) });
+  } else {
+    note.textContent = data.current_in_releases
+      ? t('changelog.currentFound')
+      : t('changelog.currentMissing');
+  }
+  note.classList.toggle('changelog-version-note--warning', !updateAvailable && !data.current_in_releases);
+  note.classList.toggle('changelog-version-note--update', updateAvailable);
+
+  // Der Nutzer sieht die Liste gerade - der Punkt an der Navigation hat seinen
+  // Zweck erfüllt und verschwindet, bis eine noch neuere Version erscheint.
+  if (latestVersion) {
+    localStorage.setItem(UPDATE_LATEST_KEY, String(latestVersion));
+    localStorage.setItem(UPDATE_SEEN_KEY, String(latestVersion));
+    localStorage.setItem(UPDATE_CHECKED_AT_KEY, String(Date.now()));
+    applyUpdateBadge();
+  }
 
   const status = panel.querySelector('#changelog-status');
   if (status) status.hidden = true;
@@ -2510,7 +2833,9 @@ function positionSidebarIndicator() {
   // Aktives Item in den Sichtbereich holen (Audit F-01): bei überlaufender
   // Liste lagen Item UND Pille sonst unsichtbar unterhalb der Falte — die
   // Navigation verlor ihren „Du bist hier"-Anker. Manuelles Scrollen statt
-  // scrollIntoView, damit garantiert nur dieser Container scrollt.
+  // scrollIntoView, damit garantiert nur dieser Container scrollt. Nur wenn das
+  // Item wirklich außerhalb liegt: rebuildNavigation() stellt die Scroll-Position
+  // vorher wieder her, ein sichtbares Item wird also nie mehr verschoben.
   const margin = 8;
   const top = active.offsetTop;
   const bottom = top + active.offsetHeight;
@@ -2654,7 +2979,9 @@ function setMoreButtonState(moreBtn, activeSecondary) {
     moreBtn.style.setProperty('--item-module-accent', 'var(--color-accent)');
   }
 
-  moreBtn.setAttribute('aria-label', moreLabel);
+  // Der Änderungsverlauf liegt auf Mobil im „Mehr"-Sheet: steht ein Update an,
+  // muss der Name des Buttons das sagen - der Punkt daneben ist aria-hidden.
+  moreBtn.setAttribute('aria-label', withUpdateHint(moreLabel, pendingUpdateVersion()));
   moreBtn.setAttribute('title', t('nav.more'));
 
   const moreBtnLabel = moreBtn.querySelector('.nav-item__label');
@@ -2940,8 +3267,12 @@ window.addEventListener('unhandledrejection', (e) => {
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.addEventListener('message', (e) => {
     if (e.data?.type === 'SW_UPDATED') {
-      // Modul-Cache leeren damit nächste Navigation frische Module lädt
-      moduleCache.clear();
+      // Ab hier keine Seitenmodule mehr nachladen. Früher wurde an dieser Stelle
+      // der Modul-Cache dieses Routers geleert, damit die nächste Navigation
+      // frische Module lädt - wirkungslos: geleert wurde nur die eigene Map,
+      // während die Modul-Map des Dokuments die alten Abhängigkeiten weiter
+      // auflöst. Genau daraus entstand der Mischzustand aus #616.
+      shellStale = true;
       showToast(t('common.updateAvailable'), 'default', 8000);
       setTimeout(() => location.reload(), 8000);
     }
@@ -2959,6 +3290,9 @@ window.addEventListener('auth:expired', () => {
   // Offline-API-Cache leeren: Session-Ende → keine gecachten Daten zurücklassen,
   // die der nächste Nutzer am selben Gerät offline sehen könnte.
   clearApiCache();
+  // Gemerkte Scrollstände gehören zur Sitzung: der nächste Nutzer am selben
+  // Gerät soll nicht auf den Positionen des vorigen landen.
+  forgetScrollPositions();
   stopThirdPartyModulePolling();
   stopReminders();
   stopPush();
@@ -2990,10 +3324,23 @@ function rebuildNavigation({ updateLabels = true } = {}) {
   }
 
   if (navSidebarItems) {
+    // replaceChildren recria toda a árvore da navegação (por exemplo, após
+    // replaceChildren baut die Navigation komplett neu (Routenwechsel, Sprache,
+    // Modulliste) und der Browser setzt die Scroll-Position dabei auf 0 zurück.
+    // Ohne Sicherung sprang die Liste bei jedem Rebuild an den Anfang und das
+    // Auto-Scroll unten riss sie sofort wieder zum aktiven Item — sichtbar als
+    // Springen zwischen erstem und letztem Eintrag.
+    const previousScrollTop = navSidebarItems.scrollTop;
     const sidebarEls = sidebarNavItems();
     navSidebarItems.replaceChildren(...sidebarEls);
     if (window.lucide) window.lucide.createIcons({ el: navSidebarItems });
-    requestAnimationFrame(() => positionSidebarIndicator());
+    requestAnimationFrame(() => {
+      navSidebarItems.scrollTop = Math.min(
+        previousScrollTop,
+        Math.max(0, navSidebarItems.scrollHeight - navSidebarItems.clientHeight),
+      );
+      positionSidebarIndicator();
+    });
   }
   if (bottomItems) {
     const moreBtn = bottomItems.querySelector('#more-btn') ?? moreNavButtonEl();
@@ -3023,6 +3370,9 @@ function rebuildNavigation({ updateLabels = true } = {}) {
 
   updateNav(currentPath);
   updateBranding(currentPath || '/');
+  // Die Einstiege zum Änderungsverlauf sind gerade neu entstanden - ein noch
+  // offener Hinweis muss ihnen folgen, sonst fällt er beim Sprachwechsel weg.
+  applyUpdateBadge();
 }
 
 // Sprache geändert: Navigation und aktuelle Seite gemeinsam neu rendern.
@@ -3052,16 +3402,71 @@ window.addEventListener('resize', () => {
 }, { passive: true });
 
 // --------------------------------------------------------
-// Virtuelle Tastatur: FAB ausblenden wenn Keyboard offen
-// Erkennung via visualViewport - Höhe < 75% des Fensters = Keyboard aktiv.
-// Nur auf Mobilgeräten relevant (< 1024px), Desktop hat keine virtuelle Tastatur.
+// Virtuelle Tastatur: FAB ausblenden, solange sie offen ist.
+// Nur auf Mobilgeräten relevant (< 1024px, siehe layout.css) - Desktop hat
+// keine virtuelle Tastatur.
+//
+// ZWEI BEDINGUNGEN, NICHT EINE (#634): Ein geschrumpfter Viewport allein ist
+// kein Beweis für eine Tastatur. Auf iOS schrumpft er auch, wenn die
+// Adressleiste ausfährt, und die frühere Fassung schloss allein daraus auf
+// „Tastatur offen". Schwerer als der Fehlschluss wog sein Rückweg: der Zustand
+// hing an einem einzelnen `resize`, und blieb ein zweites aus, war die
+// Primäraktion des Moduls dauerhaft weg - dieselbe Falle wie beim
+// Scroll-Retract, den #634 entfernt hat. Der FAB ist der einzige Weg zum
+// Anlegen (`.toolbar-new-btn` ist überall ausgeblendet), also kostet ein
+// Falsch-Positiv hier das ganze Modul.
+//
+// Eine Tastatur ist offen, wenn ein Texteingabefeld den Fokus hat. Das ist
+// direkt beobachtbar statt geschätzt, und es hat einen Rückweg, der nicht
+// ausbleiben kann: `focusout` feuert immer, und jede Navigation fokussiert
+// #main-content, was die Bedingung ebenfalls auflöst. Die Viewport-Messung
+// bleibt als zweite Bedingung - sie kann jetzt nur noch dazu führen, dass der
+// FAB stehen bleibt, nie mehr dazu, dass er ohne Tastatur verschwindet.
 // --------------------------------------------------------
-if (window.visualViewport) {
-  window.visualViewport.addEventListener('resize', () => {
-    const keyboardVisible = window.visualViewport.height < window.innerHeight * 0.75;
-    document.body.classList.toggle('keyboard-visible', keyboardVisible);
-  });
+
+/** Eingabetypen, die keine Tastatur öffnen: eigene Picker oder Knöpfe. */
+const NON_TEXT_INPUT_TYPES = new Set([
+  'button', 'checkbox', 'color', 'date', 'datetime-local', 'file', 'hidden',
+  'image', 'month', 'radio', 'range', 'reset', 'submit', 'time', 'week',
+]);
+
+function isTextEntry(el) {
+  if (!el) return false;
+  if (el.isContentEditable) return true;
+  if (el.tagName === 'TEXTAREA') return true;
+  if (el.tagName !== 'INPUT') return false;
+  return !NON_TEXT_INPUT_TYPES.has(el.type);
 }
+
+function syncKeyboardVisible() {
+  const focused = isTextEntry(document.activeElement);
+  const vv = window.visualViewport;
+  // Ohne visualViewport trägt der Fokus die Entscheidung allein.
+  const shrunk = !vv || vv.height < window.innerHeight * 0.75;
+  document.body.classList.toggle('keyboard-visible', focused && shrunk);
+}
+
+// `focusout` feuert, bevor der neue Fokus steht - erst danach messen, sonst
+// blitzt der FAB beim Sprung von einem Feld zum nächsten kurz auf.
+//
+// `setTimeout` und nicht `requestAnimationFrame`: rAF ruht in verborgenen Tabs.
+// Der Zustand verbirgt die Primäraktion, also darf sein Rückweg nicht an einem
+// Ereignis hängen, das ausbleiben kann - dieselbe Regel, an der der
+// Scroll-Retract gescheitert ist. Timer werden gedrosselt, aber sie laufen.
+let keyboardSyncTimer = 0;
+function scheduleKeyboardSync() {
+  if (keyboardSyncTimer) return;
+  keyboardSyncTimer = setTimeout(() => {
+    keyboardSyncTimer = 0;
+    syncKeyboardVisible();
+  }, 0);
+}
+
+document.addEventListener('focusin', scheduleKeyboardSync);
+document.addEventListener('focusout', scheduleKeyboardSync);
+// Die Messung kommt auf iOS erst einige hundert Millisekunden nach dem Fokus -
+// ohne diesen Listener bliebe die zweite Bedingung beim Öffnen ungeprüft.
+window.visualViewport?.addEventListener('resize', syncKeyboardVisible);
 
 // --------------------------------------------------------
 // iOS PWA: Viewport-Zoom bei Tastatur-Erscheinen verhindern.
@@ -3109,7 +3514,19 @@ if (/iPhone|iPad|iPod/.test(navigator.userAgent)) {
     } else {
       document.documentElement.removeAttribute('data-theme');
     }
-    
+
+    // Theme „Automatisch" (kein data-theme) folgt prefers-color-scheme rein per
+    // CSS - applyTheme() feuert dabei nie. Der Modul-Akzent im Inline-Style
+    // bliebe also beim Sonnenuntergang des Systems auf dem Hellmodus-Wert
+    // stehen: derselbe Kontrast-Bruch wie beim manuellen Umschalten, nur ohne
+    // Nutzeraktion. Der Listener zieht ihn nach; bei explizitem Theme ist der
+    // Aufruf idempotent (dieselbe Farbe wird erneut aufgelöst). Die Statusbar
+    // hängt an derselben Momentaufnahme, siehe refreshThemeColorForTheme.
+    darkSchemeQuery?.addEventListener?.('change', () => {
+      applyModuleAccentForRoute(currentRoute());
+      refreshThemeColorForTheme();
+    });
+
     await initI18n();
     try {
       const v = await api.get('/version');
@@ -3140,7 +3557,6 @@ window.yuvomi = {
   refreshThirdPartyModules,
   isModuleDisabled,
   applyTheme: (value) => {
-    localStorage.setItem('yuvomi-theme', value);
     if (value === 'dark') {
       document.documentElement.setAttribute('data-theme', 'dark');
     } else if (value === 'light') {
@@ -3148,10 +3564,28 @@ window.yuvomi = {
     } else {
       document.documentElement.removeAttribute('data-theme');
     }
+    // Der Modul-Akzent liegt als aufgelöste Farbe im Inline-Style von <html> und
+    // folgt der CSS-Kaskade daher NICHT. Ohne dieses Nachziehen behielte die
+    // ganze Shell (Buttons, Fokusringe, FAB, aktive Nav-Pille) den Akzent des
+    // vorherigen Themes. Begründung an applyModuleAccentForRoute.
+    applyModuleAccentForRoute(currentRoute());
+    // Die Statusbar im Standalone-Modus trägt dieselbe eingefrorene
+    // Momentaufnahme, siehe refreshThemeColorForTheme.
+    refreshThemeColorForTheme();
+    // Persistenz zuletzt und fehlertolerant: ein werfendes localStorage (Safari
+    // Privatmodus, Quota) darf das sichtbare Anwenden nicht abbrechen. Vorher
+    // stand diese Zeile zuerst - warf sie, fiel der Aufrufer in den
+    // Einstellungen auf ein direktes data-theme zurück und liess den Akzent
+    // stehen. Derselbe Schlüssel wird dort ohnehin über safeStorageSet
+    // geschrieben, hier geht also nichts verloren.
+    try {
+      localStorage.setItem('yuvomi-theme', value);
+    } catch {
+      // Theme gilt für diese Sitzung, überlebt den Reload aber nicht.
+    }
   },
   restoreThemeColor: () => {
-    const route = allRoutes().find((r) => r.path === currentPath);
-    updateThemeColorForRoute(route);
+    updateThemeColorForRoute(currentRoute());
   },
   // Client-seitigen Sitzungszustand nach einem bewussten Logout zurücksetzen,
   // damit die anschließende navigate('/login') nicht am currentUser-Guard
@@ -3160,6 +3594,7 @@ window.yuvomi = {
   clearSession: () => {
     currentUser = null;
     _navBuiltForUserId = null;
+    forgetScrollPositions();
     stopThirdPartyModulePolling();
     stopReminders();
     stopPush();

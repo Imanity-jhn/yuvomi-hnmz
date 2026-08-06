@@ -12,6 +12,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { MIGRATIONS_SQL } from '../server/db-schema-test.js';
 import {
@@ -180,4 +181,51 @@ test('clientPermissions: kompakte Payload mit admin-Flag', () => {
   assert.equal(p.admin, false);
   assert.equal(p.modules.budget, 'read');
   assert.ok('cycle' in p.widgets);
+});
+
+// --------------------------------------------------------
+// Guard: die drei Widget-Listen dürfen nicht auseinanderlaufen
+// --------------------------------------------------------
+
+/**
+ * Ein Dashboard-Widget steht an drei Stellen: als ID im Raster, als sperrbare
+ * Ressource in den Rechten und als Beschriftung in der Rechte-Oberfläche. Fehlt
+ * es in der zweiten, kann ein Admin es als einziges nicht sperren; fehlt es in
+ * der dritten, steht in seiner Zeile der rohe Slug. Beides fällt beim Bauen
+ * eines neuen Widgets nicht auf - deshalb dieser Abgleich (statt einer Liste
+ * erlaubter Ausnahmen: die deckte nur die Dateien ab, nicht die Regel).
+ */
+function idsFromSource(relativePath, pattern) {
+  const source = readFileSync(new URL(relativePath, import.meta.url), 'utf-8');
+  const match = source.match(pattern);
+  assert.ok(match, `${relativePath}: Widget-Liste nicht gefunden - Guard muss nachgezogen werden`);
+  return match[1];
+}
+
+test('jedes Dashboard-Widget ist sperrbar und in der Rechte-UI benannt', () => {
+  const dashboardIds = idsFromSource('../public/pages/dashboard.js', /const WIDGET_IDS = \[([^\]]+)\]/)
+    .split(',')
+    .map((part) => part.trim().replace(/^'|'$/g, ''))
+    .filter(Boolean);
+
+  const labelKeys = idsFromSource(
+    '../public/settings/pages/admin-permissions.js',
+    /const WIDGET_LABEL_KEYS = \{([^}]+)\}/,
+  )
+    .split('\n')
+    .map((line) => line.trim().match(/^([a-z_]+):/i)?.[1])
+    .filter(Boolean);
+
+  const permissionIds = PERMISSION_WIDGETS.map((w) => w.id);
+
+  assert.deepEqual(
+    [...dashboardIds].sort(),
+    [...permissionIds].sort(),
+    'WIDGET_IDS (dashboard.js) und PERMISSION_WIDGETS (server/permissions.js) sind auseinandergelaufen',
+  );
+  assert.deepEqual(
+    [...dashboardIds].sort(),
+    [...labelKeys].sort(),
+    'WIDGET_IDS (dashboard.js) und WIDGET_LABEL_KEYS (admin-permissions.js) sind auseinandergelaufen',
+  );
 });

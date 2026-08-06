@@ -63,9 +63,17 @@ function formatOptions(selected) {
 
 function regionOptions(selectedRegion) {
   const locale = getLocale();
-  const presets = REGION_CODES.map((code) => (
-    `<option value="${esc(code)}"${selectedRegion === code ? ' selected' : ''}>${esc(regionLabel(code, locale))}</option>`
-  )).join('');
+  // Nach dem angezeigten Namen sortieren, nicht nach der Reihenfolge in
+  // REGION_PRESETS: die ist nach Sprachfamilie gruppiert und war bei einem
+  // Dutzend Einträgen noch überschaubar. Mit der Amerika-Abdeckung sind es
+  // über 60 - da findet man "Spanisch (Peru)" nur alphabetisch wieder.
+  // detectRegion() bleibt von der Sortierung unberührt, es liest das Objekt.
+  const presets = [...REGION_CODES]
+    .map((code) => ({ code, label: regionLabel(code, locale) }))
+    .sort((a, b) => a.label.localeCompare(b.label, locale))
+    .map(({ code, label }) => (
+      `<option value="${esc(code)}"${selectedRegion === code ? ' selected' : ''}>${esc(label)}</option>`
+    )).join('');
   const custom = `<option value="${CUSTOM_REGION}"${selectedRegion === CUSTOM_REGION ? ' selected' : ''}>${t('settings.regionCustom')}</option>`;
   return presets + custom;
 }
@@ -84,6 +92,23 @@ function localeOptions() {
     `<option value="system"${storedLocale ? '' : ' selected'}>${t('settings.localeSystem')}</option>`,
     ...getSupportedLocales().map((locale) => (
       `<option value="${esc(locale)}"${storedLocale === locale ? ' selected' : ''}>${esc(localeLabel(locale))}</option>`
+    )),
+  ].join('');
+}
+
+/**
+ * Optionen für die Datensprache des Haushalts (#631, #632). Der leere Wert steht
+ * für "automatisch"; sein Label nennt die Sprache, auf die die Automatik fiele -
+ * `language_auto`, nicht `language_effective`. Bei explizit gewählter Sprache
+ * sind die beiden verschieden, und `language_effective` würde dort genau die
+ * gewählte Sprache als Automatik-Ergebnis ausgeben.
+ */
+function dataLanguageOptions(selected, auto_) {
+  const auto = t('settings.dataLanguageAuto', { language: localeLabel(auto_) });
+  return [
+    `<option value=""${selected ? '' : ' selected'}>${esc(auto)}</option>`,
+    ...getSupportedLocales().map((locale) => (
+      `<option value="${esc(locale)}"${selected === locale ? ' selected' : ''}>${esc(localeLabel(locale))}</option>`
     )),
   ].join('');
 }
@@ -163,6 +188,21 @@ function renderPage(container, preferences, isAdmin) {
           </select>
         </div>
         <div id="locale-error" class="form-error" role="alert" hidden></div>
+      </div>
+      <!-- Eigene Karte, nicht angehängt an die Sprachauswahl darüber: als
+           Nachbar im selben Block läse sich der Hinweis wie die Erklärung der
+           Anzeigesprache - und beide sagen etwas Gegensätzliches aus. -->
+      <div class="settings-card">
+        ${isAdmin ? `
+        <p class="form-hint" id="data-language-hint">${t('settings.dataLanguageHint')}</p>
+        <div class="form-group">
+          <label class="form-label" for="data-language-select">${t('settings.dataLanguageLabel')}</label>
+          <select class="form-input" id="data-language-select" aria-describedby="data-language-hint data-language-error">
+            ${dataLanguageOptions(preferences.language, preferences.language_auto)}
+          </select>
+        </div>
+        <div id="data-language-error" class="form-error" role="alert" hidden></div>` : `
+        <p class="form-hint">${t('settings.dataLanguageAdminOnly')}</p>`}
       </div>
     </section>
 
@@ -262,6 +302,24 @@ function syncRegionSelect(container) {
   });
 }
 
+/**
+ * Baut die Optionen der Datensprache neu auf. Nötig nach einem Regionswechsel:
+ * steht die Datensprache auf "automatisch", leitet der Server sie aus der Region
+ * ab, und das Label nennt dann eine andere Sprache. Die Ableitung bleibt dabei
+ * beim Server - hier wird nur der frisch gelesene Wert angezeigt, statt die
+ * Regel im Client zu wiederholen.
+ */
+async function refreshDataLanguageOptions(container) {
+  const select = container.querySelector('#data-language-select');
+  if (!select) return;
+  const preferences = await getPreferences();
+  select.replaceChildren();
+  select.insertAdjacentHTML('beforeend', dataLanguageOptions(
+    preferences.language || null,
+    preferences.language_auto || 'en',
+  ));
+}
+
 function bindEvents(container, user) {
   const themeToggle = container.querySelector('#theme-toggle');
   themeToggle?.addEventListener('click', (event) => {
@@ -293,6 +351,34 @@ function bindEvents(container, user) {
       showError(errorElement, error.message);
     } finally {
       if (localeSelect.isConnected) localeSelect.disabled = false;
+    }
+  });
+
+  // Datensprache: anders als der Locale-Picker darüber schreibt sie eine
+  // haushaltweite Preference und betitelt serverseitig die bereits gespeicherten
+  // Geburtstags-Termine um. Danach neu rendern, damit das Automatik-Label die
+  // eventuell veränderte Ableitung zeigt.
+  const dataLanguageSelect = container.querySelector('#data-language-select');
+  let persistedDataLanguage = dataLanguageSelect?.value ?? '';
+  dataLanguageSelect?.addEventListener('change', async () => {
+    const errorElement = container.querySelector('#data-language-error');
+    clearError(errorElement);
+    dataLanguageSelect.disabled = true;
+    try {
+      await savePreferences({ language: dataLanguageSelect.value || null });
+      persistedDataLanguage = dataLanguageSelect.value;
+      // Nur die Optionen neu aufbauen statt die Seite: ein voller Re-Render nähme
+      // dem gerade bedienten Select den Fokus und würde eine noch nicht
+      // gespeicherte "Benutzerdefiniert"-Wahl im Region-Block wieder zuklappen.
+      await refreshDataLanguageOptions(container);
+      window.yuvomi?.showToast(t('settings.dataLanguageSaved'), 'success');
+    } catch (error) {
+      // Zurück auf den gespeicherten Wert: sonst zeigt die Seite eine
+      // Datensprache an, die nie geschrieben wurde.
+      dataLanguageSelect.value = persistedDataLanguage;
+      showError(errorElement, error.message);
+    } finally {
+      if (dataLanguageSelect.isConnected) dataLanguageSelect.disabled = false;
     }
   });
 
@@ -338,6 +424,9 @@ function bindEvents(container, user) {
         detail: { timeFormat: preset.time_format },
       }));
       if (customBlock) customBlock.hidden = true;
+      // Scheitert das Nachladen, bleibt nur das Automatik-Label stale - kein
+      // Grund, den erfolgreichen Regionswechsel als Fehler zu melden.
+      await refreshDataLanguageOptions(container).catch(() => {});
       window.yuvomi?.showToast(t('settings.regionSaved'), 'success');
     } catch (error) {
       showError(errorElement, error.message);
@@ -418,6 +507,8 @@ export async function render(container, { user }) {
       date_format: loaded.date_format || 'dmy',
       time_format: loaded.time_format || '24h',
       region: loaded.region || null,
+      language: loaded.language || null,
+      language_auto: loaded.language_auto || 'en',
     };
 
     safeStorageSet('yuvomi-date-format', preferences.date_format);
