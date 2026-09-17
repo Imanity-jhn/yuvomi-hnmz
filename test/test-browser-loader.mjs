@@ -11,12 +11,34 @@ const STUBS = {
     export function clearApiCache() {}
   `,
   '/api.js': `
+    // Tests, die eine REIHENFOLGE pruefen (die Antwort kommt NACH der
+    // Bearbeitung), brauchen die Kontrolle ueber den Zeitpunkt der Aufloesung.
+    // Sie setzen globalThis.__apiStub = { get, patch, ... }; ohne das bleibt es
+    // bei der stummen Antwort wie bisher - dasselbe Muster wie __formatLocale
+    // weiter unten. Jede Methode steht ausgeschrieben da und nicht als Fabrik:
+    // test:frontend-audit liest diesen Stub als TEXT und prueft die Schreibweise
+    // "patch: async" samt der auth-Namen. Und KEINE Backticks in diesem
+    // Kommentar - der Stub IST ein Template-Literal, ein Backtick darin beendet
+    // ihn mitten im Text.
+    const viaStub = (name, args, fallback) => (
+      typeof globalThis.__apiStub?.[name] === 'function'
+        ? globalThis.__apiStub[name](...args)
+        : fallback
+    );
     export const api = {
-      get: async () => ({ data: null }),
-      post: async () => ({ data: null }),
-      put: async () => ({ data: null }),
-      patch: async () => ({ data: null }),
-      delete: async () => ({ data: null }),
+      get: async (...a) => viaStub('get', a, { data: null }),
+      // Liefert im Echtbetrieb { data, fromCache } - siehe api.js. Der Stub
+      // faellt auf 'get' zurueck, damit Suiten, die die Cache-Herkunft gar
+      // nicht pruefen, nichts davon wissen muessen.
+      getWithSource: async (...a) => (
+        typeof globalThis.__apiStub?.getWithSource === 'function'
+          ? globalThis.__apiStub.getWithSource(...a)
+          : { data: await viaStub('get', a, { data: null }), fromCache: false }
+      ),
+      post: async (...a) => viaStub('post', a, { data: null }),
+      put: async (...a) => viaStub('put', a, { data: null }),
+      patch: async (...a) => viaStub('patch', a, { data: null }),
+      delete: async (...a) => viaStub('delete', a, { data: null }),
     };
     export const auth = {
       me: async () => ({ user: null }),
@@ -24,7 +46,15 @@ const STUBS = {
       logout: async () => ({ ok: true }),
       updateProfile: async () => ({ user: null }),
     };
-    export const mealie = {
+    export const notifications = {
+      providers: async () => ({ data: [] }),
+      listChannels: async () => ({ data: [] }),
+      createChannel: async () => ({ data: null }),
+      updateChannel: async () => ({ data: null }),
+      deleteChannel: async () => ({ data: null }),
+      testChannel: async () => ({ data: null }),
+    };
+    export const recipeProviders = {
       listAccounts: async () => ({ data: [] }),
       createAccount: async () => ({ data: null }),
       updateAccount: async () => ({ data: null }),
@@ -41,9 +71,16 @@ const STUBS = {
     };
     export const initI18n = async () => {};
     export const setLocale = async () => {};
-    export const getLocale = () => 'de';
-    export const getFormatLocale = () => 'de';
-    export const getNumberFormat = (options = {}) => new Intl.NumberFormat('de', options);
+    // Wie __formatLocale: Tests, die lokalisierte Monatsnamen pruefen, setzen
+    // globalThis.__locale; ohne das bleibt es bei 'de'.
+    export const getLocale = () => globalThis.__locale ?? 'de';
+    // Die Format-Locale ist im Browser eine Einstellung des Haushalts und
+    // entscheidet ueber Ziffernsystem, Dezimaltrenner und Gruppierung. Tests, die
+    // genau das pruefen (utils/money.js und alles, was dessen Umschrift nutzt),
+    // setzen globalThis.__formatLocale; ohne das bleibt es bei 'de' wie bisher.
+    export const getFormatLocale = () => globalThis.__formatLocale ?? 'de';
+    export const getNumberFormat = (options = {}) =>
+      new Intl.NumberFormat(globalThis.__formatLocale ?? 'de', options);
     export const getSupportedLocales = () => ['de', 'en'];
     export const formatDate = (d) => String(d);
     export const formatDayMonth = (d) => String(d);
@@ -64,19 +101,35 @@ const STUBS = {
     export const getRRuleValues = () => ({});
     export const describeRRule = () => '';
     export const recurrenceRow = () => ({ icon: 'repeat', label: '', value: '' });
+    export const intervalUnitLabel = () => '';
   `,
   '/components/modal.js': `
-    export const openModal = () => {};
+    export const openModal = (...args) => globalThis.__openModal?.(...args);
     export const closeModal = () => {};
     export const confirmModal = async () => true;
+    export const confirmOverModal = async (...args) => globalThis.__confirmOverModal?.(...args) ?? true;
     export const selectModal = async () => null;
     export const advancedSection = (inner = '') => String(inner);
     export const wireBlurValidation = () => {};
     export const reportFieldError = () => false;
     export const mountFooter = () => null;
     export const refreshDirtySnapshot = () => {};
+    export const captureModalContext = () => globalThis.__modalContextId?.() ?? 'test-modal-context';
+    export const isModalContextCurrent = (context) => (
+      globalThis.__modalContextId?.() === undefined
+        ? true
+        : globalThis.__modalContextId() === context
+    );
     export const focusFirstField = () => null;
     export const updateHeaderAction = () => null;
+    export const validateAll = () => true;
+    export const promptModal = async (...args) => globalThis.__promptModal?.(...args) ?? null;
+    export const btnLoading = () => {};
+    export const btnSuccess = () => {};
+    export const btnError = () => {};
+    export const refocusAfterRender = () => {};
+    export const renderKeepingFocus = (render) => { render(); return null; };
+    export const forgetRestore = () => {};
   `,
   '/components/detail-view.js': `
     export const openDetailView = () => ({ update: () => true, isOpen: () => true });
@@ -89,7 +142,13 @@ const STUBS = {
     export const stagger = () => {};
     export const vibrate = () => {};
     export const wireScrollFade = () => ({ update: () => {}, destroy: () => {} });
-    export const scheduleUndoableDelete = () => {};
+    // Tests, die das Undo-Fenster selbst schliessen oder zuruecknehmen wollen,
+    // setzen globalThis.__undoStub = (opts) => {} und bekommen commit/restore
+    // in die Hand - dasselbe Muster wie __apiStub in /api.js.
+    export const scheduleUndoableDelete = (opts) => { globalThis.__undoStub?.(opts); };
+    // Im Test gibt es keine Animation, die ausspielen koennte - der Aufrufer
+    // awaitet das Ergebnis, also loest der Stub sofort auf.
+    export const animationSettled = () => Promise.resolve();
   `,
   '/utils/html.js': `
     export const esc = (value) => String(value ?? '')
@@ -105,7 +164,9 @@ const STUBS = {
     export const refresh = async () => {};
   `,
   '/components/user-multi-select.js': `
-    export const renderUserMultiSelect = () => '';
+    // Tests, die das Markup einer Personen-Auswahl pruefen, setzen
+    // globalThis.__renderUserMultiSelect (etwa auf die echte Komponente).
+    export const renderUserMultiSelect = (...args) => globalThis.__renderUserMultiSelect?.(...args) ?? '';
     export const getSelectedUserIds = () => [];
     export const bindUserMultiSelect = () => {};
     export const renderAvatarStack = () => '';
@@ -128,49 +189,14 @@ const STUBS = {
     export const onPwaInstallStateChanged = () => () => {};
     export const promptPwaInstall = async () => ({ outcome: 'unavailable' });
   `,
-  '/utils/date.js': `
-    const pad = (n) => String(n).padStart(2, '0');
-    export const toLocalDateKey = (date) => {
-      const d = date instanceof Date ? date : new Date(String(date) + 'T00:00:00');
-      return \`\${d.getFullYear()}-\${pad(d.getMonth() + 1)}-\${pad(d.getDate())}\`;
-    };
-    export const parseLocalDateKey = (dateKey) => {
-      const [y, m, dd] = String(dateKey).split('-').map(Number);
-      return new Date(y, (m || 1) - 1, dd || 1);
-    };
-    export const addLocalDays = (dateStr, days) => {
-      const d = new Date(String(dateStr) + 'T00:00:00');
-      d.setDate(d.getDate() + days);
-      return toLocalDateKey(d);
-    };
-    export const startOfLocalWeekKey = (dateStr, firstDay = 1) => {
-      const d = new Date(String(dateStr) + 'T00:00:00');
-      const day = d.getDay();
-      const diff = (day < firstDay ? day + 7 : day) - firstDay;
-      d.setDate(d.getDate() - diff);
-      return toLocalDateKey(d);
-    };
-    export const shiftEndDateKey = (oldStartKey, newStartKey, endKey) => {
-      const from = new Date(String(oldStartKey) + 'T00:00:00');
-      const to = new Date(String(newStartKey) + 'T00:00:00');
-      const deltaDays = Math.round((to.getTime() - from.getTime()) / 86400000);
-      return addLocalDays(endKey, deltaDays);
-    };
-    export const isEndBeforeStart = (startDatetime, endDatetime) => {
-      if (!endDatetime) return false;
-      const [startDay, startTime] = String(startDatetime).split('T');
-      const [endDay, endTime] = String(endDatetime).split('T');
-      if (endDay !== startDay) return endDay < startDay;
-      if (startTime && endTime) return endTime < startTime;
-      return false;
-    };
-    export const WEEK_START_INDEX = { monday: 1, sunday: 0, saturday: 6 };
-    export const weekStartIndex = (value) => WEEK_START_INDEX[value] ?? 1;
-    export const weekdayOrder = (weekStart = 1) => {
-      const start = typeof weekStart === 'number' ? weekStart : weekStartIndex(weekStart);
-      return Array.from({ length: 7 }, (_, i) => (start + i) % 7);
-    };
-  `,
+  // /utils/timezone.js steht ebenfalls nicht hier - localStorage ist dort in
+  // try/catch gekapselt, in Node faellt der ReferenceError also auf 'keine Zone'
+  // zurueck, und genau das ist das Verhalten ohne Einstellung.
+  // /utils/date.js steht bewusst NICHT hier: die Datei hat keine DOM- oder
+  // i18n-Abhängigkeit und wird vom Pfad-Fallback unten direkt geladen. Der
+  // Nachbau, der hier stand, war schon auseinandergelaufen (er kannte den
+  // Default-Parameter von toLocalDateKey() nicht) - ein Stub für ein Modul,
+  // das im Node-Kontext ohnehin läuft, kann nur driften.
 };
 
 export async function resolve(specifier, context, nextResolve) {

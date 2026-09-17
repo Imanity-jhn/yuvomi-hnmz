@@ -25,6 +25,28 @@ function flattenKeys(obj, prefix = '', out = new Set()) {
   return out;
 }
 
+// Dieselbe Zusicherung wie für die App-Locales (test/test-i18n.js), nur mit der
+// Einrückung, die HIER gilt: die Installer-Locales stehen auf ZWEI Leerzeichen.
+//
+// Sie stand dort bis zum 2026-08-20 als Stichprobe über Zeile 2 und übersah damit
+// acht völlig uneingerückte Zeilen in allen 24 App-Locales. Hier gab es die Prüfung
+// bisher gar nicht - die Dateien sind sauber, aber nichts hielt sie dabei. Da beide
+// Verzeichnisse von denselben Skripten und Händen gepflegt werden, gilt die Regel
+// an beiden Enden oder an keinem.
+test('jede Installer-Locale ist Zeile für Zeile 2-Leerzeichen-formatiert', () => {
+  const wrong = [];
+  for (const locale of SUPPORTED_LOCALES) {
+    const raw = readFileSync(new URL(`${locale}.json`, LOCALES_DIR), 'utf8');
+    const canonical = `${JSON.stringify(JSON.parse(raw), null, 2)}\n`;
+    if (raw === canonical) continue;
+    const a = raw.split('\n');
+    const b = canonical.split('\n');
+    const i = a.findIndex((line, n) => line !== b[n]);
+    wrong.push(`${locale}.json Zeile ${i + 1}: ${JSON.stringify(a[i])} statt ${JSON.stringify(b[i])}`);
+  }
+  assert.deepEqual(wrong, [], `nicht kanonisch 2-Leerzeichen-formatiert:\n  ${wrong.join('\n  ')}`);
+});
+
 /** Alle in install.html referenzierten i18n-Schlüssel (Attribute, t(), applyRich). */
 function referencedKeys() {
   const html = readFileSync(HTML_PATH, 'utf8');
@@ -193,4 +215,53 @@ test('Zahlenbereiche in Fehlermeldungen sind mit ASCII-Minus geschrieben', () =>
   assert.deepEqual(offenders, [],
     'En-/Em-Dash direkt vor einer Ziffer ist ein Vorzeichen oder Bis-Strich und '
     + 'gehört als ASCII "-" geschrieben:\n' + offenders.join('\n'));
+});
+
+/* Ein data-i18n-Attribut auf einem Schluessel MIT Platzhalter ist immer kaputt.
+ *
+ * applyTranslations ruft `t(key)` ohne Parameter und schreibt das Ergebnis in
+ * textContent. Traegt der Wert ein {{...}}, landet der Platzhalter woertlich auf
+ * dem Bildschirm - und zwar erst beim Sprachwechsel, weil der Text bis dahin von
+ * der Laufzeit korrekt gesetzt war. Genau deshalb faellt es beim Bauen nicht auf.
+ *
+ * Dreimal derselbe Fehler an drei Stellen (cfg-prereq, welcome-prereq,
+ * simple-access-desc, Critique 2026-08-15) sind kein Zufall mehr, sondern eine
+ * fehlende Regel: solche Elemente werden ueber applyRich() oder einen eigenen
+ * t()-Aufruf in localize() versorgt und tragen KEIN data-i18n. */
+test('kein data-i18n zeigt auf einen Schluessel mit Platzhalter', () => {
+  const html = readFileSync(HTML_PATH, 'utf8');
+  const reference = loadLocale(REFERENCE);
+  const lookup = (key) => key.split('.').reduce((o, k) => (o == null ? o : o[k]), reference);
+
+  const offenders = [];
+  for (const [, key] of html.matchAll(/\bdata-i18n="([^"]+)"/g)) {
+    const value = lookup(key);
+    if (typeof value === 'string' && /\{\{\w+\}\}/.test(value)) {
+      offenders.push(`${key} -> "${value}"`);
+    }
+  }
+  assert.deepEqual(offenders, [],
+    `data-i18n auf interpolierten Schluesseln (applyTranslations kann sie nicht fuellen): ${offenders.join(' | ')}`);
+});
+
+/* Der Sprachumschalter bietet GENAU die unterstuetzten Sprachen an.
+ *
+ * `fil` fehlte in der Optionsliste, obwohl SUPPORTED_LOCALES es fuehrt und
+ * fil.json ausgeliefert wird (Critique 2026-08-15). Folge: bei einem
+ * philippinischen Browser stand `$('lang-switch').value = getLocale()` auf einem
+ * Wert ohne Option, der Umschalter war LEER - und wer einmal wechselte, kam nie
+ * zurueck. Die vorhandenen Tests pruefen Dateibestand, Keyparitaet, Auslieferung
+ * und Platzhalter; die Optionsliste hat nie jemand gegen die Sprachliste
+ * gehalten, obwohl sie die einzige Stelle ist, an der der Nutzer sie sieht. */
+test('der Sprachumschalter bietet genau die unterstuetzten Sprachen an', () => {
+  const html = readFileSync(HTML_PATH, 'utf8');
+  const select = html.match(/<select id="lang-switch"[\s\S]*?<\/select>/);
+  assert.ok(select, 'lang-switch nicht gefunden');
+
+  const offered = [...select[0].matchAll(/<option value="([^"]+)"/g)].map(m => m[1]).sort();
+  const supported = [...SUPPORTED_LOCALES].sort();
+
+  assert.deepEqual(offered, supported,
+    `Optionsliste weicht von SUPPORTED_LOCALES ab. Nur im Select: ${offered.filter(l => !supported.includes(l))}; `
+    + `nur in SUPPORTED_LOCALES: ${supported.filter(l => !offered.includes(l))}`);
 });

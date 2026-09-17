@@ -7,16 +7,67 @@ import {
 } from '/i18n.js';
 import { esc } from '/utils/html.js';
 import { prefersInkText } from '/utils/contrast.js';
-import { openModal, closeModal, confirmModal } from '/components/modal.js';
+import { AVATAR_COLORS } from '/utils/color.js';
+import { openModal, closeModal, confirmModal, refocusAfterRender } from '/components/modal.js';
 import { createRetryState, toggleRowHtml } from '/settings/components.js';
 import {
   renderUserMultiSelect, getSelectedUserIds, bindUserMultiSelect,
 } from '/components/user-multi-select.js';
 
 const FAMILY_ROLES = ['dad', 'mom', 'parent', 'child', 'grandparent', 'relative', 'other'];
-const AVATAR_COLORS = ['#007AFF', '#34C759', '#FF9500', '#FF3B30', '#AF52DE', '#FF2D55'];
-const MAX_AVATAR_DATA_LENGTH = 768 * 1024;
+
 const randomAvatarColor = () => AVATAR_COLORS[Math.floor(Math.random() * AVATAR_COLORS.length)];
+
+/**
+ * Ist auf diesem Server SSO konfiguriert? (#847)
+ *
+ * Entscheidet, ob die Verwaltung ueberhaupt anbietet, ein Konto ohne Passwort
+ * zu fuehren - ohne SSO waere das ein Konto, in das niemand hineinkaeme, und
+ * der Server weist es aus demselben Grund ab. Eine Modulvariable statt eines
+ * vierten Parameters durch renderPage/bindEvents/bindEditButtons: es ist eine
+ * Eigenschaft des Servers, die sich waehrend eines Seitenaufrufs nicht aendert,
+ * und keine Angabe zu einem einzelnen Mitglied.
+ */
+let ssoAvailable = false;
+
+/**
+ * Rechte-Katalog fuer die Startrechte einer Einladung (#869).
+ *
+ * Modulvariable aus demselben Grund wie `ssoAvailable`: eine Eigenschaft des
+ * Servers, keine eines Mitglieds. Bleibt sie leer, weil die Abfrage
+ * fehlschlaegt, verliert der Hinweis unter dem Feld seine Modulnamen - die
+ * Wahl selbst funktioniert weiter, denn aufgeloest wird sie ohnehin
+ * serverseitig.
+ */
+let permissionCatalog = null;
+
+/** Angezeigter Name eines Permissions-Moduls, sonst der Schluessel als Notnagel. */
+function moduleLabel(key) {
+  const found = permissionCatalog?.modules?.find((m) => m.key === key);
+  return found ? t(found.labelKey) : key;
+}
+
+/** Die Module, die eine Rechte-Karte ganz sperrt, als lesbare Aufzaehlung. */
+function deniedModuleNames(modules) {
+  return Object.entries(modules || {})
+    .filter(([, access]) => access === 'none')
+    .map(([key]) => moduleLabel(key))
+    .sort((a, b) => a.localeCompare(b));
+}
+
+/** Lesbarer effektiver Zustand einer Capability in einer Einladungs-Vorlage. */
+function capabilityStateText(key, profile = null, moduleBlocked = false) {
+  const item = permissionCatalog?.capabilities?.find((entry) => entry.key === key);
+  if (!item) return '';
+  const access = moduleBlocked
+    ? 'none'
+    : (profile?.capabilities?.[key] ?? item.default ?? permissionCatalog?.defaults?.capability ?? 'none');
+  return `${t(item.labelKey)}: ${t(access === 'allow' ? 'settings.permCapabilityAllowed' : 'settings.permCapabilityBlocked')}`;
+}
+
+function appendCapabilityState(text, state) {
+  return state ? `${text} · ${state}` : text;
+}
 
 function initials(name) {
   if (!name) return '?';
@@ -37,6 +88,12 @@ function showError(element, message) {
   if (!element) return;
   element.textContent = message || t('common.errorGeneric');
   element.hidden = false;
+}
+
+function clearError(element) {
+  if (!element) return;
+  element.textContent = '';
+  element.hidden = true;
 }
 
 function avatarHtml(user, className = 'settings-avatar') {
@@ -90,31 +147,6 @@ function bindAvatarPicker(container, prefix) {
   });
 }
 
-async function readImageAsDataUrl(file) {
-  if (!file) return undefined;
-  if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
-    throw new Error(t('settings.profilePictureTypeError'));
-  }
-  if (file.size > 5 * 1024 * 1024) {
-    throw new Error(t('settings.profilePictureFileTooLarge'));
-  }
-
-  const dataUrl = await new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ''));
-    reader.onerror = () => reject(new Error(t('settings.profilePictureReadError')));
-    reader.readAsDataURL(file);
-  });
-
-  const { openCropDialog } = await import('/utils/avatar-crop.js');
-  const cropped = await openCropDialog(dataUrl);
-  if (cropped === null) return undefined;
-  if (cropped.length > MAX_AVATAR_DATA_LENGTH) {
-    throw new Error(t('settings.profilePictureTooLarge'));
-  }
-  return cropped;
-}
-
 function memberHtml(u, currentUserId) {
   // Konten der Haushaltshilfe sind keine Familienmitglieder: sie tragen das
   // Personal-Label statt einer Familienrolle (Audit A2-25e).
@@ -157,6 +189,18 @@ function renderPage(container) {
         <button class="btn btn--primary settings-add-btn" id="add-member-btn" hidden>${t('settings.addMember')}</button>
       </div>
 
+      <div class="settings-card" id="two-factor-household-card">
+        <h3 class="settings-card__title">${t('settings.twoFactorTitle')}</h3>
+        <p class="form-hint">${t('settings.twoFactorHouseholdHint')}</p>
+        ${toggleRowHtml({
+          label: t('settings.twoFactorRequireLabel'),
+          attrs: { id: 'two-factor-require' },
+          disabled: true,
+        })}
+        <ul class="settings-2fa__members" id="two-factor-members"></ul>
+        <div id="two-factor-household-error" class="form-error" role="alert" hidden></div>
+      </div>
+
       <div class="settings-card settings-card--hidden" id="add-member-form-card">
         <h3 class="settings-card__title">${t('settings.newMemberTitle')}</h3>
         <form id="add-member-form" class="settings-form">
@@ -174,7 +218,14 @@ function renderPage(container) {
               <input class="settings-color-button" type="color" id="new-avatar-color" value="${randomAvatarColor()}" />
             </div>
           </div>
-          <div class="form-group">
+          ${ssoAvailable ? `
+          ${toggleRowHtml({
+            label: t('settings.memberSsoOnlyLabel'),
+            attrs: { id: 'new-member-sso-only' },
+          })}
+          <p class="form-hint">${t('settings.memberSsoOnlyHint')}</p>
+          ` : ''}
+          <div class="form-group" id="new-member-password-group">
             <label class="form-label" for="new-member-password">${t('settings.memberPasswordLabel')}</label>
             <input class="form-input" type="password" id="new-member-password" minlength="8" required autocomplete="new-password" />
           </div>
@@ -236,6 +287,14 @@ function renderPage(container) {
             <select class="form-input" id="invite-family-role">
               ${buildFamilyRoleOptions()}
             </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="invite-permission-preset">${t('settings.invites.presetLabel')}</label>
+            <select class="form-input" id="invite-permission-preset">
+              <option value="restricted" selected>${t('settings.invites.presetRestricted')}</option>
+              <option value="role">${t('settings.invites.presetRole')}</option>
+            </select>
+            <p class="form-hint" id="invite-preset-hint"></p>
           </div>
           <div class="form-group">
             <label class="form-label" for="invite-email">${t('settings.memberEmailLabel')}</label>
@@ -363,10 +422,63 @@ function bindInviteEvents(container, initialInvites) {
   const emailNote = container.querySelector('#invite-email-note');
   const errorEl = container.querySelector('#invite-error');
 
+  // Startrechte (#869): das Feld waehlt eine Vorlage, der Hinweis darunter sagt,
+  // was sie im MOMENT bedeutet. Ohne ihn waere "wie das Rollenprofil" eine
+  // Angabe ueber etwas, das man nur auf einem anderen Blatt nachsehen kann -
+  // und genau das Nachsehen unterbleibt beim Einladen.
+  const presetSelect = container.querySelector('#invite-permission-preset');
+  const roleSelect = container.querySelector('#invite-family-role');
+  const presetHint = container.querySelector('#invite-preset-hint');
+  // Ein Rollenprofil aendert sich waehrend eines Formularaufrufs nicht, und
+  // jeder Wechsel zwischen zwei Rollen wuerde es sonst erneut holen.
+  const roleProfiles = new Map();
+
+  async function updatePresetHint() {
+    if (!presetSelect || !presetHint) return;
+    const role = roleSelect?.value || 'other';
+    if (presetSelect.value === 'restricted') {
+      const names = (permissionCatalog?.invitePresets?.restrictedModules || []).map(moduleLabel);
+      const base = names.length
+        ? t('settings.invites.presetHintRestricted', { modules: names.join(', ') })
+        : t('settings.invites.presetHintUnavailable');
+      presetHint.textContent = appendCapabilityState(base, capabilityStateText('health_use_fasting', null, true));
+      return;
+    }
+    if (!roleProfiles.has(role)) {
+      try {
+        roleProfiles.set(role, (await api.get(`/permissions/role/${encodeURIComponent(role)}`))?.data || null);
+      } catch {
+        // Kein Profil zu holen heisst nicht "kein Profil vorhanden": eine
+        // Behauptung waere hier schlimmer als keine.
+        roleProfiles.set(role, null);
+      }
+    }
+    // Zwischen Anfrage und Antwort kann eine andere Rolle gewaehlt worden sein.
+    if ((roleSelect?.value || 'other') !== role || presetSelect.value !== 'role') return;
+    const profile = roleProfiles.get(role);
+    const roleName = familyRoleLabel(role);
+    if (!profile) {
+      presetHint.textContent = t('settings.invites.presetHintUnavailable');
+      return;
+    }
+    const denied = deniedModuleNames(profile.modules);
+    const base = denied.length
+      ? t('settings.invites.presetHintRoleLimited', { role: roleName, modules: denied.join(', ') })
+      : t('settings.invites.presetHintRoleOpen', { role: roleName });
+    presetHint.textContent = appendCapabilityState(
+      base,
+      capabilityStateText('health_use_fasting', profile, profile.modules?.health === 'none'),
+    );
+  }
+
+  presetSelect?.addEventListener('change', updatePresetHint);
+  roleSelect?.addEventListener('change', updatePresetHint);
+
   addBtn.hidden = false;
   addBtn.addEventListener('click', () => {
     card.classList.remove('settings-card--hidden');
     addBtn.hidden = true;
+    updatePresetHint();
     container.querySelector('#invite-username')?.focus();
   });
 
@@ -374,6 +486,7 @@ function bindInviteEvents(container, initialInvites) {
     card.classList.add('settings-card--hidden');
     addBtn.hidden = false;
     form.reset();
+    updatePresetHint();
     errorEl.hidden = true;
     output.hidden = true;
   });
@@ -388,6 +501,7 @@ function bindInviteEvents(container, initialInvites) {
       display_name: container.querySelector('#invite-display-name').value.trim(),
       email: container.querySelector('#invite-email').value.trim(),
       family_role: container.querySelector('#invite-family-role').value,
+      permission_preset: container.querySelector('#invite-permission-preset').value,
       system_admin: container.querySelector('#invite-system-admin')?.checked === true,
       send_email: sendEmail,
     };
@@ -399,6 +513,7 @@ function bindInviteEvents(container, initialInvites) {
       invites.unshift(res.data.invite);
       renderInviteList(container, invites);
       form.reset();
+      updatePresetHint();
       // Der Klartext-Token kommt nur aus dieser einen Antwort. Die Karte bleibt
       // deshalb offen: würde sie sich wie beim Mitglied-Anlegen schließen, wäre
       // der Link im selben Moment weg, in dem er entsteht.
@@ -445,6 +560,7 @@ function bindInviteEvents(container, initialInvites) {
       await auth.revokeInvite(id);
       invites = invites.filter((i) => i.id !== id);
       renderInviteList(container, invites);
+      refocusAfterRender();
       window.yuvomi?.showToast(t('settings.invites.revoked'), 'default');
     } catch (err) {
       window.yuvomi?.showToast(err.message || t('common.errorGeneric'), 'danger');
@@ -585,7 +701,15 @@ async function openEditMemberModal(member, currentUser, users, container) {
           <yuvomi-datepicker type="date" id="edit-member-birth-date" value="${esc(member.birth_date || '')}"></yuvomi-datepicker>
           <p class="form-hint">${t('settings.memberContactBirthdayHint')}</p>
         </div>
-        <div class="form-group">
+        ${ssoAvailable ? `
+        ${toggleRowHtml({
+          label: t('settings.memberSsoOnlyLabel'),
+          checked: member.sso_only === true,
+          attrs: { id: 'edit-member-sso-only' },
+        })}
+        <p class="form-hint">${t('settings.memberSsoOnlyEditHint')}</p>
+        ` : ''}
+        <div class="form-group" id="edit-member-password-group">
           <label class="form-label" for="edit-member-password">${t('settings.resetPasswordLabel')}</label>
           <input class="form-input" type="password" id="edit-member-password" minlength="8" autocomplete="new-password" placeholder="${t('settings.resetPasswordPlaceholder')}" />
           <p class="form-hint">${t('settings.resetPasswordHint')}</p>
@@ -609,20 +733,23 @@ async function openEditMemberModal(member, currentUser, users, container) {
       bindAvatarPicker(panel, 'edit-member');
       fileInput?.addEventListener('change', async () => {
         errorEl.hidden = true;
+        const file = fileInput.files?.[0];
+        // Das Feld ist ein Transportmittel, kein Zustand - sofort leeren, wie
+        // beim Kachelbild (`quick-links-manager.js`). Bleibt der Dateiname
+        // stehen, feuert `change` beim nächsten Griff zu DERSELBEN Datei nicht
+        // mehr, und „nochmal anders zuschneiden" täte gar nichts.
+        fileInput.value = '';
         try {
-          const avatarData = await readImageAsDataUrl(fileInput.files?.[0]);
-          if (avatarData !== undefined) {
-            state.avatarData = avatarData;
-            setAvatarPreview(panel, '#edit-member-avatar-preview', {
-              display_name: panel.querySelector('#edit-member-display-name')?.value || member.display_name,
-              avatar_color: panel.querySelector('#edit-member-avatar-color')?.value || member.avatar_color,
-              avatar_data: avatarData,
-            });
-          } else {
-            fileInput.value = '';
-          }
+          const { pickCroppedImage } = await import('/utils/avatar-crop.js');
+          const avatarData = await pickCroppedImage(file);
+          if (avatarData === undefined) return; // abgebrochen: bisheriges Bild bleibt
+          state.avatarData = avatarData;
+          setAvatarPreview(panel, '#edit-member-avatar-preview', {
+            display_name: panel.querySelector('#edit-member-display-name')?.value || member.display_name,
+            avatar_color: panel.querySelector('#edit-member-avatar-color')?.value || member.avatar_color,
+            avatar_data: avatarData,
+          });
         } catch (err) {
-          fileInput.value = '';
           showError(errorEl, err.message ?? t('common.errorGeneric'));
         }
       });
@@ -638,6 +765,24 @@ async function openEditMemberModal(member, currentUser, users, container) {
       });
 
       if (caregiverIds !== null) bindUserMultiSelect(panel, 'member_caregivers');
+
+      // Der Umschalter fuehrt das Passwortfeld in beide Richtungen (#847): an
+      // versteckt es, aus macht es zur Pflicht - aber nur, wenn das Konto
+      // gerade wirklich keines hat. Sonst verlangte das Formular ein neues
+      // Passwort dafuer, dass man einen Umschalter zweimal beruehrt hat.
+      const ssoToggle = panel.querySelector('#edit-member-sso-only');
+      const pwGroup = panel.querySelector('#edit-member-password-group');
+      const pwField = panel.querySelector('#edit-member-password');
+      const syncSsoOnly = () => {
+        const on = ssoToggle?.checked === true;
+        if (pwGroup) pwGroup.hidden = on;
+        if (pwField) {
+          pwField.required = !on && member.sso_only === true;
+          if (on) pwField.value = '';
+        }
+      };
+      ssoToggle?.addEventListener('change', syncSsoOnly);
+      syncSsoOnly();
 
       panel.querySelector('#edit-member-cancel')?.addEventListener('click', closeModal);
       panel.querySelector('#edit-member-form')?.addEventListener('submit', async (event) => {
@@ -664,6 +809,7 @@ async function openEditMemberModal(member, currentUser, users, container) {
             email: panel.querySelector('#edit-member-email')?.value.trim() || null,
             birth_date: parseDateInput(birthDateRaw) || null,
             ...(newPassword ? { password: newPassword } : {}),
+            ...(ssoToggle ? { sso_only: ssoToggle.checked } : {}),
           });
           // Betreuung getrennt speichern: sie lebt im Gesundheitsmodul, nicht am
           // Nutzerdatensatz (#584).
@@ -690,6 +836,33 @@ async function openEditMemberModal(member, currentUser, users, container) {
   });
 }
 
+/**
+ * Haelt Passwortfeld und SSO-Umschalter im Neu-Formular im Einklang (#847).
+ *
+ * Vor allem `required`: ein ausgeblendetes Pflichtfeld laesst der Browser nicht
+ * absenden und kann den Grund auch nicht anzeigen - das Formular waere ohne
+ * sichtbare Ursache tot. Modul-Funktion und nicht lokal in `bindEvents`, weil
+ * auch der Abbrechen-Weg das Formular zuruecksetzt und denselben Abgleich
+ * braucht, dort aber weiter oben steht.
+ *
+ * @param {HTMLElement} container
+ */
+function syncSsoOnlyField(container) {
+  const on = container.querySelector('#new-member-sso-only')?.checked === true;
+  const group = container.querySelector('#new-member-password-group');
+  const field = container.querySelector('#new-member-password');
+  if (group) group.hidden = on;
+  if (field) {
+    field.required = !on;
+    if (on) field.value = '';
+  }
+  // Ohne Passwort ist die E-Mail der einzige Weg, auf dem die erste
+  // SSO-Anmeldung dieses Konto findet - ein gleicher Benutzername verknuepft
+  // bewusst nicht. Der Server weist es sonst ab; das hier sagt es vorher.
+  const email = container.querySelector('#new-member-email');
+  if (email) email.required = on;
+}
+
 function bindEvents(container, currentUser, users) {
   const addMemberBtn = container.querySelector('#add-member-btn');
   if (addMemberBtn) {
@@ -706,6 +879,7 @@ function bindEvents(container, currentUser, users) {
       container.querySelector('#add-member-form-card').classList.add('settings-card--hidden');
       container.querySelector('#add-member-btn').hidden = false;
       container.querySelector('#add-member-form').reset();
+      syncSsoOnlyField(container);
       container.querySelector('#new-avatar-color').value = randomAvatarColor();
       container.querySelector('#member-error').hidden = true;
     });
@@ -713,6 +887,10 @@ function bindEvents(container, currentUser, users) {
 
   const addMemberForm = container.querySelector('#add-member-form');
   if (addMemberForm) {
+    addMemberForm.querySelector('#new-member-sso-only')
+      ?.addEventListener('change', () => syncSsoOnlyField(container));
+    syncSsoOnlyField(container);
+
     addMemberForm.addEventListener('submit', async (event) => {
       event.preventDefault();
       const errorEl = container.querySelector('#member-error');
@@ -723,10 +901,13 @@ function bindEvents(container, currentUser, users) {
         return;
       }
 
+      const ssoOnly = container.querySelector('#new-member-sso-only')?.checked === true;
       const data = {
         username: container.querySelector('#new-username').value.trim(),
         display_name: container.querySelector('#new-display-name').value.trim(),
-        password: container.querySelector('#new-member-password').value,
+        // Beides zugleich weist der Server ab - er kann nicht raten, welches
+        // von beidem gemeint war.
+        ...(ssoOnly ? { sso_only: true } : { password: container.querySelector('#new-member-password').value }),
         avatar_color: container.querySelector('#new-avatar-color').value,
         family_role: container.querySelector('#new-family-role').value,
         system_admin: container.querySelector('#new-system-admin')?.checked === true,
@@ -742,6 +923,7 @@ function bindEvents(container, currentUser, users) {
         users.push(res.user);
         renderMemberList(container, users, currentUser?.id);
         addMemberForm.reset();
+        syncSsoOnlyField(container);
         container.querySelector('#new-avatar-color').value = randomAvatarColor();
         container.querySelector('#add-member-form-card').classList.add('settings-card--hidden');
         container.querySelector('#add-member-btn').hidden = false;
@@ -783,9 +965,83 @@ async function loadMembers(container, currentUser) {
   window.lucide?.createIcons({ el: container });
 }
 
+/**
+ * Wer hat den zweiten Faktor, und verlangt der Haushalt ihn (#672)?
+ *
+ * Die Liste steht neben dem Schalter, weil beides zusammen erst eine
+ * Entscheidung ergibt: eine Pflicht einzuschalten, ohne zu sehen, wen sie
+ * trifft, ist ein Blindflug. Sie sperrt niemanden aus - sie verbietet das
+ * Abschalten und stellt allen anderen einen Hinweis auf ihre Kontoseite.
+ *
+ * @param {HTMLElement} container
+ */
+async function loadTwoFactorHousehold(container) {
+  const card   = container.querySelector('#two-factor-household-card');
+  const toggle = container.querySelector('#two-factor-require');
+  const list   = container.querySelector('#two-factor-members');
+  const error  = container.querySelector('#two-factor-household-error');
+  if (!card || !toggle || !list) return;
+
+  let overview;
+  try {
+    overview = await api.get('/auth/2fa/overview');
+  } catch (err) {
+    // Kein Admin (403) heisst: die Karte geht diesen Nutzer nichts an.
+    card.remove();
+    if (err?.status !== 403) showError(error, err?.message || t('settings.loadError'));
+    return;
+  }
+
+  toggle.checked  = overview.required === true;
+  toggle.disabled = false;
+
+  list.replaceChildren();
+  list.insertAdjacentHTML('beforeend', overview.data.map((member) => `
+    <li class="settings-2fa__member">
+      <i data-lucide="${member.enabled ? 'shield-check' : 'shield-off'}" aria-hidden="true"
+         class="settings-2fa__member-icon settings-2fa__member-icon--${member.enabled ? 'on' : 'off'}"></i>
+      <span class="settings-2fa__member-name">${esc(member.display_name)}</span>
+      <span class="settings-2fa__member-state">${member.enabled
+        ? t('settings.twoFactorMemberOn')
+        : t('settings.twoFactorMemberOff')}</span>
+    </li>
+  `).join(''));
+  window.lucide?.createIcons({ el: list });
+
+  toggle.addEventListener('change', async () => {
+    const next = toggle.checked;
+    toggle.disabled = true;
+    clearError(error);
+    try {
+      await api.put('/auth/2fa/require', { required: next });
+    } catch (err) {
+      toggle.checked = !next;
+      showError(error, err?.message || t('settings.loadError'));
+    } finally {
+      toggle.disabled = false;
+    }
+  });
+}
+
 export async function render(container, { user } = {}) {
+  // Ein Ausfall dieser Abfrage darf die Verwaltung nicht kosten: ohne Antwort
+  // bleibt es beim bisherigen Formular mit Pflicht-Passwort.
+  try {
+    ssoAvailable = (await api.get('/auth/oidc/config'))?.enabled === true;
+  } catch {
+    ssoAvailable = false;
+  }
+  // Derselbe Grundsatz wie darueber: faellt der Katalog aus, bleibt der Hinweis
+  // unter den Startrechten ohne Modulnamen, aber das Formular funktioniert.
+  try {
+    permissionCatalog = (await api.get('/permissions/catalog'))?.data || null;
+  } catch {
+    permissionCatalog = null;
+  }
+
   renderPage(container);
   await loadMembers(container, user || {});
+  await loadTwoFactorHousehold(container);
   await loadInvites(container);
   window.lucide?.createIcons({ el: container });
 }

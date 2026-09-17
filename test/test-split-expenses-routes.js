@@ -40,11 +40,13 @@ app.use(express.json());
 app.use((req, _res, next) => {
   req.authUserId = actor.id;
   req.authRole = actor.role;
-  req.session = { userId: actor.id, role: actor.role };
+  // cookieSession: eine Sitzung, die neben einem API-Token mitkommt - requireAuth
+  // setzt authUserId/authRole dann aus dem Token, req.session bleibt die Sitzung.
+  req.session = actor.cookieSession ?? { userId: actor.id, role: actor.role };
   next();
 });
 app.use('/', splitRouter);
-const server = app.listen(0);
+const server = app.listen(0, '127.0.0.1');
 const baseUrl = await new Promise((r) => server.on('listening', () => r(`http://127.0.0.1:${server.address().port}`)));
 
 async function call(method, path, { actor: a, body } = {}) {
@@ -103,6 +105,15 @@ test('requireGroupAccess: Mitglied hat Lesezugriff', async () => {
 test('requireGroupAccess: System-Admin ohne Mitgliedschaft hat Zugriff (bewusster Bypass)', async () => {
   const r = await call('GET', `/groups/${GROUP}/members`, { actor: { id: ADMIN, role: 'admin' } });
   assert.equal(r.status, 200);
+});
+
+test('requireGroupAccess: Token eines Aussenstehenden neben einer Admin-Sitzung bekommt 404, die Admin-Sitzung allein 200', async () => {
+  const withToken = await call('GET', `/groups/${GROUP}/members`, {
+    actor: { id: OUTSIDER, role: 'member', cookieSession: { userId: ADMIN, role: 'admin' } },
+  });
+  assert.equal(withToken.status, 404, 'der Bypass urteilt nach der Rolle des Token-Subjekts');
+  const adminOnly = await call('GET', `/groups/${GROUP}/members`, { actor: { id: ADMIN, role: 'admin' } });
+  assert.equal(adminOnly.status, 200);
 });
 
 // --------------------------------------------------------------------------
@@ -166,6 +177,26 @@ test('Ausgabe-Autorisierung: fremdes Mitglied (nicht Ersteller/Manager) darf nic
 test('loadExpense-Sichtbarkeit: Aussenstehender sieht Ausgabe nicht -> 404', async () => {
   const r = await call('PUT', `/expenses/${EXPENSE}`, { actor: { id: OUTSIDER, role: 'member' }, body: { title: 'Y', amount: '1.00', currency: 'EUR' } });
   assert.equal(r.status, 404);
+});
+
+// Der PUT prueft die Mitgliedschaft von Zahler und Beteiligten wie der POST
+// (GHSA-4p5w-5346-8598): vorher liess sich einer Person, die nie in der Gruppe
+// war, eine Schuld zuschreiben, die sie nirgends sieht.
+test('PUT /expenses/:id — Nicht-Mitglied als Zahler oder Beteiligter -> 400, Salden unveraendert', async () => {
+  const before = await netByUser(GROUP);
+  const payer = await call('PUT', `/expenses/${EXPENSE}`, {
+    actor: { id: OWNER, role: 'member' },
+    body: { title: 'Einkauf', amount: '30.00', currency: 'EUR', split_method: 'equal', payer_id: OUTSIDER, participants: [OWNER, MGR], expense_date: '2026-05-10' },
+  });
+  assert.equal(payer.status, 400, `erwartet 400, bekommen ${payer.status}`);
+  const participant = await call('PUT', `/expenses/${EXPENSE}`, {
+    actor: { id: OWNER, role: 'member' },
+    body: { title: 'Einkauf', amount: '30.00', currency: 'EUR', split_method: 'equal', payer_id: OWNER, participants: [OWNER, OUTSIDER], expense_date: '2026-05-10' },
+  });
+  assert.equal(participant.status, 400, `erwartet 400, bekommen ${participant.status}`);
+  const after = await netByUser(GROUP);
+  assert.deepEqual([...after.entries()], [...before.entries()], 'kein Saldo fuer den Aussenstehenden, keine Verschiebung');
+  assert.equal(after.has(OUTSIDER), false);
 });
 
 // --------------------------------------------------------------------------
@@ -299,6 +330,20 @@ test('Gast-Anlage mit bereits vergebenem Username -> 409', async () => {
     body: { display_name: 'Kollision', password: 'supersecret', username: 'greta.custom' },
   });
   assert.equal(r.status, 409);
+});
+
+test('Gast-Anlage: gespiegelter Kontakt traegt den Kategorie-Key misc (#1140)', async () => {
+  const r = await call('POST', `/groups/${GUEST_GROUP}/guests`, {
+    actor: { id: OWNER, role: 'member' },
+    body: { display_name: 'Gast Milo', password: 'supersecret' },
+  });
+  assert.equal(r.status, 201);
+  // syncGuestArtifacts schrieb frueher das deutsche Literal 'Sonstiges' - kein
+  // Key in contact_categories, die UI zeigte es unuebersetzt an (#1140). Der
+  // Spiegel-Kontakt muss den stabilen Key 'misc' tragen.
+  const contact = db.prepare('SELECT category FROM contacts WHERE family_user_id = ?').get(r.body.data.id);
+  assert.ok(contact, 'Kontakt-Artefakt angelegt');
+  assert.equal(contact.category, 'misc', 'gespiegelter Gast-Kontakt nutzt den stabilen Key misc');
 });
 
 // --------------------------------------------------------------------------

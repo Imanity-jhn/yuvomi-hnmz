@@ -26,7 +26,6 @@ export const VISIBILITIES = ['private', 'family'];
 export const LOG_STATUS   = ['taken', 'skipped', 'pending'];
 export const FLOW_LEVELS  = ['spotting', 'light', 'medium', 'heavy'];
 export const MAX_UNIT     = 30;
-export const MAX_SYMPTOMS = 300;
 
 export function viewerId(req) {
   return req.authUserId || req.session.userId;
@@ -113,6 +112,26 @@ export function writableClause(alias, viewer) {
     sql: `(${col} = ? OR ${col} IN (${CARED_FOR_SUBQUERY}))`,
     params: [viewer, viewer],
   };
+}
+
+/**
+ * Lädt einen abhängigen Datensatz, wenn `viewer` dessen Eltern-Zeile ändern
+ * darf; sonst null.
+ *
+ * Zeitpläne und Dosis-Einträge hängen am Medikament, Analyte am Befund: sie
+ * haben keine eigene `user_id`, ihr Scoping ist immer das des Elternteils. Wer
+ * das von Hand als `m.user_id = ?` schreibt, schneidet die Betreuung (#584)
+ * still wieder weg - genau das war #884: anlegen ging, wegräumen nicht. Die
+ * Regel steht deshalb hier und nicht in jeder Route erneut.
+ *
+ * @param {string} sql         - SELECT … JOIN … WHERE <kind>.id = ?  (ohne Scope)
+ * @param {string} parentAlias - Alias der Eltern-Tabelle mit `user_id`
+ * @param {number} id          - ID des abhängigen Datensatzes
+ * @param {number} viewer      - eingeloggter Nutzer
+ */
+export function writableChild(sql, parentAlias, id, viewer) {
+  const w = writableClause(parentAlias, viewer);
+  return db.get().prepare(`${sql} AND ${w.sql}`).get(id, ...w.params) ?? null;
 }
 
 /**

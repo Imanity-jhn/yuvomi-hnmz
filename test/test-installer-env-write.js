@@ -298,6 +298,73 @@ test('GET /api/preflight liefert envExists und containerRunning', async () => {
   }
 });
 
+test('der Preflight wartet nicht unbegrenzt auf die Container-Engine', async () => {
+  // Der Wizard wartet vor dem Einfach-Pfad und vor dem Erzeugen der Schluessel
+  // auf den Preflight (Review zu #1217). Der Preflight wartete seinerseits auf
+  // die Engine-Erkennung und `docker/podman inspect`, beides ohne Zeitlimit: eine
+  // haengende Engine liess Einfach-Karte und Speichern stumm stehen, obwohl der
+  // Server envExists laengst kannte.
+  const mod = await import('../tools/installer/install-server.js');
+  assert.equal(typeof mod.probeContainerRunning, 'function',
+    'es gibt keine begrenzte Container-Abfrage fuer den Preflight');
+  const { EventEmitter } = await import('node:events');
+
+  const engine = { engine: 'docker', composeBin: 'docker', compose: ['compose'], missing: [] };
+  let killed = false;
+  const hanging = () => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.exitCode = null;
+    child.kill = () => { killed = true; return true; };
+    return child; // meldet nie 'close'
+  };
+
+  const started = Date.now();
+  const stalled = await mod.probeContainerRunning({ timeoutMs: 50, resolveEngine: async () => engine, spawnFn: hanging });
+  assert.equal(stalled, false, 'eine haengende Engine muss als "laeuft nicht" gelten');
+  assert.ok(Date.now() - started < 2000, 'die Abfrage haelt ihr Zeitlimit nicht ein');
+  assert.equal(killed, true, 'der haengende inspect-Prozess wird nicht beendet');
+
+  const noEngine = await mod.probeContainerRunning({ timeoutMs: 50, resolveEngine: () => new Promise(() => {}), spawnFn: hanging });
+  assert.equal(noEngine, false, 'eine haengende Engine-Erkennung haelt den Preflight auf');
+
+  // Kommt die Engine erst NACH dem Zeitlimit, darf kein inspect mehr starten:
+  // die Funktion ist dann schon zurueck, und niemand beendet einen haengenden
+  // Prozess mehr - jede weitere Preflight-Abfrage liesse einen liegen (Review zu #1217).
+  let lateSpawns = 0;
+  const late = await mod.probeContainerRunning({
+    timeoutMs: 20,
+    resolveEngine: () => new Promise(done => setTimeout(() => done(engine), 60)),
+    spawnFn: (...args) => { lateSpawns++; return hanging(...args); },
+  });
+  assert.equal(late, false, 'eine zu spaete Engine-Erkennung muss als Zeitueberschreitung gelten');
+  await new Promise(done => setTimeout(done, 120));
+  assert.equal(lateSpawns, 0, 'nach dem Zeitlimit startet trotzdem ein inspect, den niemand mehr beendet');
+
+  // Der Normalfall bleibt: "running" auf stdout, Exit 0.
+  const answering = () => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.exitCode = null;
+    child.kill = () => true;
+    queueMicrotask(() => {
+      child.stdout.emit('data', Buffer.from('running\n'));
+      child.exitCode = 0;
+      child.emit('close', 0);
+    });
+    return child;
+  };
+  assert.equal(await mod.probeContainerRunning({ timeoutMs: 1000, resolveEngine: async () => engine, spawnFn: answering }), true,
+    'ein laufender Container wird nicht mehr erkannt');
+
+  // Exportiert allein reicht nicht: die Route muss sie benutzen.
+  const src = readFileSync(new URL('../tools/installer/install-server.js', import.meta.url), 'utf8');
+  const at = src.indexOf("url.pathname === '/api/preflight'");
+  const route = src.slice(at, src.indexOf('\n  }\n', at));
+  assert.match(route, /await probeContainerRunning\(/, 'die Preflight-Route nutzt die begrenzte Abfrage nicht');
+  assert.doesNotMatch(route, /spawn\(/, 'die Preflight-Route startet inspect weiter selbst und ohne Zeitlimit');
+});
+
 // ── Static parity checks ─────────────────────────────────────────────────────
 
 test('install.html prüft Preflight und zeigt ein Hinweis-Banner', () => {
@@ -704,14 +771,143 @@ test('der Download liefert die geschriebene .env, nicht eine Nachbildung im Brow
   }
 });
 
+/** Der Rumpf des done-download-Handlers. Der Guard prüfte vorher die exakte
+ *  Schreibweise `a.href = '/api/env-file';` - er wurde rot, als der Anker durch
+ *  ein fetch mit echter Fehlerprüfung ersetzt wurde, also durch die BESSERE
+ *  Fassung derselben Absicht. Geprüft wird deshalb die Absicht: hol die Datei
+ *  vom Server, und melde Erfolg erst, wenn der Server sie geliefert hat. */
+function doneDownloadHandler(html) {
+  const start = html.indexOf("$('done-download').addEventListener('click'");
+  assert.notEqual(start, -1, 'der done-download-Handler wurde nicht gefunden');
+  // Bis zum nächsten Listener auf oberster Ebene - der Handler endet dort.
+  const rest = html.slice(start + 1);
+  const end = rest.indexOf("\n$('");
+  return rest.slice(0, end === -1 ? undefined : end);
+}
+
 test('die Abschlussseite baut die .env nicht mehr im Browser nach', () => {
   const html = readFileSync(new URL('../tools/installer/install.html', import.meta.url), 'utf8');
-  assert.match(html, /a\.href = '\/api\/env-file';/,
+  const handler = doneDownloadHandler(html);
+  assert.match(handler, /fetch\(\s*['"]\/api\/env-file['"]\s*\)/,
     'der Download muss die Datei vom Server holen');
   // Die Nachbildung konnte prinzipiell nicht stimmen und ist entfallen; kehrt
   // sie zurück, kehrt der Bug mit ihr zurück.
   assert.doesNotMatch(html, /function renderEnvClient/,
     'renderEnvClient ist ersatzlos entfallen - der Browser kennt die bewahrten Werte nicht');
+});
+
+test('der Download meldet Erfolg erst, wenn der Server geliefert hat', () => {
+  // Der Anker-Klick konnte nicht scheitern, also wurde keysDownloaded auch dann
+  // gesetzt, wenn nichts ankam. Der Installer beendet sich fünf Minuten nach der
+  // Kontoerstellung: wer den Tab liegen liess, bekam danach keine Datei, keine
+  // Meldung - und eine Oberfläche, die "Schlüssel gesichert" behauptete. Das ist
+  // die einzige Sicherung des DB_ENCRYPTION_KEY.
+  const html = readFileSync(new URL('../tools/installer/install.html', import.meta.url), 'utf8');
+  const handler = doneDownloadHandler(html);
+
+  const okCheck = handler.search(/\.ok\b/);
+  const flagSet = handler.search(/keysDownloaded\s*=\s*true/);
+  assert.notEqual(okCheck, -1, 'der Handler muss die Server-Antwort prüfen (r.ok)');
+  assert.notEqual(flagSet, -1, 'keysDownloaded muss im Handler gesetzt werden');
+  assert.ok(okCheck < flagSet,
+    'die Erfolgsprüfung muss VOR keysDownloaded stehen, sonst meldet ein Fehlschlag Erfolg');
+
+  // Und der Fehlschlag muss sichtbar werden, nicht nur nicht-erfolgreich sein.
+  assert.match(handler, /catch/, 'ein Fehlschlag muss abgefangen werden');
+  assert.match(html, /id="done-err"/, 'der Fehlschlag braucht eine sichtbare Meldung');
+});
+
+test('ein zweiter Lauf kann den Einfach-Pfad nicht ueber eine bestehende .env legen', () => {
+  // Der Rerun-Schutz des Servers bewahrt, was der Client NICHT schickt. Genau
+  // deshalb greift er beim Einfach-Pfad nicht: applySimpleDefaults() setzt host,
+  // port, SESSION_SECURE und TRUST_PROXY hart, buildEnv() schickt sie mit. Ein
+  // zweiter Einfach-Lauf ueber eine Instanz hinter einem Reverse-Proxy nahm ihr
+  // unbemerkt die sicheren Cookies, das Proxy-Vertrauen und die BASE_URL.
+  const html = readFileSync(new URL('../tools/installer/install.html', import.meta.url), 'utf8');
+
+  // Die Sperre haengt an ihrem Anlass, nicht an sich selbst: setzt der
+  // Einfach-Pfad diese Werte eines Tages nicht mehr hart, darf sie fallen.
+  const simpleDefaults = html.slice(html.indexOf('function applySimpleDefaults'));
+  const hardcodesSecurity = /SESSION_SECURE/.test(simpleDefaults.slice(0, 900))
+    && /TRUST_PROXY/.test(simpleDefaults.slice(0, 900));
+  if (!hardcodesSecurity) return; // Anlass entfallen, Zusicherung nicht mehr faellig
+
+  const start = html.indexOf('if (d.envExists)');
+  assert.notEqual(start, -1, 'der Preflight muss auf eine bestehende .env reagieren');
+  // Bis zur schliessenden Klammer, nicht ueber ein Zeichenfenster: ein festes
+  // Fenster reichte in den Prereq-Block darunter hinein, der mode-simple aus
+  // einem ganz anderen Grund sperrt. Die Gegenprobe gegen den Stand VOR dieser
+  // Sperre war damit gruen aus dem falschen Grund - ein Guard, der die Nachbar-
+  // regel mitliest, sichert nicht die Regel, die er zu sichern vorgibt.
+  const block = (() => {
+    const open = html.indexOf('{', start);
+    let depth = 0;
+    for (let i = open; i < html.length; i++) {
+      if (html[i] === '{') depth++;
+      else if (html[i] === '}' && --depth === 0) return html.slice(start, i + 1);
+    }
+    assert.fail('der envExists-Block ist nicht geschlossen');
+  })();
+  assert.match(block, /mode-simple/,
+    'bei bestehender .env muss der Preflight den Einfach-Pfad anfassen');
+  assert.match(block, /disabled\s*=\s*true/,
+    'bei bestehender .env muss der Einfach-Pfad gesperrt werden - sonst ueberschreibt er still Host, Port und die Cookie-Sicherheit');
+  // Und der Nutzer muss erfahren, warum die Karte tot ist.
+  assert.match(html, /id="welcome-existing"/,
+    'die Sperre braucht eine sichtbare Begruendung auf der Willkommensseite');
+});
+
+test('der Einfach-Pfad liest seine Sperre erst nach dem Preflight - beim Start und beim Speichern', () => {
+  // Die Sperre oben setzt erst die ANTWORT des Preflights. Bis dahin ist die
+  // Karte klickbar, und startFlow() wartete nicht: ein Klick in diesem Fenster
+  // landete trotz bestehender .env im Einfach-Pfad, dessen Speichern Host, Port,
+  // SESSION_SECURE und TRUST_PROXY hart darueberschrieb. Geprueft wird deshalb
+  // die Reihenfolge an beiden Tueren: erst warten, dann die Sperre lesen und
+  // umlenken, dann handeln.
+  const html = readFileSync(new URL('../tools/installer/install.html', import.meta.url), 'utf8');
+
+  const bodyFrom = (marker) => {
+    const at = html.indexOf(marker);
+    assert.notEqual(at, -1, `${marker} nicht gefunden`);
+    const open = html.indexOf('{', at + marker.length - 1);
+    let depth = 0;
+    for (let i = open; i < html.length; i++) {
+      if (html[i] === '{') depth++;
+      else if (html[i] === '}' && --depth === 0) return html.slice(open, i + 1);
+    }
+    return assert.fail(`${marker} ist nicht geschlossen`);
+  };
+
+  const start = bodyFrom('function startFlow(');
+  const waitStart = start.indexOf('await preflightDone');
+  const redirect = start.search(/if \(simpleLockedByEnv\) m = 'advanced'/);
+  const defaults = start.indexOf('applySimpleDefaults');
+  assert.notEqual(waitStart, -1, 'startFlow wartet nicht auf den Preflight');
+  assert.ok(redirect > waitStart,
+    'startFlow lenkt bei bestehender .env nicht nach dem Warten in den Erweitert-Pfad um');
+  assert.ok(defaults > redirect,
+    'startFlow setzt die Einfach-Defaults, bevor die Sperre entschieden hat');
+  // Das Warten oeffnet ein zweites Fenster (Review zu #1217): wer waehrenddessen
+  // "Erweitert" waehlt, ist sofort dort - und die haengende Einfach-Wahl rief
+  // danach trotzdem showStep(1) und warf ihn zurueck. Nur die LETZTE Wahl darf
+  // nach dem Warten weiterlaufen.
+  assert.match(html, /let flowRequest = 0;/, 'es gibt keinen Zaehler fuer die letzte Modus-Wahl');
+  const claim = start.indexOf('const request = ++flowRequest');
+  const stale = start.search(/if \(request !== flowRequest\) return;/);
+  assert.ok(claim !== -1 && claim < waitStart,
+    'startFlow vermerkt die Wahl nicht vor dem Warten');
+  assert.ok(stale > waitStart && stale < redirect,
+    'eine ueberholte Einfach-Wahl laeuft nach dem Warten weiter und springt zurueck');
+
+  const save = bodyFrom("$('simple-next').addEventListener('click', async () =>");
+  const write = save.indexOf("fetch('/api/save-env'");
+  const waitSave = save.indexOf('await preflightDone');
+  const refuse = save.search(/if \(simpleLockedByEnv\) \{ startFlow\('advanced'\); return; \}/);
+  assert.notEqual(write, -1, 'der Einfach-Pfad schreibt nicht mehr ueber /api/save-env - Guard veraltet?');
+  assert.ok(waitSave !== -1 && waitSave < write,
+    'das Speichern im Einfach-Pfad wartet nicht auf den Preflight');
+  assert.ok(refuse > waitSave && refuse < write,
+    'das Speichern im Einfach-Pfad bricht bei bestehender .env nicht vor dem Schreiben ab');
 });
 
 test('ein Rerun schreibt gueltige Compose-Syntax unveraendert zurueck', async () => {
@@ -760,4 +956,132 @@ test('der Installer bleibt nach dem Setup erreichbar, solange der Download ausst
   // Jeder Request setzt ihn zurueck - sonst waere die Frist wieder starr.
   assert.match(src, /idleTimer = setTimeout\([\s\S]*?\}, idleMs\);/,
     'der Idle-Timer muss die veraenderliche Frist benutzen');
+});
+
+test('jede Redirect-URI kommt aus derselben Quelle wie BASE_URL', () => {
+  // Die angezeigte URI wird zeichengenau in die Google Cloud Console kopiert.
+  // Sie stand fest verdrahtet auf `http://${S.host}:${S.port}/...`, waehrend
+  // adv-next den geschriebenen Wert aus BASE_URL baute - bei jedem Setup hinter
+  // einem Reverse-Proxy trug der Nutzer damit eine andere Adresse ein als die,
+  // die die App spaeter schickt. Der Fehler zeigt sich erst beim ersten
+  // OAuth-Versuch als redirect_uri_mismatch, also lange nach der Installation.
+  const html = readFileSync(new URL('../tools/installer/install.html', import.meta.url), 'utf8');
+
+  const callbackLines = html.split('\n')
+    .map((line, i) => [i + 1, line])
+    .filter(([, line]) => line.includes('/callback`'));
+  assert.ok(callbackLines.length >= 2, 'erwartet mindestens zwei Redirect-URI-Zeilen');
+
+  const offenders = callbackLines
+    .filter(([, line]) => !line.includes('plannedOrigin()') && !line.includes('${origin}'))
+    .map(([n, line]) => `Zeile ${n}: ${line.trim().slice(0, 80)}`);
+  assert.deepEqual(offenders, [],
+    `Redirect-URI aus einer zweiten Quelle statt aus plannedOrigin()/origin: ${offenders.join(' | ')}`);
+
+  // Und origin selbst muss BASE_URL sein, nicht wieder host:port.
+  assert.match(html, /const origin = S\.BASE_URL;/,
+    'origin muss BASE_URL sein - sonst zeigt die Konsole auf host:port, die App auf die Proxy-Adresse');
+});
+
+/* Die oeffentliche Adresse folgt dem eingegebenen Host - geprueft am ERGEBNIS.
+ *
+ * Der vorhandene Redirect-Guard prueft, dass jede URI aus plannedOrigin() kommt.
+ * Er blieb gruen, waehrend plannedOrigin() selbstbezueglich wurde: onEnterStep
+ * belegte das Adressfeld mit ihrem Rueckgabewert vor, und ab da las sie nur noch
+ * dieses Feld. Wer den Host auf `nas.local` setzte, bekam trotzdem
+ * `https://localhost:3000` in die .env (Critique 2026-08-15).
+ *
+ * Ein Guard, der eine FUNKTION nennt, sichert nur, dass jemand die richtige
+ * Funktion aufgerufen hat. Dieser hier rechnet die Kette nach, die der Browser
+ * geht: Feldwert rein, geschriebene Origin raus. Er ist absichtlich eine
+ * Nachbildung und keine Zusicherung ueber den echten DOM - aber er faellt um,
+ * sobald die Ableitung wieder aufhoert, dem Host zu folgen.
+ */
+test('die abgeleitete Adresse folgt dem eingegebenen Host, nicht der Vorbelegung', () => {
+  const html = readFileSync(new URL('../tools/installer/install.html', import.meta.url), 'utf8');
+
+  // plannedOrigin() darf das eigene Feld nur lesen, wenn es ANGEFASST wurde.
+  const fn = html.slice(html.indexOf('function plannedOrigin()'));
+  const body = fn.slice(0, fn.indexOf('\n}'));
+  assert.match(body, /dataset\.touched/,
+    'plannedOrigin() muss das Adressfeld an dataset.touched binden - sonst liest es seine eigene Vorbelegung zurueck');
+
+  // Und Host/Port muessen aus den Feldern kommen, nicht aus S: S.host wird erst
+  // in cfg-next gesetzt, die Vorbelegung laeuft davor.
+  assert.match(body, /\$\('cfg-host'\)/,
+    'plannedOrigin() muss den Host aus dem Feld lesen - S.host ist waehrend der Eingabe noch der alte Wert');
+
+  // Die Vorbelegung haengt an allen drei Eingaben, aus denen sie folgt. KEIN
+  // Zeichenfenster mehr: die erste Fassung nahm slice(0, 1200) ab der Funktion,
+  // und ein eingefuegter Kommentarblock schob cfg-port aus dem Fenster - der
+  // Guard fiel um, ohne dass sich an der Verdrahtung etwas geaendert haette.
+  // Ein Fenster misst Textabstand, nicht Verhalten.
+  const wiring = html.slice(html.indexOf('function refreshPlannedOrigin'));
+  for (const id of ['adv-proxy', 'cfg-host', 'cfg-port']) {
+    assert.match(wiring, new RegExp(`'${id}'`),
+      `${id} muss die Vorbelegung der oeffentlichen Adresse neu anstossen`);
+  }
+
+  // Und die REIHENFOLGE, denn sie ist hier die ganze Logik: Listener laufen in
+  // Registrierungsreihenfolge, auf einem <select> feuert `input` vor `change`.
+  // Stand die touched-Markierung hinter der Ableitung, ueberschrieb
+  // refreshPlannedOrigin die gerade getroffene Wahl mit der Host-Ableitung - der
+  // Select sprang sichtbar zurueck, erst der zweite Versuch hielt (Critique
+  // 2026-08-15). Ein Guard, der nur das Vorkommen prueft, sieht das nie.
+  const touchedAt = wiring.indexOf("adv-proxy').addEventListener('input', e =>");
+  const derivedAt = wiring.indexOf("$(id).addEventListener('input', refreshPlannedOrigin)");
+  assert.notEqual(touchedAt, -1, 'adv-proxy braucht eine touched-Markierung auf input');
+  assert.notEqual(derivedAt, -1, 'die Ableitung muss an input haengen');
+  assert.ok(touchedAt < derivedAt,
+    'die touched-Markierung von adv-proxy muss VOR der Ableitung registriert werden, '
+    + 'sonst verwirft der erste Bedienvorgang die Wahl des Nutzers');
+});
+
+test('kein ENABLED-Schalter schreibt ein hartes false', () => {
+  // Ein geschriebenes 'false' ueberlebt sanitizeEnv und schlaegt damit den
+  // Rerun-Schutz: es sieht aus wie eine Entscheidung, ist aber nur ein
+  // unangehaktes Feld, das der Wizard beim Rerun nie aus der .env befuellt.
+  // Wer WebDAV-Backups ausserhalb des Wizards eingerichtet hatte, fand sie nach
+  // einem zweiten Lauf still abgeschaltet (Critique 2026-08-15).
+  const html = readFileSync(new URL('../tools/installer/install.html', import.meta.url), 'utf8');
+  const offenders = html.split('\n')
+    .map((line, i) => [i + 1, line])
+    .filter(([, line]) => /S\.[A-Z_]+\s*=.*\?\s*'true'\s*:\s*'false'/.test(line))
+    .map(([n, line]) => `Zeile ${n}: ${line.trim().slice(0, 70)}`);
+  assert.deepEqual(offenders, [],
+    `Diese Schalter schreiben ein hartes 'false' und ueberschreiben damit bestehende Werte: ${offenders.join(' | ')}`);
+});
+
+test('jedes Feld des Preflights wird im Wizard auch gelesen', () => {
+  // containerRunning wurde bei JEDEM Preflight per docker-inspect-Spawn ermittelt,
+  // von einem Test als Boolean zugesichert und in tools/installer/README.md als
+  // Funktion angekuendigt - und von keiner Zeile in install.html gelesen
+  // (Critique 2026-08-15). Ein Guard, der einen Wert zusichert, den niemand
+  // konsumiert, faerbt einen toten Pfad gruen.
+  //
+  // Die erste Fassung dieser Pruefung war selbst blind: sie suchte die Feldnamen
+  // zeilenweise, die Antwort ist aber ein EINZEILIGES Objektliteral - die Liste
+  // blieb leer und die Assertion darueber gruen. Deshalb steht die Mindestzahl
+  // hier als eigene Zusicherung: ein Guard, der nichts gefunden hat, darf nicht
+  // urteilen.
+  const server = readFileSync(new URL('../tools/installer/install-server.js', import.meta.url), 'utf8');
+  const html = readFileSync(new URL('../tools/installer/install.html', import.meta.url), 'utf8');
+
+  const seg = server.slice(server.indexOf('/api/preflight'));
+  const answer = seg.match(/json\(res,\s*200,\s*\{([^}]*)\}\)/);
+  assert.ok(answer, 'Die Preflight-Antwort wurde nicht gefunden');
+
+  const fields = answer[1]
+    .split(',')
+    .map(part => part.split(':')[0].trim())
+    .filter(Boolean);
+
+  assert.ok(fields.length >= 3,
+    `Nur ${fields.length} Preflight-Felder erkannt (${fields.join(', ')}) - der Scanner greift nicht mehr, `
+    + 'und eine Zusicherung ueber eine fast leere Liste ist keine');
+
+  const unused = fields.filter(f => !html.includes(f));
+  assert.deepEqual(unused, [],
+    `Der Preflight liefert Felder, die der Wizard nie liest: ${unused.join(', ')}. `
+    + 'Entweder auswerten oder Feld, Spawn, Zusicherung und README-Satz gemeinsam entfernen.');
 });

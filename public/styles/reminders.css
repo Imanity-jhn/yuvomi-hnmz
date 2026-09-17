@@ -36,12 +36,20 @@
   padding-right: var(--space-2, 8px);
 }
 
-.toast__reminder-icon {
-  display: flex;
-  align-items: center;
-  flex-shrink: 0;
-  color: var(--module-reminders);
-}
+/* HIER STAND `.toast__reminder-icon`, und es steht mit Absicht nichts mehr an
+ * seiner Stelle: das Herkunfts-Siegel der Meldung braucht keine eigene Regel.
+ * Form, Groesse, Material und Tinte kommen vollstaendig vom geteilten
+ * .module-seal-Baustein (layout.css); den Ton pro Meldung setzt reminders.js
+ * inline aus der Herkunft der Zeile. Hier stand „samt seiner --vivid-Variante":
+ * die brauchte der Toast als einzige umgekehrte Flaeche der App, seit dem
+ * 2026-08-17 steht ihr Vollton aber in der Basisregel und die Variante ist
+ * gestrichen.
+ *
+ * DIE VORIGE FASSUNG WAR EINE GLOCKE IN --module-reminders, in jeder Meldung
+ * dieselbe: sie sagte, DASS etwas faellig ist, nie WORAUS. Und sie war
+ * unlesbar - der Erinnerungs-Violett lag auf dem Toast-Grund bei 1,84:1 und
+ * damit unter der 3:1 der Grafikschwelle, in beiden Themes, weil der Toast in
+ * beiden die Umkehrung der Seite ist. */
 
 .toast__reminder-text {
   display: flex;

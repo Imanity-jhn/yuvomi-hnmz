@@ -128,7 +128,9 @@ export function applyRich(el, key, slots = {}) {
   while ((m = re.exec(str)) !== null) {
     if (m.index > last) frag.appendChild(document.createTextNode(str.slice(last, m.index)));
     const slot = slots[m[1]];
-    if (slot) frag.appendChild(slot);
+    // Strings als Textknoten annehmen: appendChild wirft sonst, und ein Aufrufer
+    // mischt fast zwangsläufig beides („{{list}} fehlt, {{link}} hilft").
+    if (slot != null) frag.appendChild(typeof slot === 'string' ? document.createTextNode(slot) : slot);
     last = re.lastIndex;
   }
   if (last < str.length) frag.appendChild(document.createTextNode(str.slice(last)));

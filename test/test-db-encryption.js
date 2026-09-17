@@ -340,3 +340,75 @@ test('der SQLCipher-Cipher (AES-256) ist aktiv, nicht der Default ChaCha20', asy
 
   assert.ok(readable.count >= 0, 'die Datenbank muss im sqlcipher-Modus lesbar sein');
 });
+
+// ----------------------------------------------------------------------------
+// Platzhalter-Schlüssel aus .env.example
+//
+// `.env.example` liefert DB_ENCRYPTION_KEY=REPLACE_WITH_A_STRONG_ENCRYPTION_KEY,
+// keine leere Zeile. Wer den Quick-Start am Stück kopiert und `.env` nicht
+// bearbeitet, verschlüsselt damit gegen eine Konstante, die im Repository steht.
+// Die zwei Fälle sind bewusst verschieden: bei einer NEUEN Datenbank ist der
+// Fehler vermeidbar und wird abgebrochen, bei einer BESTEHENDEN ist er längst
+// passiert und ein Startfehler würde nur eine laufende Instanz stilllegen.
+// ----------------------------------------------------------------------------
+
+const PLACEHOLDER_KEY = 'REPLACE_WITH_A_STRONG_ENCRYPTION_KEY';
+
+/** Verschlüsselte Bestands-Datenbank mit gegebenem Key erzeugen. */
+function seedEncryptedDb(filePath, key) {
+  const seed = new Database(filePath);
+  seed.pragma("cipher = 'sqlcipher'");
+  seed.pragma(`key="x'${Buffer.from(key, 'utf8').toString('hex')}'"`);
+  seed.exec('CREATE TABLE legacy_marker (id INTEGER PRIMARY KEY, note TEXT)');
+  seed.prepare('INSERT INTO legacy_marker (note) VALUES (?)').run('Bestand');
+  seed.close();
+}
+
+test('der Platzhalter aus .env.example bricht den Start einer NEUEN Datenbank ab', async () => {
+  const dbPath = join(tmpDir(), 'yuvomi.db');
+
+  await assert.rejects(
+    () => bootDb(dbPath, PLACEHOLDER_KEY),
+    /placeholder from \.env\.example/,
+    'ein Platzhalter darf keine neue Datenbank verschlüsseln'
+  );
+
+  assert.ok(
+    !existsSync(dbPath),
+    'es darf keine Datei entstehen, die gegen eine veröffentlichte Konstante verschlüsselt ist'
+  );
+});
+
+test('jeder REPLACE_WITH_-Wert wird abgefangen, nicht nur der aus .env.example', async () => {
+  const dbPath = join(tmpDir(), 'yuvomi.db');
+
+  await assert.rejects(
+    () => bootDb(dbPath, 'REPLACE_WITH_SOMETHING_ELSE'),
+    /placeholder from \.env\.example/,
+    'der Guard prüft das Präfix, nicht einen einzelnen Literalwert'
+  );
+});
+
+test('eine BESTEHENDE Datenbank mit Platzhalter-Key startet weiter', async () => {
+  const dbPath = join(tmpDir(), 'yuvomi.db');
+  seedEncryptedDb(dbPath, PLACEHOLDER_KEY);
+  assert.ok(!isPlaintext(dbPath), 'Vorbedingung: Bestands-DB ist verschlüsselt');
+
+  // Kein rejects: wer diesen Weg schon gegangen ist, behält seine laufende
+  // Instanz. Der Guard verhindert den Fehler, er bestraft ihn nicht rückwirkend.
+  const mod = await bootDb(dbPath, PLACEHOLDER_KEY);
+
+  const row = mod.get().prepare('SELECT note FROM legacy_marker WHERE id = 1').get();
+  assert.equal(row.note, 'Bestand', 'die Bestandsdaten müssen lesbar bleiben');
+});
+
+test('ein echter Key, der zufällig mit REPLACE beginnt, wird nicht abgefangen', async () => {
+  const dbPath = join(tmpDir(), 'yuvomi.db');
+
+  // Der Guard hängt am Präfix `REPLACE_WITH_`, nicht am Wort "REPLACE". Ein
+  // Nutzer, dessen Passphrase so anfängt, darf nicht ausgesperrt werden.
+  await bootDb(dbPath, 'REPLACEMENT-KEY-die-echt-ist-0123456789');
+
+  assert.ok(existsSync(dbPath), 'Datenbank muss angelegt werden');
+  assert.ok(!isPlaintext(dbPath), 'und verschlüsselt sein');
+});

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -204,6 +205,70 @@ test('docker-compose.yml leitet SESSION_SECURE aus der .env ab (Default false)',
     'hartkodiertes SESSION_SECURE=false darf nicht mehr im environment-Block stehen');
 });
 
+// ── env_file bleibt in der Kurzform (Compose-Kompatibilität, Issue #765) ──────
+//
+// Die Langform (`- path: .env` / `required: false`) gibt es erst ab Compose
+// v2.24. Ältere Engines - Synology DSM, QNAP, Distro-Pakete - lehnen das
+// Manifest mit "services.<name>.env_file.0 must be a string" ab, also noch
+// bevor irgendetwas startet. Die Regel gilt für jedes Compose-Manifest im
+// Repo, nicht für eine Liste bekannter Dateien: eine neue Datei mit derselben
+// Falle wäre sonst unbewacht.
+
+function composeManifests(dir, out = []) {
+  const SKIP = new Set(['node_modules', '.git', '.claude', '.agents', 'coverage', 'data', 'backups']);
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name.startsWith('.') && entry.name !== '.github') continue;
+    if (SKIP.has(entry.name)) continue;
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) { composeManifests(full, out); continue; }
+    if (!/\.ya?ml$/.test(entry.name)) continue;
+    const src = readFileSync(full, 'utf8');
+    if (/^services:/m.test(src)) out.push({ path: relative(REPO_ROOT, full), src });
+  }
+  return out;
+}
+
+// Sammelt die Eintragszeilen jedes env_file-Blocks (ohne Kommentare/Leerzeilen).
+function envFileEntries(src) {
+  const lines = src.split('\n');
+  const entries = [];
+  for (let i = 0; i < lines.length; i++) {
+    const head = /^(\s*)env_file:\s*(\S.*)?$/.exec(lines[i]);
+    if (!head) continue;
+    const indent = head[1].length;
+    if (head[2]) { entries.push({ line: i + 1, text: head[2].trim() }); continue; }
+    for (let j = i + 1; j < lines.length; j++) {
+      const line = lines[j];
+      if (!line.trim() || /^\s*#/.test(line)) continue;
+      const lead = line.length - line.trimStart().length;
+      if (lead <= indent) break;
+      entries.push({ line: j + 1, text: line.trim() });
+    }
+  }
+  return entries;
+}
+
+test('kein Compose-Manifest nutzt die env_file-Langform (Compose <2.24 lehnt sie ab)', () => {
+  const manifests = composeManifests(REPO_ROOT);
+  assert.ok(manifests.length >= 2,
+    `zu wenige Compose-Manifeste gefunden (${manifests.length}) - die Suche greift nicht mehr`);
+
+  const withEnvFile = manifests.filter(m => envFileEntries(m.src).length > 0);
+  assert.ok(withEnvFile.length >= 1,
+    'kein einziger env_file-Block gefunden - der Guard prüft eine leere Liste');
+
+  for (const { path, src } of withEnvFile) {
+    for (const { line, text } of envFileEntries(src)) {
+      // Ein Eintrag muss ein reiner String sein: "- .env". Alles mit einem
+      // Schlüssel darin ("- path: .env", "required: false") ist die Langform.
+      // Geprüft wird der Schlüssel, nicht der Listenstrich: `env_file: .env`
+      // ohne Liste ist gültige Kurzform und darf nicht anschlagen.
+      assert.doesNotMatch(text, /^-?\s*\w[\w-]*:/,
+        `${path}:${line} nutzt die env_file-Langform (${text}) - siehe Issue #765`);
+    }
+  }
+});
+
 test('install.html setzt im Reverse-Proxy-Pfad SESSION_SECURE=true', () => {
   const src = readFileSync(new URL('../tools/installer/install.html', import.meta.url), 'utf8');
   assert.match(src, /S\.SESSION_SECURE\s*=\s*'true'/,
@@ -297,17 +362,27 @@ test('jeder Pfad, der die .env schreibt, verlangt vorher eine Bestätigung', () 
   }
 });
 
-test('beide Einrichtungspfade zeigen die Warnung über eine bestehende .env', () => {
+test('der Erweitert-Pfad zeigt die Warnung über eine bestehende .env', () => {
+  // Nur noch dort: mit bestehender .env ist der Einfach-Pfad gesperrt und lenkt
+  // in den Erweitert-Pfad um (test-installer-env-write.js), ein eigener Banner
+  // im Einfach-Schritt wäre nie zu sehen.
   const src = readFileSync(new URL('../tools/installer/install.html', import.meta.url), 'utf8');
-  for (const id of ['cfg-existing', 'simple-existing']) {
-    assert.match(src, new RegExp(`id="${id}"[^>]*data-i18n="config.existing"`),
-      `${id} fehlt im Markup oder trägt den falschen i18n-Schlüssel`);
-  }
-  // Ein Banner, das der Preflight nie einblendet, ist so gut wie keins.
+  // Als Warnung, nicht als Hinweis: der Speichern-Schritt ersetzt die
+  // bestehende Konfiguration, auch wenn er sie vorher sichert. Der Text sitzt
+  // im inneren span, weil die Übersetzung textContent setzt und ein Icon
+  // direkt im Banner sonst beim ersten Sprachwechsel verschwände.
+  const banner = src.match(/<div class="([^"]*)" id="cfg-existing"[^>]*>([\s\S]*?)<\/div>/);
+  assert.ok(banner, 'cfg-existing fehlt im Markup');
+  assert.match(banner[1], /\bwarn-banner\b/, 'cfg-existing ist nicht als Warnung eingefärbt');
+  assert.match(banner[2], /class="warn-icon"/, 'cfg-existing trägt kein Warn-Icon');
+  assert.match(banner[2], /<span data-i18n="config\.existing">/,
+    'cfg-existing trägt den falschen i18n-Schlüssel, oder er sitzt nicht im inneren span');
+  // Ein Banner, das der Preflight nie einblendet, ist so gut wie keins - und
+  // .warn-banner ist ein Flex-Container: mit display 'block' fiele das Icon
+  // aus der Zeile.
   const preflight = src.slice(src.indexOf('d.envExists'), src.indexOf('d.envExists') + 300);
-  for (const id of ['cfg-existing', 'simple-existing']) {
-    assert.ok(preflight.includes(id), `${id} wird bei envExists nicht eingeblendet`);
-  }
+  assert.ok(preflight.includes("$('cfg-existing').style.display = 'flex'"),
+    'cfg-existing wird bei envExists nicht als Flex-Banner eingeblendet');
 });
 
 // ── Der Wartebildschirm: eine Phase ist kein Fehlschlag ───────────────────────

@@ -14,9 +14,10 @@ const log = createLogger('CalDAV-Reminders');
 import * as db from '../db.js';
 import { parseVTODO } from './ics-parser.js';
 import { createCalDAVClient, supportsComponent } from '../utils/caldav-client.js';
-import { serverTimeZone, utcToWall } from '../utils/timezone.js';
+import { householdTimeZone, utcToWall } from '../utils/timezone.js';
 import { setItemTags, setTags } from '../utils/task-tags.js';
 import * as todoOutbound from './caldav-todo-outbound.js';
+import { runSerialized } from '../utils/sync-lock.js';
 
 // --------------------------------------------------------
 // Pure Mapping Helpers
@@ -73,7 +74,7 @@ function mapVtodoStatus(todo, current = null) {
  * Zonenoffset. Eine Fälligkeit ohne Zonenangabe (floating) ist bereits Wanduhr
  * und bleibt unangetastet.
  */
-function splitDue(due, tz = serverTimeZone()) {
+function splitDue(due, tz = householdTimeZone(null)) {
   if (!due) return { date: null, time: null };
   if (due.length === 10) return { date: due, time: null };
 
@@ -240,7 +241,7 @@ function updateReminderSelection(accountId, listUrl, { enabled, targetModule } =
 // (#617). COALESCE, weil ein Abruf ohne URL den gespeicherten Wert nicht
 // entwerten darf.
 function upsertTask(todo, accountId, createdBy, objectUrl = null) {
-  const { date, time } = splitDue(todo.due);
+  const { date, time } = splitDue(todo.due, householdTimeZone(db.get()));
 
   const existing = db.get().prepare(
     `SELECT id, priority, status FROM tasks WHERE external_uid = ? AND external_source = 'caldav' AND external_account_id = ?`
@@ -420,7 +421,16 @@ export function pruneRemoved(database, table, accountId, seenUids) {
 // Sync (inbound + Rückrichtung, #617)
 // --------------------------------------------------------
 
-async function sync({ createClient: makeClient } = {}) {
+/**
+ * Ein Sync-Lauf, serialisiert gegen den Sofortversuch der VTODO-Rückrichtung und
+ * gegen sich selbst (#593) - dieselbe Regel wie beim Kalender, eigener
+ * Schlüssel: Aufgaben und Einkauf führen ihre Buchhaltung in eigenen Tabellen.
+ */
+async function sync(opts = {}) {
+  return runSerialized('caldav-todo', 'sync', () => runSync(opts));
+}
+
+async function runSync({ createClient: makeClient } = {}) {
   const accounts = getAllAccounts();
   if (accounts.length === 0) {
     return { success: true, syncedAccounts: 0, syncedItems: 0 };
@@ -583,6 +593,49 @@ async function sync({ createClient: makeClient } = {}) {
         } catch (err) {
           log.error(`Outbound VTODO changes failed for account ${account.id} (${module}):`, err.message);
         }
+      }
+
+      // Hier angelegte Aufgaben hochladen (#695). Bewusst als LETZTER Schritt:
+      // bis hierher ist der Prune gelaufen, und der sieht eine Aufgabe, die
+      // gerade erst zum Spiegel geworden ist, in diesem Lauf noch nicht auf dem
+      // Server - er würde sie also sofort wieder entfernen. Die Listen stammen
+      // aus dem Abruf oben, es kommt kein zweiter hinzu.
+      try {
+        const taskLists = new Map(
+          enabledLists
+            .filter((s) => s.target_module !== 'shopping')
+            .map((s) => [s.list_url, serverCals.find((c) => c.url === s.list_url)])
+            .filter(([, cal]) => cal)
+        );
+        const created = await todoOutbound.processPendingCreations(
+          client, account.id, 'tasks', taskLists
+        );
+        totalPushed += created;
+        if (created) log.info(`${created} locally created task(s) uploaded to the server.`);
+      } catch (err) {
+        log.error(`Uploading local tasks failed for account ${account.id}:`, err.message);
+      }
+
+      // Dasselbe für den Einkauf (#831). Ein Artikel trägt kein eigenes Ziel -
+      // die Zuordnung Server-Liste ↔ Yuvomi-Liste ist die Zielangabe, also
+      // reicht sie hier hinein.
+      try {
+        const shoppingSelections = enabledLists.filter((s) => s.target_module === 'shopping');
+        const shoppingLists = new Map(
+          shoppingSelections
+            .map((s) => [s.list_url, serverCals.find((c) => c.url === s.list_url)])
+            .filter(([, cal]) => cal)
+        );
+        const created = await todoOutbound.processPendingShoppingCreations(
+          client,
+          account.id,
+          shoppingSelections.map((s) => ({ listUrl: s.list_url, targetListId: s.target_list_id })),
+          shoppingLists
+        );
+        totalPushed += created;
+        if (created) log.info(`${created} locally created shopping item(s) uploaded to the server.`);
+      } catch (err) {
+        log.error(`Uploading local shopping items failed for account ${account.id}:`, err.message);
       }
 
       db.get().prepare('UPDATE caldav_accounts SET last_sync = ? WHERE id = ?')

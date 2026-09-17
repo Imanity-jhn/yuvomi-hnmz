@@ -1,30 +1,17 @@
 /**
  * Modul: HTML Utilities
  * Zweck: XSS-Schutz fuer innerHTML-basiertes Rendering
- * Abhaengigkeiten: keine
+ * Abhaengigkeiten: /utils/markdown-checklist.js
  */
 
-const ESCAPE_MAP = {
-  '&': '&amp;',
-  '<': '&lt;',
-  '>': '&gt;',
-  '"': '&quot;',
-  "'": '&#39;',
-};
+import { matchChecklistLine } from './markdown-checklist.js';
+import { esc } from './html-escape.js';
 
-const ESCAPE_RE = /[&<>"']/g;
-
-/**
- * Escapet einen String fuer die sichere Einbettung in HTML.
- * Gibt fuer null/undefined einen Leerstring zurueck.
- *
- * @param {*} str - Beliebiger Wert (wird zu String konvertiert)
- * @returns {string} HTML-sicherer String
- */
-export function esc(str) {
-  if (str == null) return '';
-  return String(str).replace(ESCAPE_RE, (ch) => ESCAPE_MAP[ch]);
-}
+// esc() wohnt seit #944 nebenan und wird hier weiter angeboten: die rund
+// siebzig Aufrufer im Frontend importieren es unveraendert von hier, waehrend
+// der Mail-Versand im Backend nur das schmale Modul zieht statt dieser Datei
+// samt Notiz-Renderer. Eine Funktion, zwei Adressen - keine zweite Fassung.
+export { esc };
 
 /**
  * Normalisiert einen iCalendar LOCATION-String fuer die Anzeige.
@@ -62,6 +49,27 @@ function inlineMarkdown(segment) {
 }
 
 /**
+ * Entfernt die Inline-Marker aus einem Segment und gibt reinen Text zurück.
+ *
+ * Für Attributwerte, die kein Markup vertragen — namentlich den zugänglichen
+ * Namen eines Kästchens. `**Milch** kaufen` soll dort als „Milch kaufen"
+ * ankommen und nicht als „Sternchen Sternchen Milch".
+ *
+ * @param {string} segment
+ * @returns {string} Klartext (noch nicht HTML-escaped)
+ */
+function stripInlineMarkdown(segment) {
+  return String(segment ?? '')
+    .replace(/<\/?u>/g, '')
+    .replace(/`([^`]+?)`/g, '$1')
+    .replace(/\[([^\]]+?)\]\(([^)\s]+?)\)/g, '$1')
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/~~(.+?)~~/g, '$1')
+    .replace(/\*([^*]+?)\*/g, '$1')
+    .trim();
+}
+
+/**
  * Rendert die Markdown-Teilmenge des Notiz-Editors zu sicherem HTML — in
  * voller Parität mit der Editor-Toolbar: Überschriften (#–###), ungeordnete
  * und geordnete Listen, Checklisten (- [ ] / - [x]), Zitate (>), Trennlinien
@@ -71,92 +79,28 @@ function inlineMarkdown(segment) {
  * vertrauenswürdige Block-Tags werden eingeführt. Rückgabe ist für
  * insertAdjacentHTML bestimmt.
  *
+ * Checklisten-Kästchen sind standardmäßig Dekoration (`aria-hidden`), weil der
+ * Renderer nicht wissen kann, ob sein Aufrufer den Text auch zurückschreiben
+ * kann. Wer das kann, setzt `checklist.interactive` und bekommt echte
+ * Bedienelemente mit der Quellzeilennummer am Element — der Aufrufer schaltet
+ * dann über den Index um, nicht über den Text. Das Dashboard darf das
+ * ausdrücklich nicht: es zeigt einen gekürzten Auszug, dessen Zeilennummern
+ * nicht die der Notiz sind.
+ *
  * @param {string|null|undefined} text
+ * @param {{ checklist?: { interactive?: boolean, toggleLabel?: string } }} [options]
  * @returns {string} HTML string
  */
-
-/**
- * Toggles the Nth GFM checklist item (0-based) in markdown source.
- * Matches the same line pattern as renderMarkdownLight.
- *
- * @param {string|null|undefined} content
- * @param {number} index
- * @param {boolean} [checked] - force state; omit to flip
- * @returns {{ content: string, checked: boolean } | null}
- */
-export function toggleChecklistItem(content, index, checked) {
-  if (!Number.isInteger(index) || index < 0) return null;
-  const lines = String(content ?? '').replace(/\r\n?/g, '\n').split('\n');
-  let seen = 0;
-  for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/^ {0,3}[-*+]\s+\[([ xX])\]\s+(.*)$/);
-    if (!m) continue;
-    if (seen === index) {
-      const currently = m[1].toLowerCase() === 'x';
-      const next = checked === undefined ? !currently : Boolean(checked);
-      const mark = next ? 'x' : ' ';
-      lines[i] = lines[i].replace(/^(\s*[-*+]\s+\[)[ xX](\])/, `$1${mark}$2`);
-      return { content: lines.join('\n'), checked: next };
-    }
-    seen += 1;
-  }
-  return null;
-}
-
-/**
- * Editor Enter behaviour for GFM checklist lines (GitHub/Notion-style).
- * On a checklist item with body text → insert a new empty `- [ ] ` line
- * (splitting at the caret). On an empty item → exit the checklist (blank line).
- * Returns null when the current line is not a checklist item.
- *
- * @param {string|null|undefined} value
- * @param {number} pos collapsed caret index
- * @returns {{ value: string, selectionStart: number } | null}
- */
-export function continueChecklistEnter(value, pos) {
-  const text = String(value ?? '');
-  if (!Number.isInteger(pos) || pos < 0 || pos > text.length) return null;
-
-  const lineStart = text.lastIndexOf('\n', pos - 1) + 1;
-  const lineEndIdx = text.indexOf('\n', pos);
-  const lineEnd = lineEndIdx === -1 ? text.length : lineEndIdx;
-  const line = text.slice(lineStart, lineEnd);
-
-  // Marker only — do not match plain `- list` or `- [not a box]`.
-  const m = line.match(/^(\s{0,3})([-*+]) \[([ xX])\] ?/);
-  if (!m) return null;
-
-  const marker = m[0];
-  const indent = m[1];
-  const body = line.slice(marker.length);
-  const caretInLine = pos - lineStart;
-  const bodyCaret = Math.max(0, caretInLine - marker.length);
-  const bodyBefore = body.slice(0, bodyCaret);
-  const bodyAfter = body.slice(bodyCaret);
-
-  // Empty item (no text after the marker) → leave the checklist.
-  if (body.trim() === '') {
-    const next = text.slice(0, lineStart) + text.slice(lineEnd);
-    return { value: next, selectionStart: lineStart };
-  }
-
-  const kept = marker + bodyBefore;
-  const rest = bodyAfter.replace(/^\s+/, '');
-  const inserted = `\n${indent}- [ ] ${rest}`;
-  const next = text.slice(0, lineStart) + kept + inserted + text.slice(lineEnd);
-  const selectionStart = lineStart + kept.length + 1 + indent.length + '- [ ] '.length;
-  return { value: next, selectionStart };
-}
-
 export function renderMarkdownLight(text, options = {}) {
   if (!text) return '';
 
-  const interactive = Boolean(options && options.interactive);
+  const liveChecklist = options.checklist?.interactive === true;
+  const toggleLabel   = options.checklist?.toggleLabel ?? '';
+
   const lines = String(text).replace(/\r\n?/g, '\n').split('\n');
   const html = [];
   let list = null;      // { tag: 'ul' | 'ol', checklist: boolean }
   let para = [];
-  let checkIndex = 0;
 
   const flushPara = () => {
     if (para.length) { html.push(`<p class="note-md-p">${para.join('<br>')}</p>`); para = []; }
@@ -165,7 +109,8 @@ export function renderMarkdownLight(text, options = {}) {
     if (list) { html.push(`</${list.tag}>`); list = null; }
   };
 
-  for (const line of lines) {
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
     // Trennlinie
     if (/^ {0,3}(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
       flushPara(); closeList(); html.push('<hr class="note-md-hr">'); continue;
@@ -184,25 +129,23 @@ export function renderMarkdownLight(text, options = {}) {
       html.push(`<blockquote class="note-md-quote">${inlineMarkdown(m[1])}</blockquote>`);
       continue;
     }
-    // Checklisten-Eintrag
-    m = line.match(/^ {0,3}[-*+]\s+\[([ xX])\]\s+(.*)$/);
-    if (m) {
+    // Checklisten-Eintrag — dieselbe Regel, nach der die Route zurückschreibt
+    const item = matchChecklistLine(line);
+    if (item) {
       flushPara();
       if (!list || list.tag !== 'ul' || !list.checklist) {
         closeList(); html.push('<ul class="note-md-ul note-md-checklist">'); list = { tag: 'ul', checklist: true };
       }
-      const checked = m[1].toLowerCase() === 'x';
-      const idx = checkIndex++;
-      if (interactive) {
-        html.push(
-          `<li class="note-md-check note-md-check--interactive${checked ? ' is-checked' : ''}" data-check-index="${idx}">`
-          + `<button type="button" class="note-md-box" role="checkbox" aria-checked="${checked}"`
-          + ` data-action="toggle-check" data-check-index="${idx}" aria-label="${esc(m[2])}"></button>`
-          + `<span>${inlineMarkdown(m[2])}</span></li>`
-        );
-      } else {
-        html.push(`<li class="note-md-check${checked ? ' is-checked' : ''}"><span class="note-md-box" aria-hidden="true"></span><span>${inlineMarkdown(m[2])}</span></li>`);
-      }
+      // Das Kästchen trägt seinen Namen selbst statt den Eintragstext zu
+      // umschließen: der darf einen Link enthalten, und ein <a> in einem
+      // <button> ist kein gültiges HTML. Die Trefferfläche wächst deshalb per
+      // CSS über die 1em der Box hinaus, nicht über das Markup.
+      const box = liveChecklist
+        ? `<button type="button" class="note-md-box" role="checkbox" aria-checked="${item.checked}"`
+          + ` data-md-line="${index}" data-md-checked="${item.checked ? '1' : '0'}"`
+          + ` aria-label="${esc(stripInlineMarkdown(item.text) || toggleLabel)}"></button>`
+        : '<span class="note-md-box" aria-hidden="true"></span>';
+      html.push(`<li class="note-md-check${item.checked ? ' is-checked' : ''}">${box}<span>${inlineMarkdown(item.text)}</span></li>`);
       continue;
     }
     // Ungeordnete Liste

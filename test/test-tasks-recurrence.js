@@ -610,3 +610,178 @@ test('PATCH done: Subtask einer Serie erzeugt keine Folgeinstanz', async () => {
   const rows = db.prepare(`SELECT COUNT(*) AS n FROM tasks WHERE title = 'Sub'`).get();
   assert.equal(rows.n, 1, 'Subtasks dürfen keine Folgeinstanz auslösen');
 });
+
+test('Subtasks einer Serie werden beim Spawnen der Folgeinstanz kopiert und zurückgesetzt (#742)', async () => {
+  const parent = insertTask({
+    title: 'Wöchentlicher Putztag', status: 'open', due_date: dayKey(-7), created_by: uid,
+    is_recurring: 1, recurrence_rule: 'FREQ=WEEKLY',
+  });
+  const sub1 = insertTask({
+    title: 'Bad putzen', status: 'done', due_date: dayKey(-7), created_by: uid,
+    parent_task_id: parent,
+  });
+  const sub2 = insertTask({
+    title: 'Küche wischen', status: 'open', due_date: dayKey(-7), created_by: uid,
+    parent_task_id: parent,
+  });
+
+  // Elternaufgabe erledigen
+  await call('PATCH', `/${parent}/status`, { status: 'done' });
+
+  const newParents = openInstances('Wöchentlicher Putztag');
+  assert.equal(newParents.length, 1, 'Folgeinstanz der Elternaufgabe wurde angelegt');
+  const newParent = newParents[0];
+
+  const subtasks = db.prepare('SELECT * FROM tasks WHERE parent_task_id = ? ORDER BY id ASC').all(newParent.id);
+  assert.equal(subtasks.length, 2, 'Beide Subtasks wurden in die Folgeinstanz kopiert');
+  assert.equal(subtasks[0].title, 'Bad putzen');
+  assert.equal(subtasks[0].status, 'open', 'Erledigte Subtask startet in der Folgeinstanz wieder als open');
+  assert.equal(subtasks[1].title, 'Küche wischen');
+  assert.equal(subtasks[1].status, 'open');
+});
+
+test('Rückgängig-Abhaken einer Serie mit unberührten Subtasks löscht die Folgeinstanz samt Subtasks (#742)', async () => {
+  const parent = insertTask({
+    title: 'Müll rausstellen', status: 'open', due_date: dayKey(-1), created_by: uid,
+    is_recurring: 1, recurrence_rule: 'FREQ=WEEKLY',
+  });
+  insertTask({
+    title: 'Gelbe Tonne', status: 'open', due_date: dayKey(-1), created_by: uid,
+    parent_task_id: parent,
+  });
+
+  // Elternaufgabe erledigen -> Spawn der Folgeinstanz mit Subtask
+  await call('PATCH', `/${parent}/status`, { status: 'done' });
+  let newParents = openInstances('Müll rausstellen');
+  assert.equal(newParents.length, 1);
+  const followupId = newParents[0].id;
+
+  // Erledigung rückgängig machen (ohne die neue Subtask berührt zu haben)
+  await call('PATCH', `/${parent}/status`, { status: 'open' });
+  newParents = openInstances('Müll rausstellen');
+
+  const followupExists = db.prepare('SELECT 1 FROM tasks WHERE id = ?').get(followupId);
+  assert.equal(followupExists, undefined, 'Unberührte Folgeinstanz inklusive Subtasks wird verworfen');
+});
+
+test('Rückgängig-Abhaken einer Serie mit erledigter Subtask behält die Folgeinstanz (#742)', async () => {
+  const parent = insertTask({
+    title: 'Blumen gießen', status: 'open', due_date: dayKey(-1), created_by: uid,
+    is_recurring: 1, recurrence_rule: 'FREQ=WEEKLY',
+  });
+  insertTask({
+    title: 'Balkonpflanzen', status: 'open', due_date: dayKey(-1), created_by: uid,
+    parent_task_id: parent,
+  });
+
+  // Elternaufgabe erledigen
+  await call('PATCH', `/${parent}/status`, { status: 'done' });
+  const newParent = openInstances('Blumen gießen')[0];
+
+  // In der neuen Folgeinstanz wird die Subtask abgehakt
+  const spawnedSub = db.prepare('SELECT id FROM tasks WHERE parent_task_id = ?').get(newParent.id);
+  await call('PATCH', `/${spawnedSub.id}/status`, { status: 'done' });
+
+  // Abhaken der ursprünglichen Elternaufgabe rückgängig machen
+  await call('PATCH', `/${parent}/status`, { status: 'open' });
+
+  const followupExists = db.prepare('SELECT 1 FROM tasks WHERE id = ?').get(newParent.id);
+  assert.ok(followupExists, 'Folgeinstanz bleibt erhalten, weil darin Arbeit erledigt wurde');
+});
+
+test('Eine bearbeitete (nicht erledigte) Subtask schützt die Folgeinstanz (#742)', async () => {
+  const parent = insertTask({
+    title: 'Review A', status: 'open', due_date: dayKey(-1), created_by: uid,
+    is_recurring: 1, recurrence_rule: 'FREQ=WEEKLY',
+  });
+  insertTask({ title: 'Schritt', status: 'open', due_date: dayKey(-1), created_by: uid, parent_task_id: parent });
+
+  await call('PATCH', `/${parent}/status`, { status: 'done' });
+  const followup = openInstances('Review A')[0];
+  const sub = db.prepare('SELECT id FROM tasks WHERE parent_task_id = ?').get(followup.id);
+
+  // Der Benutzer arbeitet an der neuen Instanz: nicht abhaken, sondern verfeinern
+  await call('PUT', `/${sub.id}`, { title: 'Schritt: mit Essigreiniger' });
+  await call('PATCH', `/${parent}/status`, { status: 'open' });
+
+  assert.ok(
+    db.prepare('SELECT title FROM tasks WHERE id = ?').get(sub.id),
+    'die eingegebene Arbeit darf nicht verschwinden',
+  );
+});
+
+test('Erledigungsverankerte Serie ohne Fälligkeitsdatum datiert die Subtask neu (#742)', async () => {
+  const parent = insertTask({
+    title: 'Review B', status: 'open', created_by: uid,
+    is_recurring: 1, recurrence_rule: 'FREQ=WEEKLY', recurrence_from_completion: 1,
+  });
+  insertTask({
+    title: 'Teilschritt', status: 'open', start_date: dayKey(-30), due_date: dayKey(-30),
+    created_by: uid, parent_task_id: parent,
+  });
+
+  await call('PATCH', `/${parent}/status`, { status: 'done' });
+  const followup = openInstances('Review B')[0];
+  const sub = db.prepare('SELECT start_date, due_date FROM tasks WHERE parent_task_id = ?').get(followup.id);
+
+  assert.notEqual(sub.start_date, dayKey(-30), `start_date der neuen Subtask: ${sub.start_date}`);
+});
+
+// --------------------------------------------------------
+// Das Enthaken einer Unteraufgabe ist keine Rücknahme der Serie (#924)
+// --------------------------------------------------------
+test('Enthaken einer Subtask der erledigten Instanz lässt die Folgeinstanz vollständig (#924)', async () => {
+  const parent = insertTask({
+    title: 'Wochenroutine', status: 'open', due_date: dayKey(-1), created_by: uid,
+    is_recurring: 1, recurrence_rule: 'FREQ=WEEKLY',
+  });
+  const names = ['Alpha', 'Bravo', 'Charlie', 'Delta'];
+  const subs = names.map((title) => insertTask({
+    title, status: 'open', due_date: dayKey(-1), created_by: uid, parent_task_id: parent,
+  }));
+
+  // Alpha und Charlie erledigen, dann die Elternaufgabe
+  await call('PATCH', `/${subs[0]}/status`, { status: 'done' });
+  await call('PATCH', `/${subs[2]}/status`, { status: 'done' });
+  await call('PATCH', `/${parent}/status`, { status: 'done' });
+
+  const followup = openInstances('Wochenroutine')[0];
+  assert.equal(
+    db.prepare('SELECT COUNT(*) c FROM tasks WHERE parent_task_id = ?').get(followup.id).c, 4,
+    'die Folgeinstanz startet mit allen vier Unteraufgaben',
+  );
+
+  // Auf der abgeschlossenen Instanz wird Alpha wieder enthakt
+  await call('PATCH', `/${subs[0]}/status`, { status: 'open' });
+
+  const remaining = db.prepare(
+    'SELECT title FROM tasks WHERE parent_task_id = ? ORDER BY id',
+  ).all(followup.id).map((r) => r.title);
+  assert.deepEqual(
+    remaining, names,
+    'die Unteraufgabe der Folgeinstanz gehört dem neuen Durchlauf, nicht dem alten Haken',
+  );
+});
+
+test('"ab Erledigung" behaelt sein Intervall, auch mit BYMONTHDAY=-1 (#960)', () => {
+  // nextDueAfterCompletion reicht bei diesem Anker den Tag des Abhakens herein -
+  // ein beliebiges Datum, das die Serie gar nicht kennt. Die Abkuerzung fuer
+  // einen unsynchronisierten Serienstart darf dort nicht greifen, sonst wird
+  // aus "alle drei Monate, erledigt am 10. Maerz" der 31. Maerz statt des
+  // 30. Juni.
+  assert.equal(nextDueAfterCompletion({
+    anchorDate: '2026-01-31', rule: 'FREQ=MONTHLY;INTERVAL=3;BYMONTHDAY=-1',
+    completedOn: '2026-03-10', fromCompletion: true,
+  }), '2026-06-30');
+
+  assert.equal(nextDueAfterCompletion({
+    anchorDate: '2026-01-31', rule: 'FREQ=MONTHLY;BYMONTHDAY=-1',
+    completedOn: '2026-01-30', fromCompletion: true,
+  }), '2026-02-28', 'ohne Intervall einen Monat weiter, nicht einen Tag');
+
+  // Der andere Anker bleibt unveraendert: dort IST das Basisdatum ein Vorkommen.
+  assert.equal(nextDueAfterCompletion({
+    anchorDate: '2026-01-31', rule: 'FREQ=MONTHLY;BYMONTHDAY=-1',
+    completedOn: '2026-02-02', fromCompletion: false,
+  }), '2026-02-28');
+});

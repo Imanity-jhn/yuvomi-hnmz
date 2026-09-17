@@ -49,6 +49,7 @@ export function collectDefaultReminders(box) {
  */
 function syncTargetOptions(targets, current = '') {
   return buildSyncTargetOptions(targets, {
+    outlook: t('calendar.syncTargetOutlookGroup'),
     local: t('calendar.syncTargetLocal'),
     google: t('calendar.syncTargetGoogleGroup'),
     caldav: t('calendar.syncTargetCaldavGroup'),
@@ -73,8 +74,9 @@ function syncTargetFieldHtml(options, current) {
   return `
         <div class="form-group">
           <label class="form-label" for="calendar-default-target">${t('settings.calendarDefaultTargetLabel')}</label>
-          <select id="calendar-default-target" class="form-select">${html}</select>
+          <select id="calendar-default-target" class="form-input">${html}</select>
           <p class="form-hint">${t('settings.calendarDefaultTargetHint')}</p>
+          <p class="form-hint" id="calendar-default-target-outlook-hint"${current.startsWith('outlook:') ? '' : ' hidden'}>${t('settings.outlookPushHint')}</p>
         </div>
   `;
 }
@@ -87,8 +89,8 @@ function renderPage(container, preferences, syncTargets = null) {
   );
   const assignMe = !!preferences.calendar_default_assign_me;
   // Das Ziel-Feld erscheint nur, wenn es etwas zu wählen gibt: ohne verbundenen
-  // Google- oder CalDAV-Kalender bliebe ein Dropdown mit der einzigen Option
-  // "Lokal speichern". Sobald ein Ziel gespeichert ist, trägt es
+  // Google-, CalDAV- oder Outlook-Kalender bliebe ein Dropdown mit der einzigen
+  // Option "Lokal speichern". Sobald ein Ziel gespeichert ist, trägt es
   // buildSyncTargetOptions als zweite Option nach und das Feld erscheint wieder -
   // sonst gäbe es keinen Weg, ein Ziel abzuwählen, dessen Konto entfernt wurde.
   // Nur wenn die Zielabfrage selbst scheitert (syncTargets === null), bleibt das
@@ -159,8 +161,15 @@ function bindEvents(container) {
   const targetSelect = container.querySelector('#calendar-default-target');
   if (targetSelect) {
     let persistedTarget = targetSelect.value;
+    // One-way-Warnung an der Zielwahl: nur Outlook ueberschreibt dort gemachte
+    // Aenderungen beim naechsten Sync.
+    const outlookHint = container.querySelector('#calendar-default-target-outlook-hint');
+    const syncOutlookHint = () => {
+      if (outlookHint) outlookHint.hidden = !targetSelect.value.startsWith('outlook:');
+    };
     targetSelect.addEventListener('change', async () => {
       const value = targetSelect.value;
+      syncOutlookHint();
       targetSelect.disabled = true;
       try {
         await savePreferences({ calendar_default_target: value });
@@ -168,6 +177,7 @@ function bindEvents(container) {
         window.yuvomi?.showToast(t('settings.calendarDefaultsSaved'), 'success');
       } catch (error) {
         targetSelect.value = persistedTarget;
+        syncOutlookHint();
         window.yuvomi?.showToast(error.message || t('common.errorGeneric'), 'danger');
       } finally {
         if (targetSelect.isConnected) targetSelect.disabled = false;

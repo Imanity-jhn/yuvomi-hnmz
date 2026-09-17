@@ -5,7 +5,7 @@
  * Abhängigkeiten: server/services/recurrence.js
  */
 
-import { nextOccurrence, matchesRRuleByday } from './recurrence.js';
+import { nextOccurrence, matchesRRuleByday, rruleLine } from './recurrence.js';
 import { resolveIcalColor } from '../utils/ical-color.js';
 import { localToUTC, utcToWall } from '../utils/timezone.js';
 
@@ -110,7 +110,22 @@ function parseRelations(block) {
   return { parentUid, childUids };
 }
 
-function parseICS(ics) {
+/**
+ * @param {string} ics
+ * @param {{onSkip?: (info: {uid: string|null, reason: string, summary: string|null}) => void, allowMissingUid?: boolean}} [opts]
+ *   `onSkip` meldet jeden VEVENT, den der Parser verwirft. Ohne den Haken war ein
+ *   übersprungener Termin von einem nie gelieferten nicht zu unterscheiden: er
+ *   fehlte einfach, und der Sync meldete Erfolg (#883).
+ *   `allowMissingUid` (Default false, strikt für alle bestehenden Aufrufer):
+ *   manche Anbieter-Feeds - insbesondere die kommunaler Entsorgungskalender,
+ *   die Waste importiert (#1063) - liefern VEVENTs ganz ohne UID. Mit dieser
+ *   Option wird ein fehlendes UID allein NICHT mehr verworfen (DTSTART bleibt
+ *   Pflicht); der Aufrufer erhält `uid: null` und ist dafür verantwortlich,
+ *   eine eigene deterministische Ersatz-Identität zu bilden - dieser Parser
+ *   tut das bewusst nicht, weil eine sinnvolle Ersatz-Identität vom Label
+ *   abhängt, das erst der jeweilige Aufrufer kennt.
+ */
+function parseICS(ics, { onSkip, allowMissingUid = false } = {}) {
   const unfolded = unfoldLines(ics);
   const events   = [];
   const vEventRe = /BEGIN:VEVENT([\s\S]*?)END:VEVENT/g;
@@ -126,7 +141,7 @@ function parseICS(ics) {
     const summary     = unescapeICSText(get('SUMMARY') || '(kein Titel)');
     const description = unescapeICSText(get('DESCRIPTION')) || null;
     const location    = unescapeICSText(get('LOCATION'))    || null;
-    const rrule       = get('RRULE')       ? `RRULE:${get('RRULE')}` : null;
+    const rrule       = get('RRULE')       ? rruleLine(get('RRULE')) : null;
     // RFC 7986: COLOR trägt einen CSS3-Namen (oder Hex) für die Event-Eigenfarbe.
     const color       = resolveIcalColor(get('COLOR'));
     const parseDTLine = (prop) => {
@@ -184,11 +199,27 @@ function parseICS(ics) {
       const conv = formatICSDate(recIdLine.value, recIsDate, recIdLine.tzid);
       recurrenceId = conv ? conv.slice(0, 10) : null;
     }
-    if (!uid || !dtstart) continue;
+    if ((!uid && !allowMissingUid) || !dtstart) {
+      onSkip?.({ uid, summary: uid ? summary : null, reason: !uid ? 'missing UID' : 'missing or unparsable DTSTART' });
+      continue;
+    }
     // TZID des Serien-Starts merken (nur zeitgebunden): erlaubt DST-korrekte
     // Expansion, die die lokale Uhrzeit über die Sommer-/Winterzeit hält (#549).
     const tzid = (!allDay && dtStartLine.tzid) ? dtStartLine.tzid : null;
-    events.push({ uid, summary, description, location, dtstart, dtend, rrule, allDay, color, exdates, recurrenceId, tzid });
+    // CATEGORIES (#1063 Waste): dient Waste als primäres Label für die
+    // Import-Zuordnung, wenn der Feed sie führt; sonst fällt der Aufrufer auf
+    // SUMMARY zurück. Bestehende Aufrufer ignorieren dieses Feld einfach.
+    const categories = parseCategories(block);
+    // STATUS:CANCELLED (RFC 5545 §3.8.1.11): ein abgesagtes Vorkommen. Ohne
+    // diese Markierung würde Waste eine Absage wie ein normales Vorkommen
+    // importieren; der Aufrufer entscheidet, ob/wie er sie ausschließt.
+    const status = (/^STATUS(?:;[^:]*)?:(.*)$/im.exec(block)?.[1] || '').trim().toUpperCase() || null;
+    // RDATE (RFC 5545 §3.8.5.2) wird von diesem Parser nicht expandiert - nur
+    // erkannt. Ein Feed, der zusätzliche Einzeltermine über RDATE statt über
+    // eigene VEVENTs einträgt, würde sonst still unvollständig importiert;
+    // der Aufrufer entscheidet, ob das den Import blockiert.
+    const hasRDate = /^RDATE(?:;[^:]*)?:/im.test(block);
+    events.push({ uid, summary, description, location, dtstart, dtend, rrule, allDay, color, exdates, recurrenceId, tzid, categories, status, hasRDate });
   }
   return events;
 }
@@ -338,14 +369,30 @@ function expandRRULE(vevent, windowStart, windowEnd) {
   // Tagtermine, deren lokales Datum == UTC-Datum ist (kein Mitternachts-Überlauf).
   const wall = vevent.tzid ? utcToWall(vevent.dtstart, vevent.tzid) : null;
   const tzAware = wall && wall.date === startDate;
+  const zonenUnsicher = !!vevent.tzid && !tzAware;
   let current = startDate, iterations = 0;
   const MAX_ITER = 1500;
+  let occurrence = 0;
   while (current <= windowEnd && iterations < MAX_ITER) {
     iterations++;
-    if (maxCount !== null && iterations > maxCount) break;
 
-    if (current >= windowStart && !exdateSet.has(current)
-        && matchesRRuleByday(current, vevent.rrule)) {
+    // BYDAY-FILTER VOR DEM ZAEHLEN, EXDATE DANACH (RFC 5545, #513). Ein Tag
+    // ausserhalb des Musters ist gar kein Vorkommen der Serie und darf nicht
+    // gegen COUNT zaehlen; ein ausgenommenes ist eines und zaehlt mit. Hier
+    // zaehlte bis dahin die SCHLEIFE selbst (`iterations > maxCount`), also
+    // jeder Kandidat - `FREQ=MONTHLY;BYDAY=MO;COUNT=2` lieferte einen Termin
+    // statt zwei. (Dieselbe Aufteilung wie in services/calendar-events.js.)
+    if (!matchesRRuleByday(current, vevent.rrule, { utcDiffersFromLocal: zonenUnsicher })) {
+      const skip = nextOccurrence(current, vevent.rrule, { anchor: startDate, utcDiffersFromLocal: zonenUnsicher });
+      if (!skip || skip <= current) break;
+      current = skip;
+      continue;
+    }
+
+    if (maxCount !== null && occurrence >= maxCount) break;
+    occurrence++;
+
+    if (current >= windowStart && !exdateSet.has(current)) {
       const occStart = tzAware ? localToUTC(`${current}T${wall.time}`, vevent.tzid) : current + timeSuffix;
       let occEnd = null;
       if (durationMs !== null) {
@@ -365,7 +412,9 @@ function expandRRULE(vevent, windowStart, windowEnd) {
         color: vevent.color,
       });
     }
-    const next = nextOccurrence(current, vevent.rrule);
+    // startDate ist DTSTART und damit der Anker: ohne ihn schreibt eine
+    // Klemmung in einem kurzen Monat den Tag der Serie um (#978).
+    const next = nextOccurrence(current, vevent.rrule, { anchor: startDate, utcDiffersFromLocal: zonenUnsicher });
     if (!next || next <= current) break;
     current = next;
   }

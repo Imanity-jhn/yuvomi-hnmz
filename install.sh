@@ -328,6 +328,7 @@ configure_calendar() {
   step "$(t calendar.step)"
   GOOGLE_CLIENT_ID=''; GOOGLE_CLIENT_SECRET=''; GOOGLE_REDIRECT_URI=''
   APPLE_USERNAME=''; APPLE_APP_SPECIFIC_PASSWORD=''
+  MS_CLIENT_ID=''; MS_CLIENT_SECRET=''; MS_REDIRECT_URI=''
 
   ask "$(t calendar.google_enable)"
   read -r want_google
@@ -345,6 +346,16 @@ configure_calendar() {
     info "$(t calendar.apple_hint)"
     ask "$(t calendar.apple_id)"; read -r APPLE_USERNAME
     ask "$(t calendar.apple_pass)"; read -rs APPLE_APP_SPECIFIC_PASSWORD; printf "\n"
+  fi
+
+  ask "$(t calendar.outlook_enable)"
+  read -r want_outlook
+  if [ "${want_outlook,,}" = "y" ]; then
+    info "$(t calendar.outlook_hint)"
+    info "$(t calendar.redirect_hint "${YUVOMI_BASE_URL}/api/v1/calendar/outlook/callback")"
+    ask "$(t calendar.client_id)"; read -r MS_CLIENT_ID
+    ask "$(t calendar.client_secret)"; read -rs MS_CLIENT_SECRET; printf "\n"
+    MS_REDIRECT_URI="${YUVOMI_BASE_URL}/api/v1/calendar/outlook/callback"
   fi
 }
 
@@ -420,6 +431,7 @@ review_and_confirm() {
   [ -n "$WEATHER_LAT" ] && printf "  %-16s %s%s%s\n" "$(t review.weather)" "$GREEN" "$(t review.weather_value "${WEATHER_CITY:-$WEATHER_LAT, $WEATHER_LON}")" "$RESET"
   [ -n "$GOOGLE_CLIENT_ID" ]    && printf "  %-16s %s%s%s\n" "$(t review.google)"  "$GREEN" "$(t review.google_value)" "$RESET"
   [ -n "$APPLE_USERNAME" ]      && printf "  %-16s %s%s%s\n" "$(t review.apple)"   "$GREEN" "$APPLE_USERNAME" "$RESET"
+  [ -n "$MS_CLIENT_ID" ]        && printf "  %-16s %s%s%s\n" "$(t review.outlook)" "$GREEN" "$(t review.outlook_value)" "$RESET"
   [ "$DOCUMENT_STORAGE_LOCAL_ENABLED" = "true" ] && printf "  %-16s %s%s%s\n" "$(t review.document_local)" "$GREEN" "${DOCUMENT_STORAGE_LOCAL_PATH:-/documents}" "$RESET"
   [ "$DOCUMENT_STORAGE_WEBDAV_ENABLED" = "true" ] && printf "  %-16s %s%s%s\n" "$(t review.document_webdav)" "$GREEN" "$DOCUMENT_STORAGE_WEBDAV_URL" "$RESET"
   [ -n "$GOOGLE_DRIVE_REDIRECT_URI" ] && printf "  %-16s %s%s%s\n" "$(t review.document_google_drive)" "$GREEN" "$(t review.google_value)" "$RESET"
@@ -438,6 +450,7 @@ MANAGED_KEYS=(
   GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GOOGLE_REDIRECT_URI
   GOOGLE_DRIVE_CLIENT_ID GOOGLE_DRIVE_CLIENT_SECRET GOOGLE_DRIVE_REDIRECT_URI
   APPLE_USERNAME APPLE_APP_SPECIFIC_PASSWORD
+  MS_CLIENT_ID MS_CLIENT_SECRET MS_REDIRECT_URI
   DOCUMENT_STORAGE_LOCAL_ENABLED DOCUMENT_STORAGE_LOCAL_PATH
   DOCUMENT_STORAGE_WEBDAV_ENABLED DOCUMENT_STORAGE_WEBDAV_URL
   DOCUMENT_STORAGE_WEBDAV_USERNAME DOCUMENT_STORAGE_WEBDAV_PASSWORD
@@ -505,6 +518,9 @@ GOOGLE_DRIVE_CLIENT_SECRET=$(escape_env_value "${GOOGLE_DRIVE_CLIENT_SECRET}")
 GOOGLE_DRIVE_REDIRECT_URI=$(escape_env_value "${GOOGLE_DRIVE_REDIRECT_URI}")
 APPLE_USERNAME=$(escape_env_value "${APPLE_USERNAME}")
 APPLE_APP_SPECIFIC_PASSWORD=$(escape_env_value "${APPLE_APP_SPECIFIC_PASSWORD}")
+MS_CLIENT_ID=$(escape_env_value "${MS_CLIENT_ID}")
+MS_CLIENT_SECRET=$(escape_env_value "${MS_CLIENT_SECRET}")
+MS_REDIRECT_URI=$(escape_env_value "${MS_REDIRECT_URI}")
 DOCUMENT_STORAGE_LOCAL_ENABLED=${DOCUMENT_STORAGE_LOCAL_ENABLED}
 DOCUMENT_STORAGE_LOCAL_PATH=$(escape_env_value "${DOCUMENT_STORAGE_LOCAL_PATH}")
 DOCUMENT_STORAGE_WEBDAV_ENABLED=${DOCUMENT_STORAGE_WEBDAV_ENABLED}

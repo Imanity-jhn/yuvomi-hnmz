@@ -20,20 +20,31 @@
  * 24px). Nach dem Einfügen einmal `lucide.createIcons({ el })` aufrufen.
  */
 
+/**
+ * ZWEI BESCHRIFTUNGEN, ZWEI ROLLEN. `label` ist das ausführliche `aria-label`
+ * („Dokument hinzufügen"); `dockLabel` ist das kurze Nomen aus `newLabel.*`
+ * („Dokument"), das der Knopf zeigt, sobald ihn der Router am Zeigergerät in
+ * den Modulkopf holt (dockFabIntoToolbar in router.js). Ohne `dockLabel` dockt
+ * er nicht an und schwebt weiter - das ist der Zustand der drei Kontext-FABs
+ * (Gesundheit, Haushaltshilfe, Belohnungen), deren Aktion dem aktiven Tab
+ * folgt und die deshalb pro Tab ein eigenes Nomen bräuchten.
+ */
+
 /** Gemeinsame FAB-Markup als HTML-String (Label kommt aus t(), keine Nutzdaten). */
-export function pageFabHtml({ id = 'page-fab', label = '', icon = 'plus' } = {}) {
-  return `<button type="button" class="page-fab" id="${id}"${label ? ` aria-label="${label}"` : ''}>
+export function pageFabHtml({ id = 'page-fab', label = '', icon = 'plus', dockLabel = '' } = {}) {
+  return `<button type="button" class="page-fab" id="${id}"${label ? ` aria-label="${label}"` : ''}${dockLabel ? ` data-dock-label="${dockLabel}"` : ''}>
       <i data-lucide="${icon}" aria-hidden="true"></i>
     </button>`;
 }
 
 /** Gemeinsamer FAB als DOM-Element, optional an onClick gebunden. */
-export function createPageFab({ id = 'page-fab', label = '', icon = 'plus', onClick } = {}) {
+export function createPageFab({ id = 'page-fab', label = '', icon = 'plus', onClick, dockLabel = '' } = {}) {
   const fab = document.createElement('button');
   fab.type = 'button';
   fab.className = 'page-fab';
   fab.id = id;
   if (label) fab.setAttribute('aria-label', label);
+  if (dockLabel) fab.dataset.dockLabel = dockLabel;
   const glyph = document.createElement('i');
   glyph.dataset.lucide = icon;
   glyph.setAttribute('aria-hidden', 'true');
@@ -59,12 +70,25 @@ export function findPageFab(id) {
  * `hidden: true` blendet den FAB auf Tabs ohne Erstellen-Aktion aus und entfernt
  * die Aktion, sodass auch der `n`-Shortcut (klickt `.page-fab`) dort ins Leere läuft.
  */
-export function setPageFabAction(fab, { label = '', onClick = null, hidden = false } = {}) {
+export function setPageFabAction(fab, { label = '', onClick = null, hidden = false, dockLabel = '' } = {}) {
   if (!fab) return;
   // `.page-fab { display: flex }` überschreibt das HTML-[hidden]-Attribut, daher
   // zusätzlich inline display togglen. `hidden` bleibt gesetzt (Screenreader).
   fab.hidden = hidden;
   fab.style.display = hidden ? 'none' : '';
   if (label) fab.setAttribute('aria-label', label);
+  // Das Nomen wechselt mit dem Tab wie die Aktion: gesetzt heißt gesetzt,
+  // leer heißt entfernt. Ein Nomen des vorigen Tabs stehen zu lassen wäre
+  // schlimmer als keines - der Knopf trüge dann einen falschen Namen.
+  if (dockLabel) fab.dataset.dockLabel = dockLabel;
+  else delete fab.dataset.dockLabel;
+  // Ein bereits angedockter Knopf trägt sein Nomen als eigenes Textelement
+  // (dockFabIntoToolbar in router.js schreibt es NUR beim Andocken selbst).
+  // Ein Kontext-FAB, dessen Nomen mit dem Tab wechselt, muss dieses Element
+  // hier nachziehen - sonst bliebe der sichtbare Text auf dem ersten Tab
+  // stehen, während `dataset.dockLabel` (und damit z. B. ein Tooltip) schon
+  // weitergezogen ist.
+  const dockedLabel = fab.querySelector('.toolbar-new-btn__label');
+  if (dockedLabel && dockLabel) dockedLabel.textContent = dockLabel;
   fab.onclick = hidden ? null : onClick;
 }

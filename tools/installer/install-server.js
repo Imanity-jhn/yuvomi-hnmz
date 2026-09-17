@@ -407,6 +407,56 @@ export function safeSpawn(cmd, args, opts = {}) {
   }
 }
 
+/** Obergrenze fuer die Container-Frage im Preflight. */
+export const PREFLIGHT_PROBE_TIMEOUT_MS = 3000;
+
+/**
+ * Laeuft der yuvomi-Container? Mit Zeitlimit.
+ *
+ * Der Wizard wartet auf den Preflight, bevor er den Einfach-Pfad freigibt oder
+ * Schluessel erzeugt. Engine-Erkennung und `inspect` fragen den Daemon, und
+ * eine Engine, die nicht antwortet (Daemon haengt, entfernter Kontext), liess
+ * die Antwort nie kommen - obwohl envExists laengst feststand. Nach dem Limit
+ * gilt der Container als nicht laufend, und ein haengender Prozess wird
+ * beendet. `resolveEngine` und `spawnFn` sind fuer Tests injizierbar.
+ */
+export async function probeContainerRunning({
+  timeoutMs = PREFLIGHT_PROBE_TIMEOUT_MS,
+  resolveEngine = getEngine,
+  spawnFn = safeSpawn,
+} = {}) {
+  let timer;
+  let child = null;
+  let timedOut = false;
+  const timeout = new Promise(done => {
+    timer = setTimeout(() => { timedOut = true; done(false); }, timeoutMs);
+  });
+  const probe = (async () => {
+    const engine = await resolveEngine();
+    // Kam die Engine erst nach dem Zeitlimit, ist die Funktion schon zurueck und
+    // ihr finally gelaufen: ein jetzt gestarteter inspect wuerde nie beendet.
+    if (timedOut) return false;
+    const { cmd, args } = inspectCommand(engine, ['inspect', '--format', '{{.State.Status}}', 'yuvomi']);
+    return new Promise(done => {
+      child = spawnFn(cmd, args, { stdio: 'pipe' });
+      let out = '';
+      let settled = false;
+      const finish = running => { if (!settled) { settled = true; done(running); } };
+      child.stdout?.on('data', d => { out += d.toString().trim(); });
+      child.on('error', () => finish(false));
+      child.on('close', code => finish(code === 0 && out === 'running'));
+    });
+  })().catch(() => false);
+  try {
+    return await Promise.race([probe, timeout]);
+  } finally {
+    clearTimeout(timer);
+    if (child && child.exitCode === null) {
+      try { child.kill(); } catch { /* bereits beendet */ }
+    }
+  }
+}
+
 /**
  * Copy an existing .env to .env.bak-<ISO timestamp> before it is overwritten.
  * Returns the backup path, or null when there was nothing to back up.
@@ -513,12 +563,15 @@ async function route(req, res, server) {
     return serveStatic(res, resolve(projectRoot(), 'public', 'styles', 'tokens.css'), 'text/css; charset=utf-8');
   }
 
-  // Selbstgehostete Variable Fonts. basename() neutralisiert Path-Traversal;
-  // nur .woff2 aus public/fonts wird ausgeliefert.
-  if (req.method === 'GET' && url.pathname.startsWith('/fonts/') && url.pathname.endsWith('.woff2')) {
-    const name = basename(url.pathname);
-    return serveStatic(res, resolve(projectRoot(), 'public', 'fonts', name), 'font/woff2');
-  }
+  // HIER STAND EINE /fonts/-ROUTE. Sie lieferte Plus Jakarta Sans aus
+  // public/fonts, damit der Installer dieselbe Schrift trug wie die App. Mit dem
+  // HIG-Redesign ist die Schrift aus der App gefallen: public/ enthaelt kein
+  // @font-face mehr, weder sw.js noch das Manifest nennen die Dateien, und der
+  // Installer nimmt seit v2.0.0 den System-Stack. Uebrig war eine Route auf zwei
+  // Binaerdateien, die niemand anforderte - und ein Test, der ihr 200 zusicherte.
+  //
+  // Die Dateien sind mitentfallen. Wer die Route zurueckholt, braucht wieder
+  // beides: eine Schrift, die die App auch benutzt, und einen Grund.
 
   // i18n-Mini-Modul des Installers (Phase 4: i18n-Verdrahtung).
   if (req.method === 'GET' && url.pathname === '/i18n-mini.js') {
@@ -555,21 +608,9 @@ async function route(req, res, server) {
       // Nur die NAMEN der vorhandenen Schlüssel - die Werte bleiben auf dem
       // Server. Das Frontend erzeugt für diese keinen neuen Wert mehr.
       const preservedKeys = PRESERVED_KEYS.filter(key => Boolean(existingEnv[key]));
-      const engine = await getEngine();
-      const { cmd, args } = inspectCommand(engine, ['inspect', '--format', '{{.State.Status}}', 'yuvomi']);
-      return await new Promise(resolvePromise => {
-        const inspect = spawn(cmd, args, { stdio: 'pipe' });
-        let out = '';
-        let settled = false;
-        const reply = containerRunning => {
-          if (settled) return;          // error + close can both fire
-          settled = true;
-          resolvePromise(json(res, 200, { envExists, preservedKeys, containerRunning }));
-        };
-        inspect.stdout.on('data', d => { out += d.toString().trim(); });
-        inspect.on('error', () => reply(false));
-        inspect.on('close', code => reply(code === 0 && out === 'running'));
-      });
+      // Mit Zeitlimit: der Wizard wartet auf diese Antwort (siehe probeContainerRunning).
+      const containerRunning = await probeContainerRunning();
+      return json(res, 200, { envExists, preservedKeys, containerRunning });
     } catch (err) {
       return json(res, 500, { error: err.message });
     }
@@ -756,7 +797,12 @@ async function route(req, res, server) {
 
       json(res, result.status, result.body);
 
-      if (result.status === 201 || result.status === 403) {
+      // 404 gehoert dazu: /auth/setup antwortet bei bereits vorhandenem Konto
+      // in production mit 404 und nur ausserhalb davon mit 403 (server/auth.js).
+      // Jedes reale Deployment setzt NODE_ENV=production, der 403-Zweig war hier
+      // also toter Code - und ein Rerun beendete den Installer nie, weil dieser
+      // Block nicht lief.
+      if (result.status === 201 || result.status === 403 || result.status === 404) {
         // Nicht sofort schliessen: die Abschlussseite bietet den Download der
         // .env an, und der holt die Datei von hier. Ab jetzt gilt der kurze
         // Nachlauf, den jeder weitere Request verlaengert.

@@ -4,7 +4,7 @@
 // detectRegion() aus den drei vorhandenen Werten abgeleitet.
 //
 // Jeder Wert muss in den serverseitigen Listen enthalten sein:
-//   currency    ∈ VALID_CURRENCIES      (server/routes/preferences.js)
+//   currency    ∈ CURRENCY_CODES        (public/utils/currency-codes.js)
 //   date_format ∈ DATE_FORMATS          (public/settings/pages/personal-appearance.js)
 //   time_format ∈ { '24h', '12h' }
 // (per test/test-region-presets.js abgesichert).
@@ -71,6 +71,7 @@ export const REGION_PRESETS = {
   'cs-CZ': { currency: 'CZK', date_format: 'dmy', time_format: '24h' },
   'uk-UA': { currency: 'UAH', date_format: 'dmy', time_format: '24h' },
   'ru-RU': { currency: 'RUB', date_format: 'dmy', time_format: '24h' },
+  'be-BY': { currency: 'BYN', date_format: 'dmy', time_format: '24h' },
   'tr-TR': { currency: 'TRY', date_format: 'dmy', time_format: '24h' },
   'zh-CN': { currency: 'CNY', date_format: 'ymd', time_format: '24h' },
   'ja-JP': { currency: 'JPY', date_format: 'ymd', time_format: '24h' },
@@ -83,7 +84,22 @@ export const REGION_PRESETS = {
   'ko-KR': { currency: 'KRW', date_format: 'ymd', time_format: '12h' },
   'id-ID': { currency: 'IDR', date_format: 'dmy', time_format: '24h' },
   'ms-MY': { currency: 'MYR', date_format: 'dmy_slash', time_format: '12h' },
+  // #841: Israel schreibt d.M.yyyy und rechnet in 24h (CLDR he-IL) - dasselbe
+  // Triple wie de-DE bis auf die Waehrung. Das Zeichen ₪ liefert
+  // Intl.NumberFormat, es steht in keiner eigenen Tabelle.
+  'he-IL': { currency: 'ILS', date_format: 'dmy', time_format: '24h' },
   'fa-IR': { currency: 'IRR', date_format: 'ymd', time_format: '24h' },
+  // #297: drei ausgelieferte Sprachen hatten keine einzige Region - wer die App
+  // auf Griechisch, Ungarisch oder Vietnamesisch stellte, landete zwangslaeufig
+  // auf "Benutzerdefiniert" und musste Waehrung, Datum und Zeit einzeln raten.
+  // Alle drei Tripel stammen aus dem CLDR-Default der Locale, nicht aus
+  // Schaetzung - zweimal ueberrascht das:
+  //   el-GR laeuft auf 12h (2:30 μ.μ.), obwohl ganz Europa ringsum 24h schreibt,
+  //   hu-HU schreibt das Jahr zuerst (2026. 11. 05.) und ist die erste Region
+  //   ueberhaupt auf `ymd_dot`.
+  'el-GR': { currency: 'EUR', date_format: 'dmy_slash', time_format: '12h' },
+  'hu-HU': { currency: 'HUF', date_format: 'ymd_dot', time_format: '24h' },
+  'vi-VN': { currency: 'VND', date_format: 'dmy_slash', time_format: '24h' },
 };
 
 export const REGION_CODES = Object.keys(REGION_PRESETS);

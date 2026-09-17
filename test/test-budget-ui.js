@@ -9,6 +9,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
+import { withoutHtmlComments } from './source-text.js';
+import { eachRule } from './css-rules.js';
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8').replace(/\r/g, '');
 
@@ -22,6 +24,11 @@ const money = read('../public/utils/money.js');
 const layoutCss = read('../public/styles/layout.css');
 const tokensCss = read('../public/styles/tokens.css');
 const budgetCss = read('../public/styles/budget.css');
+// Die geteilten Auswertungs-Bauteile (.panel-head, .segmented, .metric-grid,
+// .metric-card) stehen seit der Namensbereinigung in panel.css - sie sind
+// app-weites Vokabular, kein Budget-Baustein. Die Kompaktstufen, die am
+// Container der Budget-Seite haengen, stehen weiter in budget.css.
+const panelCss = read('../public/styles/panel.css');
 const subscriptionsCss = read('../public/styles/subscriptions.css');
 const splitCss = read('../public/styles/split-expenses.css');
 
@@ -77,7 +84,10 @@ test('das Modul führt genau eine Zeitachse', () => {
   // Vorher hielt budget-stats.js einen eigenen anchor: Budget auf März gestellt,
   // Wechsel auf Berichte zeigte Juli. Der Anker lebt jetzt im Modul-State und
   // wird beim Tabwechsel in beide Richtungen angeglichen.
-  assert.match(budget, /reportAnchor:\s*toLocalDateKey\(new Date\(\)\)/);
+  // Seit #829 Teil 3 heisst die Frage nach dem heutigen Tag `todayKey()` - sie
+  // folgt der Haushaltszone, waehrend `toLocalDateKey` der reine Konverter blieb.
+  // Die Zusicherung ist dieselbe: der Anker startet auf heute.
+  assert.match(budget, /reportAnchor:\s*todayKey\(\)/);
   assert.match(budget, /state\.reportAnchor = anchorForMonth\(state\.month\)/, 'Hinweg Budget → Berichte fehlt');
   assert.match(budget, /const ym = state\.reportAnchor\.slice\(0, 7\)/, 'Rückweg Berichte → Budget fehlt');
 
@@ -106,10 +116,14 @@ test('hidden greift bei geteilten Bedienelementen trotz display-Klasse', () => {
   // und Deklaration im SELBEN Regelblock stehen - kein `}` und kein zweites `{`
   // dazwischen. Das frühere `[\s\S]{0,120}` maß stattdessen die Länge der
   // Selektorliste und schlug damit bei jeder legitimen Ergänzung an; die Liste ist
-  // aber ausdrücklich zum Wachsen gedacht (bei `.kitchen-bulkbar` war sie 141
+  // aber ausdrücklich zum Wachsen gedacht (bei `.list-bulkbar` war sie 141
   // Zeichen lang und der Guard rot, obwohl die Struktur korrekt war).
   const sameBlock = (selector) => new RegExp(`${selector}[^{}]*\\{\\s*display:\\s*none\\s*!important`);
-  for (const selector of ['\\.page-fab\\[hidden\\]', '\\.btn\\[hidden\\]', '\\.form-group\\[hidden\\]', '\\.kitchen-bulkbar\\[hidden\\]']) {
+  // `.list-bulkbar` stand hier, solange sie ein dauerhafter, leerer Knoten im
+  // Seitenfluss war. Seit Etappe 5 wird sie angelegt und entfernt
+  // (utils/bulk-pill.js) und trägt nie `hidden` - ein Eintrag für einen
+  // Zustand, den niemand setzt, prüft nichts.
+  for (const selector of ['\\.page-fab\\[hidden\\]', '\\.btn\\[hidden\\]', '\\.form-group\\[hidden\\]']) {
     assert.match(layoutCss, sameBlock(selector), `${selector} steht nicht im Durchsetzungsblock`);
   }
 });
@@ -119,7 +133,19 @@ test('hidden greift bei geteilten Bedienelementen trotz display-Klasse', () => {
 // --------------------------------------------------------
 
 test('neue Einträge landen im angezeigten Monat, nicht im heutigen', () => {
-  assert.match(budget, /const defaultDate = state\.month === todayMonth \? today : `\$\{state\.month\}-01`/);
+  // GEPRÜFT WIRD DIE HERKUNFT, NICHT DIE SCHREIBWEISE. Die Vorgängerfassung
+  // verlangte die Zeile buchstabengetreu
+  // (`state.month === todayMonth ? today : ...`) und schlug deshalb an, als die
+  // Regel unverändert nach utils/date.js zog - ein Guard, der ein Refactoring
+  // ohne Verhaltensänderung als Verstoß meldet, hat die falsche Ebene.
+  // Verlangt wird jetzt: der Standardwert stammt aus der hausweiten Regel,
+  // angewandt auf den angezeigten Monat.
+  assert.match(budget, /defaultDateInPeriod/,
+    'das Standarddatum kommt nicht mehr aus defaultDateInPeriod() (utils/date.js)');
+  assert.match(budget, /monthPeriodKeys\(state\.month\)/,
+    'der Zeitraum ist nicht mehr der angezeigte Monat');
+  assert.match(budget, /const defaultDate = defaultDateInPeriod\(/,
+    'defaultDate wird nicht mehr aus der Regel abgeleitet');
   // Das Datumsfeld muss den abgeleiteten Wert nutzen, nicht mehr `today`.
   assert.match(budget, /id="bm-date"\s*\n?\s*value="\$\{isEdit \? entry\.date : defaultDate\}"/);
   assert.doesNotMatch(budget, /id="bm-date"[\s\S]{0,80}entry\.date : today\}/);
@@ -177,9 +203,9 @@ test('jede Umschalter-Leiste des Moduls läuft durch die geteilte Verhaltensschi
 test('es gibt genau eine Umschalter-Optik im Modul', () => {
   // Vier Optiken für dieselbe Frage - getönte Kapsel, eckig gefülltes Rechteck,
   // weiße Kachel, umrandete Pille - hießen, dass derselbe Zustand pro Tab anders
-  // aussah. .budget-segmented ist der Baustein; wer eine Leiste baut, greift ihn.
-  assert.ok(/\n\.budget-segmented\s*\{/.test(budgetCss), '.budget-segmented fehlt in budget.css');
-  assert.ok(/\n\.budget-segmented__item\s*\{/.test(budgetCss), '.budget-segmented__item fehlt');
+  // aussah. .segmented ist der Baustein; wer eine Leiste baut, greift ihn.
+  assert.ok(/\n\.segmented\s*\{/.test(panelCss), '.segmented fehlt in panel.css');
+  assert.ok(/\n\.segmented__item\s*\{/.test(panelCss), '.segmented__item fehlt');
 
   for (const [file, src] of BUDGET_PAGES) {
     for (const bar of src.matchAll(/<div class="([^"]+)"([^>]*)role="(tablist|radiogroup)"/g)) {
@@ -189,8 +215,8 @@ test('es gibt genau eine Umschalter-Optik im Modul', () => {
       if (/budget-tabs|budget-scope|budget-color-picker/.test(classes)) continue;
       assert.match(
         classes,
-        /budget-segmented/,
-        `${file}: Leiste "${classes}" baut eine eigene Optik statt .budget-segmented`,
+        /segmented/,
+        `${file}: Leiste "${classes}" baut eine eigene Optik statt .segmented`,
       );
     }
   }
@@ -198,14 +224,14 @@ test('es gibt genau eine Umschalter-Optik im Modul', () => {
   // Und die abgelösten Optiken kommen nicht zurück.
   const liveCss = withoutComments(budgetCss);
   for (const dead of ['budget-loans__filter\\b', 'budget-stats__range\\b']) {
-    assert.doesNotMatch(liveCss, new RegExp(`\\.${dead}`), `.${dead} ist durch .budget-segmented ersetzt`);
+    assert.doesNotMatch(liveCss, new RegExp(`\\.${dead}`), `.${dead} ist durch .segmented ersetzt`);
   }
 });
 
 test('das Touch-Maß der Umschalter kommt aus dem Token, nicht aus der Leiste', () => {
   // Die abgelösten Leisten lagen bei 40px (Zeitraum) und 28px (Nur-Ausgaben).
-  const item = budgetCss.match(/\n\.budget-segmented__item\s*\{([^}]*)\}/);
-  assert.ok(item, '.budget-segmented__item fehlt');
+  const item = panelCss.match(/\n\.segmented__item\s*\{([^}]*)\}/);
+  assert.ok(item, '.segmented__item fehlt');
   assert.match(item[1], /min-height:\s*var\(--target-base\)/);
 });
 
@@ -267,9 +293,157 @@ test('die Datenreihen-Tokens existieren in beiden Themes', () => {
   assert.equal(defs.length, 3, 'Dark-Mode-Variante fehlt in einem der beiden Dark-Blöcke');
 });
 
-test('die Trendkurve beschriftet Skala und Zeitraum', () => {
-  assert.match(stats, /class="budget-stats__axis-max"/);
-  assert.match(stats, /class="budget-stats__axis-x"/);
+/**
+ * Keine Datenreihe darf sich mit dem Modulton der Seite decken, die sie zeigt.
+ *
+ * WARUM DER GUARD DARÜBER NICHT GRIFF: der Nachbar oben („borgt keine
+ * Modul-Akzente") prüft den NAMEN - dass kein `--module-*` in DONUT_COLORS
+ * steht. Genau das war erfüllt, während `--_chart-series-2` seit dem
+ * Familientoene-Umbau BUCHSTÄBLICH derselbe Hexwert war wie `--_family-money`
+ * (#0F766E light, #2DD4BF dark) - der Modulton des Budgets, in dem die Palette
+ * läuft. Ein Konto in „Türkis" war dort nicht vom Chrome zu unterscheiden. Der
+ * Guard war grün und die Regel verletzt, weil er die falsche Ebene maß.
+ * Gemessen wird deshalb der WERT, und zwar wahrnehmungsnah (CIEDE2000), nicht
+ * per Stringvergleich: die nächste Deckung wäre sonst schon mit einem um 1
+ * verschobenen Kanal wieder unsichtbar.
+ *
+ * WARUM ER NUR DIE CHART-NUTZENDEN MODULE PRÜFT: Serie 3 deckt sich mit
+ * --_family-kitchen und Serie 7 mit --_family-work (dE 1.9), beide bewusst
+ * stehengelassen - Küche und Aufgaben haben keine Diagramme, die Deckung ist
+ * dort folgenlos. Das ist die Ausnahme MIT Verfallsdatum an beiden Enden:
+ * bekommt eine Küchen- oder Aufgabenseite ein Diagramm, findet dieser Guard die
+ * Serie im selben Lauf, ohne dass jemand daran denken muss. Guard-Ebene 2
+ * (Struktur, aus deklarativer Quelle: router.js + tokens.css).
+ */
+test('keine Datenreihe deckt sich mit dem Modulton einer Seite, die Diagramme zeigt', () => {
+  // 1. Welche Seiten beziehen die Palette überhaupt? Aus dem Quelltext, nicht
+  //    aus einer Liste hier - eine Liste wäre wieder die Allowlist von oben.
+  const pagesDir = new URL('../public/pages/', import.meta.url);
+  const users = readdirSync(pagesDir)
+    .filter((f) => f.endsWith('.js'))
+    .filter((f) => read(`../public/pages/${f}`).includes('--chart-series-'));
+  assert.ok(
+    users.length >= 2,
+    `Nur ${users.length} Seite(n) beziehen --chart-series-. Hat sich die Schreibweise geändert? `
+    + 'Ein Guard über eine leere Menge sichert nichts zu.',
+  );
+
+  // 2. Modul je Seite aus der deklarativen Routentabelle.
+  const router = read('../public/router.js');
+  const moduleOf = new Map();
+  for (const m of router.matchAll(/page:\s*'\/pages\/([^']+)'[^}]*?module:\s*'([^']+)'/g)) {
+    moduleOf.set(m[1], m[2]);
+  }
+  const modules = [...new Set(users.map((f) => moduleOf.get(f)).filter(Boolean))];
+  assert.ok(
+    modules.length >= 1,
+    `Keine der Chart-Seiten (${users.join(', ')}) fand ein Modul in router.js - der Guard misst dann nichts.`,
+  );
+
+  // 3. Modulton auflösen: --module-<name> zeigt auf eine Familie, die Familie
+  //    trägt den Hexwert. Beide Ebenen kommen aus tokens.css.
+  const familyOf = new Map();
+  for (const m of tokensCss.matchAll(/--module-([\w-]+):\s*var\(--_family-([\w-]+)\)/g)) {
+    familyOf.set(m[1], m[2]);
+  }
+  const valuesOf = (token) => [...tokensCss.matchAll(new RegExp(`${token}:\\s*(#[\\da-fA-F]{6})`, 'g'))].map((x) => x[1]);
+
+  // 4. CIEDE2000 - der Abstand, den ein Auge sieht. Unter 2.3 (Just Noticeable
+  //    Difference) sind zwei Farben derselbe Ton, egal was die Hexwerte sagen.
+  const JND = 2.3;
+  const lab = (value) => {
+    const [r, g, b] = value.match(/[\da-f]{2}/gi)
+      .map((p) => parseInt(p, 16) / 255)
+      .map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+    const f = (t) => (t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116);
+    const x = f((0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047);
+    const y = f(0.2126 * r + 0.7152 * g + 0.0722 * b);
+    const z = f((0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883);
+    return [116 * y - 16, 500 * (x - y), 200 * (y - z)];
+  };
+  const deltaE = (one, two) => {
+    const [L1, a1, b1] = lab(one);
+    const [L2, a2, b2] = lab(two);
+    const cBar = (Math.hypot(a1, b1) + Math.hypot(a2, b2)) / 2;
+    const g = 0.5 * (1 - Math.sqrt(cBar ** 7 / (cBar ** 7 + 25 ** 7)));
+    const [A1, A2] = [a1 * (1 + g), a2 * (1 + g)];
+    const [C1, C2] = [Math.hypot(A1, b1), Math.hypot(A2, b2)];
+    const angle = (x, y) => (x === 0 && y === 0 ? 0 : ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360);
+    const [h1, h2] = [angle(A1, b1), angle(A2, b2)];
+    const dL = L2 - L1;
+    const dC = C2 - C1;
+    let dh = 0;
+    if (C1 * C2 !== 0) {
+      dh = h2 - h1;
+      if (dh > 180) dh -= 360;
+      else if (dh < -180) dh += 360;
+    }
+    const dH = 2 * Math.sqrt(C1 * C2) * Math.sin((dh * Math.PI) / 360);
+    const lBar = (L1 + L2) / 2;
+    const cBarP = (C1 + C2) / 2;
+    let hBar = h1 + h2;
+    if (C1 * C2 !== 0 && Math.abs(h1 - h2) > 180) hBar += hBar < 360 ? 360 : -360;
+    if (C1 * C2 !== 0) hBar /= 2;
+    const rad = (deg) => (deg * Math.PI) / 180;
+    const T = 1 - 0.17 * Math.cos(rad(hBar - 30)) + 0.24 * Math.cos(rad(2 * hBar))
+      + 0.32 * Math.cos(rad(3 * hBar + 6)) - 0.20 * Math.cos(rad(4 * hBar - 63));
+    const sL = 1 + (0.015 * (lBar - 50) ** 2) / Math.sqrt(20 + (lBar - 50) ** 2);
+    const sC = 1 + 0.045 * cBarP;
+    const sH = 1 + 0.015 * cBarP * T;
+    const rT = -Math.sin(rad(60 * Math.exp(-(((hBar - 275) / 25) ** 2))))
+      * 2 * Math.sqrt(cBarP ** 7 / (cBarP ** 7 + 25 ** 7));
+    return Math.sqrt((dL / sL) ** 2 + (dC / sC) ** 2 + (dH / sH) ** 2 + rT * (dC / sC) * (dH / sH));
+  };
+
+  // Selbsttest: die Formel muss zwei gleiche Farben auf 0 und zwei klar
+  // verschiedene weit über die Schwelle bringen. Ohne ihn wäre ein deltaE, das
+  // immer 0 liefert, ein grüner Guard ohne Zusicherung.
+  assert.equal(deltaE('#0F766E', '#0F766E'), 0, 'deltaE misst identische Farben nicht als 0');
+  assert.ok(deltaE('#0F766E', '#C2410C') > 20, 'deltaE trennt Teal und Orange nicht');
+
+  let checked = 0;
+  for (const mod of modules) {
+    const family = familyOf.get(mod);
+    assert.ok(family, `--module-${mod} löst in tokens.css auf keinen Familienton auf`);
+    const familyValues = valuesOf(`--_family-${family}`);
+    assert.ok(familyValues.length >= 2, `--_family-${family} fehlt ein Theme-Wert`);
+
+    for (const [themeIndex, theme] of [[0, 'light'], [1, 'dark']]) {
+      for (let i = 1; i <= 7; i++) {
+        const series = valuesOf(`--_chart-series-${i}`)[themeIndex];
+        assert.ok(series, `--_chart-series-${i} fehlt für Theme ${theme}`);
+        const distance = deltaE(series, familyValues[themeIndex]);
+        checked++;
+        assert.ok(
+          distance >= JND,
+          `${theme}: --chart-series-${i} (${series}) liegt ${distance.toFixed(1)} von `
+          + `--_family-${family} (${familyValues[themeIndex]}) - der Modulton von "${mod}", `
+          + `das die Palette selbst zeigt (${users.join(', ')}). Unter ${JND} sieht das Auge `
+          + 'denselben Ton: ein Segment behauptet dann die Zugehörigkeit zum umgebenden Chrome. '
+          + 'Serie verschieben, nicht die Schwelle.',
+        );
+      }
+    }
+  }
+  assert.ok(checked >= 14, `Nur ${checked} Paare gemessen - erwartet werden 7 Serien x 2 Themes je Modul.`);
+});
+
+test('die Trendkurve beschriftet Skala und Zeitraum - IM Bild', () => {
+  // Die Zusage ist dieselbe geblieben, ihr Ort nicht. Hier stand die Pruefung
+  // auf `budget-stats__axis-max` und `__axis-x`, also auf Beschriftung
+  // AUSSERHALB des SVG. Die lag dort, weil `preserveAspectRatio="none"` jeden
+  // Text im Bild verzerrt haette - und genau diese Kausalitaet war verkehrt
+  // herum: ohne feste Raender gibt es keinen Platz fuer eine Achse im Bild.
+  // Draussen verschiebt sie sich gegen ihre eigenen Gitterlinien, sobald das
+  // Diagramm skaliert (gemessen: 600x180-viewBox auf 720x216 gestreckt).
+  //
+  // Seit der Extraktion nach `utils/chart.js` bringt die geteilte Geometrie
+  // ihren linken Gutter mit. Geprueft wird deshalb: die Achse kommt aus der
+  // geteilten Quelle, und das Streckungs-Attribut ist weg.
+  assert.match(stats, /chartGridMarkup\(0, max,/, 'die Werteachse kommt aus der geteilten Geometrie');
+  assert.match(stats, /chartXLabelsMarkup\(/, 'die Zeitachse kommt aus der geteilten Geometrie');
+  assert.doesNotMatch(stats, /preserveAspectRatio="none"/, 'eine Kurve mit Achse darf nicht gestreckt werden - der Text im Bild verzerrt mit');
+  assert.doesNotMatch(stats, /budget-stats__axis-(max|mid|x)/, 'die Achse steht im SVG, nicht als HTML daneben');
 });
 
 test('die Trendkurve macht Einzelwerte ohne Zeigegerät ablesbar', () => {
@@ -355,28 +529,22 @@ const BUDGET_PAGES = [
   ['split-expenses.js', splitExpenses],
 ];
 
-const BUDGET_STYLESHEETS = [
+// Die Stylesheets, in denen die Bauteile dieses Moduls stehen. panel.css ist
+// KEIN Budget-Stylesheet, aber .metric-card und .segmented wohnen dort - waere
+// es nicht in der Liste, waeren die Guards darunter genau fuer die Datei blind,
+// in der der Baustein steht.
+const AUDITED_STYLESHEETS = [
   ['budget.css', budgetCss],
+  ['panel.css', panelCss],
   ['subscriptions.css', subscriptionsCss],
   ['split-expenses.css', splitCss],
 ];
 
-// Einmaliges Ersetzen genuegt nicht: ein Rest wie `<!<!-- x -->->` setzt sich
-// nach dem Schnitt zu einem neuen Kommentar-Delimiter zusammen. Darum bis zum
-// Fixpunkt laufen (CodeQL js/incomplete-multi-character-sanitization).
-// Die Schleife muss den Aufruf direkt umschliessen: CodeQL erkennt den Fixpunkt
-// nur, wenn das Ergebnis des `replace` zu seinem eigenen Receiver zurueckfliesst.
-// In einer `.replace().replace()`-Kette gilt das nur fuer das letzte Glied - der
-// Schnitt gehoert deshalb hierher und nicht zurueck in die Kette unten.
-const withoutHtmlComments = (src) => {
-  let out = src;
-  let previous;
-  do {
-    previous = out;
-    out = out.replace(/<!--[\s\S]*?-->/g, '');
-  } while (out !== previous);
-  return out;
-};
+// Der Schnitt stand hier als lokale Funktion und in test-frontend-audit.js als
+// `.replace().replace()`-Kette OHNE Fixpunkt - zwei Fassungen desselben
+// Gedankens, von denen genau eine richtig war. Er hat jetzt ein Zuhause; die
+// Begruendung (warum ein einzelner Durchlauf ein `<!--` stehen laesst und
+// warum die Schleife den Aufruf direkt umschliessen muss) steht dort.
 
 // Guards, die auf Markup- oder Selektor-Muster prüfen, müssen an Kommentaren
 // vorbeisehen: sonst schlägt jede Erklärung an, die das verbotene Muster nennt -
@@ -547,6 +715,135 @@ test('nur der Trenner der Region wird zum Dezimalpunkt', () => {
   // falsche liegt bei Geld um den Faktor tausend daneben.
   assert.match(impl, /groupSep/, 'die Gruppierung muss erkannt werden');
   assert.match(impl, /\\\\d\{3\}/, 'erkannt wird das Muster (drei Ziffern), nicht das blosse Zeichen');
+
+  // Die Gruppierungspruefung steht ZWISCHEN den beiden Umschrift-Schritten, und
+  // sie hat auf beiden Seiten eine Kante:
+  //   - davor sieht `\d` (ASCII) die oestlichen Ziffern hinter dem Trenner nicht,
+  //     ar-EG "٢٬٠٠٠" kaeme unerkannt durch (gemessen: als "2٬000", woraus eine
+  //     Mengenangabe die 2 las);
+  //   - danach ist der Dezimaltrenner schon ein Punkt, und in de-DE IST der Punkt
+  //     das Gruppierungszeichen - "1,000" (also eins) floege raus.
+  // Beide Faelle sind in test-shopping-ux.js verhaltensgetrieben gepinnt; hier
+  // steht die Reihenfolge selbst, weil ein Textguard sie zeigt und ein
+  // Verhaltenstest nur ihre Folgen.
+  const ziffernSchritt = impl.search(/digits\.get\(char\)/);
+  const gruppenSchritt = impl.search(/groupSep &&/);
+  const trennerSchritt = impl.search(/char === decimalSep/);
+  assert.ok(ziffernSchritt >= 0 && gruppenSchritt >= 0 && trennerSchritt >= 0,
+    'die drei Schritte von toDecimalString sind nicht mehr erkennbar');
+  assert.ok(ziffernSchritt < gruppenSchritt,
+    'die Ziffern muessen VOR der Gruppierungspruefung nach ASCII - sonst sieht `\\d` sie nicht');
+  assert.ok(gruppenSchritt < trennerSchritt,
+    'die Gruppierung muss VOR dem Ersetzen des Dezimaltrenners geprueft werden - sonst ist der Trenner in de-DE ununterscheidbar vom Gruppierungszeichen');
+});
+
+test('keine Seite schreibt einen Dezimaltrenner von Hand um', () => {
+  // Der Einkauf speichert Preise als ganze Cent (#1003) und brauchte dafuer
+  // zwei Umrechnungen. Als sie in pages/shopping.js standen, war die eine ein
+  // `replace(',', '.')`: unter en-US wird "1,000" damit zur Zahl 1, unter ar/fa
+  // kaeme eine Eingabe in oestlichen Ziffern ueberhaupt nicht an. Die Regel
+  // dafuer steht schon in toDecimalString - eine zweite Fassung daneben ist
+  // genau die Dopplung, gegen die dieses Modul angelegt wurde.
+  const clean = withoutComments(money);
+  assert.match(clean, /export function centsToAmountInput/, 'centsToAmountInput fehlt in utils/money.js');
+  assert.match(clean, /export function amountInputToCents/, 'amountInputToCents fehlt in utils/money.js');
+
+  const rein = clean.match(/export function amountInputToCents[\s\S]*?\n\}/)[0];
+  assert.match(rein, /toDecimalString\(/, 'die Eingabe muss durch toDecimalString laufen');
+
+  // Ohne useGrouping:false schriebe das Feld "1.234,56" - und genau das weist
+  // toDecimalString beim naechsten Speichern ab. Der Wert kaeme also nicht
+  // wieder herein, den das Feld selbst gezeigt hat.
+  const raus = clean.match(/export function centsToAmountInput[\s\S]*?\n\}/)[0];
+  assert.match(raus, /useGrouping:\s*false/, 'der Ausgabewert darf nicht gruppiert sein');
+
+  // Gemessen wird die GANZE Datei, nicht mehr nur der Preispfad. Die Einschraenkung
+  // stand bis 09.09.2026 hier, weil shopping.js daneben Mengenangaben zerlegt
+  // ("1,5 kg") und das kein Geldbetrag ist - aber der Trenner haengt an der Region
+  // und nicht daran, wofuer die Zahl steht. Die Mengenzeile hatte denselben Fehler,
+  // nur ungesehen: unter en-US wurde "1,000 g" zur Menge 1 (Faktor 1000), unter ar-EG
+  // oder fa kam eine Eingabe in oestlichen Ziffern gar nicht erst an, weil `\d` ASCII
+  // ist. Ein Guard, der eine bekannte Fundstelle ausnimmt, haelt genau sie offen.
+  const einkauf = withoutComments(read('../public/pages/shopping.js'));
+  assert.doesNotMatch(einkauf, /function (centsToInput|inputToCents)\b/,
+    'shopping.js rechnet Preise wieder selbst um');
+  assert.match(einkauf, /amountInputToCents\(priceRoh/,
+    'der Preis muss durch amountInputToCents laufen');
+
+  // Und die Mengenangabe laeuft positiv durch dieselbe Umschrift. Das Verhalten
+  // dahinter (de "1.000 g", en-US "1,000 g", fa/ar-EG in oestlichen Ziffern) misst
+  // test-shopping-ux.js an der echten Funktion - hier steht nur die Sperre gegen
+  // den Rueckfall.
+  const menge = einkauf.match(/function parseShoppingQuantity[\s\S]*?\n\}/);
+  assert.ok(menge, 'parseShoppingQuantity nicht gefunden');
+  assert.match(menge[0], /toDecimalString\(/,
+    'die Mengenangabe muss durch dieselbe Umschrift laufen wie der Preis');
+
+  // Dasselbe fuer das Skalieren einer Zutatenmenge (pages/meals.js): es LIEST eine
+  // Zahl und SCHREIBT sie wieder, und beide Richtungen haengen an der Region. Die
+  // Ausgabe schaute sich den Trenner vorher aus der Eingabe ab (`useComma`) - eine
+  // aus Mealie gespiegelte "1.5" blieb damit auch in einer deutschen Oberflaeche
+  // eine "1.5". Verhalten in test-meals.js.
+  const rezept = withoutComments(read('../public/pages/meals.js'));
+  const skalieren = rezept.match(/function scaleQuantityText[\s\S]*?\n\}/);
+  assert.ok(skalieren, 'scaleQuantityText nicht gefunden');
+  assert.match(skalieren[0], /toDecimalString\(/,
+    'die gelesene Menge muss durch dieselbe Umschrift laufen');
+  assert.doesNotMatch(skalieren[0], /useComma/,
+    'der Trenner der Ausgabe darf nicht aus der Eingabe abgeschaut werden - getNumberFormat nutzen');
+  assert.match(rezept, /function formatScaledQuantity[\s\S]*?toStoredNumber\(/,
+    'die skalierte Menge muss ueber toStoredNumber geschrieben werden');
+
+  // toStoredNumber selbst: Trenner aus der Region, Ziffern in ASCII, ohne
+  // Gruppierung. Die drei haengen zusammen und stehen deshalb hier beieinander:
+  //  - `getNumberFormat` liefert den Trenner der Region (sonst zeigte eine
+  //    deutsche Oberflaeche "4.5");
+  //  - KEIN `numberingSystem`-Zwang mehr: bis v2.65 stand hier `latn`, weil der
+  //    Server nur ASCII lesen konnte und eine Menge in persischen Ziffern aus der
+  //    Summierung fiel. Seit er dieselbe Umschrift benutzt (utils/digits.js), ist
+  //    der Grund entfallen - und eine skalierte Zeile mischt nicht mehr zwei
+  //    Schriften. Gemessen wird das in test-money-utils.js gegen den ECHTEN
+  //    parseQuantity statt gegen einen Nachbau seiner Regex;
+  //  - ohne `useGrouping: false` schriebe sie einen Wert, den toDecimalString
+  //    beim naechsten Skalieren abweist.
+  const gespeichert = clean.match(/export function toStoredNumber[\s\S]*?\n\}/);
+  assert.ok(gespeichert, 'toStoredNumber fehlt in utils/money.js');
+  assert.match(gespeichert[0], /getNumberFormat\(/, 'der Trenner muss aus der Region kommen');
+  assert.doesNotMatch(gespeichert[0], /numberingSystem/,
+    'der gespeicherte Wert folgt der Region - der Server liest sie inzwischen mit');
+  assert.match(gespeichert[0], /useGrouping:\s*false/, 'der gespeicherte Wert darf nicht gruppiert sein');
+
+  // Die Abschneide-Pruefung liegt geteilt in money.js und kennt die Trennzeichen
+  // der waehlbaren Regionen. Eine Zeichenklasse „alles ausser Leerraum und
+  // Ziffer" war zu breit und traf die Multiplikator-Schreibweise „2x500 g" mit.
+  const abbruch = clean.match(/export function breaksOffAtSeparator[\s\S]*?\n\}/);
+  assert.ok(abbruch, 'breaksOffAtSeparator fehlt in utils/money.js');
+  assert.doesNotMatch(abbruch[0], /\[\^\\s\\d\]/,
+    'die Trennzeichen duerfen nicht als „alles ausser Leerraum und Ziffer" geraten werden');
+  assert.match(clean, /function numberSeparators[\s\S]*?REGION_CODES/,
+    'die Trennzeichen muessen aus den waehlbaren Regionen abgeleitet werden');
+  // `\d` waere hier ASCII - genau die Falle, gegen die diese Datei angelegt ist.
+  assert.match(abbruch[0], /\\p\{Nd\}/u,
+    'die Ziffernpruefung muss Unicode-Ziffern kennen, nicht nur ASCII');
+  for (const [datei, quelle] of [['shopping.js', einkauf], ['meals.js', rezept]]) {
+    assert.match(quelle, /breaksOffAtSeparator\(/,
+      `pages/${datei} muss die geteilte Abschneide-Pruefung nutzen`);
+    assert.doesNotMatch(quelle, /\[\^\\s\\d\]\\d/,
+      `pages/${datei} hat wieder eine eigene, zu breite Trennerpruefung`);
+  }
+
+  // Und die Regel gilt fuer JEDE Seite, nicht fuer die drei, die bisher aufgefallen
+  // sind: weder `replace(',', '.')` noch `replace(/,/g, '.')`. Genau das Auslassen
+  // einer bekannten Fundstelle hat die Mengenzeile des Einkaufs offengehalten.
+  const seiten = readdirSync(new URL('../public/pages/', import.meta.url)).filter((f) => f.endsWith('.js'));
+  assert.ok(seiten.length > 10, `zu wenige Seiten gefunden (${seiten.length})`);
+  for (const datei of seiten) {
+    assert.doesNotMatch(
+      withoutComments(read(`../public/pages/${datei}`)),
+      /\.replace\(\s*(?:'[,.]'|"[,.]"|\/[,.]\/[a-z]*)\s*,\s*(?:'[,.]'|"[,.]")\s*\)/,
+      `pages/${datei} schreibt einen Trenner von Hand um - toDecimalString aus utils/money.js nutzen`,
+    );
+  }
 });
 
 test('ein Abo darf null kosten', () => {
@@ -630,33 +927,33 @@ test('jede Rolle des Geld-Vokabulars ist in money.js dokumentiert und behandelt'
 
 test('es gibt genau eine Kennzahlkarte im Modul', () => {
   // Fünf Bauarten hießen fünfmal neu lernen, wo die Zahl steht. Wer eine neue
-  // Kennzahl zeigt, nimmt .budget-summary-card - oder dieser Guard schlägt an.
-  for (const [file, css] of BUDGET_STYLESHEETS) {
+  // Kennzahl zeigt, nimmt .metric-card - oder dieser Guard schlägt an.
+  for (const [file, css] of AUDITED_STYLESHEETS) {
     for (const match of css.matchAll(/^\.([a-z-]*summary-card[a-z_-]*)/gm)) {
       assert.ok(
-        match[1].startsWith('budget-summary-card'),
-        `${file}: .${match[1]} ist eine zweite Kennzahlkarte - .budget-summary-card ist der Baustein`,
+        match[1].startsWith('metric-card'),
+        `${file}: .${match[1]} ist eine zweite Kennzahlkarte - .metric-card ist der Baustein`,
       );
     }
   }
   for (const [file, src] of BUDGET_PAGES) {
     for (const match of src.matchAll(/class="([^"]*summary-card[^"]*)"/g)) {
       assert.ok(
-        /budget-summary-card/.test(match[1]),
-        `${file}: Kennzahlkarte "${match[1]}" nutzt nicht .budget-summary-card`,
+        /metric-card/.test(match[1]),
+        `${file}: Kennzahlkarte "${match[1]}" nutzt nicht .metric-card`,
       );
     }
   }
 });
 
 test('Arbeitsflächen des Moduls sind opak, Glass bleibt den Overlays', () => {
-  // budget.css begründet die Regel an .budget-summary-card. Sie galt nur dort,
+  // budget.css begründet die Regel an .metric-card. Sie galt nur dort,
   // während subscriptions.css und split-expenses.css im selben Modul Glass auf
   // Karten, Panels und sogar auf einem Eingabefeld setzten.
   // Overlay-Rollen tragen ihr Rollenwort im Selektor; alles andere ist
   // Arbeitsfläche. Neue Arbeitsflächen fallen damit automatisch durch.
   const OVERLAY_ROLES = /modal|dialog|popover|overlay|picker-panel|form__section|tooltip|menu/;
-  for (const [file, css] of BUDGET_STYLESHEETS) {
+  for (const [file, css] of AUDITED_STYLESHEETS) {
     // Regelblöcke grob zerlegen: Selektorliste bis '{', Body bis '}'.
     for (const rule of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
       const selector = rule[1].split('*/').pop().trim();
@@ -687,7 +984,7 @@ test('kein Kontrast im Modul hängt an der Datenlage', () => {
   assert.ok(DATA_COLORS.size > 0, 'keine Datenfarben gefunden - der Guard misst nichts');
 
   const varsIn = (decls) => [...decls.matchAll(/var\(\s*(--[a-z0-9-]+)/gi)].map((m) => m[1]);
-  for (const [file, css] of BUDGET_STYLESHEETS) {
+  for (const [file, css] of AUDITED_STYLESHEETS) {
     for (const rule of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
       const body = rule[2];
       const fg = [...body.matchAll(/(?:^|;)\s*color\s*:([^;]*)/g)].map((m) => m[1]).join(' ');
@@ -727,8 +1024,8 @@ test('Panel-Fläche und Kopfleiste sind geteilt, nicht pro Tab gebaut', () => {
   assert.match(panel[1], /overflow-y:\s*auto/);
   assert.match(panel[1], /padding-block-start:\s*var\(--space/);
 
-  assert.ok(/\n\.budget-panel-head\s*\{/.test(budgetCss), '.budget-panel-head fehlt in budget.css');
-  assert.ok(/\n\.budget-panel-head__title\s*\{/.test(budgetCss), '.budget-panel-head__title fehlt');
+  assert.ok(/\n\.panel-head\s*\{/.test(panelCss), '.panel-head fehlt in panel.css');
+  assert.ok(/\n\.panel-head__title\s*\{/.test(panelCss), '.panel-head__title fehlt');
 
   // Kein Tab setzt Scroll-Achse oder Panel-Padding noch selbst. Ausnahmen sind
   // benannte Modifier (--budget hält seine eigene innere Scroll-Region).
@@ -743,11 +1040,86 @@ test('Panel-Fläche und Kopfleiste sind geteilt, nicht pro Tab gebaut', () => {
   }
 });
 
+test('die Transaktionsliste bleibt auf kurzen Desktop-Viewports erreichbar (#904)', () => {
+  // Der feste Teil des Budget-Tabs (Zusammenfassung + Kategorie-Chart) wächst
+  // mit den Kategorien. Zwei Regeln zusammen hielten die Liste gefangen: das
+  // Panel clippte mit `overflow: hidden`, und die Sektion durfte per
+  // `min-height: 0` bis auf Kopfzeilenhöhe kollabieren - bei neun Kategorien
+  // auf 1512x747 lag die Liste vollständig unterhalb des Viewports, und weil
+  // das Panel nicht scrollte, führte kein Weg zu ihr (#904, gemessen: Sektion
+  // 32px hoch, Liste ab y=648 bei 620px Viewport). Beide Hälften einzeln
+  // gepinnt: jede allein genügt, um den Defekt wiederzubeleben.
+  // Vier Fluchtwege aus dem Review, jeder mit Gegenprobe belegt:
+  // 1. Ausgenommen ist NUR der benannte Mobil-Reflow (max-width: 639px), nicht
+  //    jeder At-Block - #904 ist ein Kurz-Viewport-Defekt, eine max-height-
+  //    Query wäre der wahrscheinlichste Rückweg gewesen und blieb unsichtbar.
+  // 2. Geprüft wird jede Regel, deren SUBJEKT (letzter Compound) das Element
+  //    trifft - `.budget-page .budget-tab-panel--budget` clippt genauso, war
+  //    aber am exakten Selektorvergleich vorbei.
+  // 3. Bei min-height zählt die LETZTE Deklaration der Regel (Kaskade
+  //    innerhalb des Blocks; die Falle aus dem css-rules.js-Kopf).
+  // 4. Die Untergrenze muss eine nutzbare px-Länge tragen: die Sektion clippt
+  //    (`overflow: hidden`), ihr automatisches Minimum ist damit 0 - ein
+  //    `min-height: auto` oder `1px` kollabiert exakt wie das alte `0`,
+  //    bestand aber den reinen Nicht-Null-Test.
+  const subjectIs = (selector, cls) => selector.split(',').some((einzel) => {
+    const compounds = einzel.trim().split(/[\s>+~]+/).filter(Boolean);
+    return compounds.length > 0 && compounds[compounds.length - 1].includes(cls);
+  });
+
+  let panelSeen = false;
+  let floorSeen = false;
+  for (const { selector, body, at } of eachRule(budgetCss)) {
+    if (at.some((a) => /max-width:\s*639px/.test(a))) continue;
+    if (subjectIs(selector, '.budget-tab-panel--budget')) {
+      panelSeen = true;
+      // `clip` kappt wie `hidden`, nur ohne Scrollport - und die Block-Achse
+      // lässt sich auch als Langform oder als zweiter Shorthand-Wert setzen.
+      // Der Grund für die Zusicherung ist das Abschneiden, nicht die eine
+      // Schreibweise dafür (dieselbe Regel wie in test-frontend-audit.js).
+      for (const [, prop, value] of body.matchAll(/(?:^|;)\s*(overflow(?:-y|-block)?)\s*:\s*([^;]+)/g)) {
+        assert.ok(
+          !/\b(?:hidden|clip)\b/.test(value),
+          `"${selector.trim()}" clippt das Budget-Panel (${prop}: ${value.trim()}): wächst `
+          + 'der feste Teil über den Viewport, ist die Transaktionsliste '
+          + 'unerreichbar (#904) - die Scroll-Achse der Basisregel muss offen bleiben',
+        );
+      }
+    }
+    if (subjectIs(selector, '.budget-list-section')) {
+      const decls = [...body.matchAll(/min-height\s*:\s*([^;]+)/g)];
+      if (decls.length === 0) continue;
+      const value = decls[decls.length - 1][1].trim();
+      const px = value.match(/(\d+(?:\.\d+)?)px/);
+      assert.ok(
+        px && Number(px[1]) >= 200,
+        `"${selector.trim()}" setzt min-height: ${value} - die Sektion braucht eine `
+        + 'nutzbare px-Untergrenze (>= 200px, ggf. per min() ans Panel gekappt): '
+        + 'auto, 0 oder Kleinstwerte kollabieren sie neben dem inhaltshohen '
+        + 'Kategorie-Chart wieder auf Kopfzeilenhöhe (#904)',
+      );
+      floorSeen = true;
+    }
+  }
+  assert.ok(panelSeen, '.budget-tab-panel--budget fehlt in budget.css');
+  assert.ok(
+    floorSeen,
+    '.budget-list-section deklariert ausserhalb des Mobil-Reflows keine '
+    + 'min-height-Untergrenze mehr (#904)',
+  );
+});
+
 test('Trendpfeile sind Icons, keine Textglyphen', () => {
+  // Die Pfeil-Entscheidung wohnt seit Block 2 in der geteilten Trend-API
+  // (utils/metric-card.js) - budget.js formatiert nur noch den Text.
+  const metricCard = read('../public/utils/metric-card.js');
   assert.doesNotMatch(budget, /'▲'/);
   assert.doesNotMatch(budget, /'▼'/);
-  assert.match(budget, /trending-up/);
-  assert.match(budget, /trending-down/);
+  assert.doesNotMatch(metricCard, /'▲'/);
+  assert.doesNotMatch(metricCard, /'▼'/);
+  assert.match(metricCard, /trending-up/);
+  assert.match(metricCard, /trending-down/);
+  assert.match(budget, /trendMarkup\(/);
 });
 
 test('Konto-Farben kommen aus Tokens und tragen sprechende Labels', () => {
@@ -776,10 +1148,10 @@ test('Saldo wird neutral, wenn keine Einnahmen erfasst sind', () => {
   // Ohne Einnahmen ist balance = -Ausgaben eine Tautologie; die rote Zahl liest
   // sich fälschlich als „im Minus". Bedingung: income === 0 && balance < 0.
   assert.match(budget, /const balanceNeutral = s\.income === 0 && s\.balance < 0;/);
-  assert.match(budget, /balanceNeutral[\s\S]{0,80}budget-summary-card--balance-neutral/);
+  assert.match(budget, /balanceNeutral[\s\S]{0,80}metric-card--balance-neutral/);
   // Echte Einnahmen behalten die Farbsemantik (grün Überschuss / rot Mehrausgabe).
-  assert.match(budget, /budget-summary-card--balance-positive/);
-  assert.match(budget, /budget-summary-card--balance-negative/);
+  assert.match(budget, /metric-card--balance-positive/);
+  assert.match(budget, /metric-card--balance-negative/);
 });
 
 test('der Saldo-Trend entfällt im neutralen Ausgaben-Fall', () => {
@@ -789,8 +1161,8 @@ test('der Saldo-Trend entfällt im neutralen Ausgaben-Fall', () => {
 });
 
 test('die neutrale Saldo-Farbe kommt aus einem Token, nicht als Literal', () => {
-  const rule = budgetCss.match(/\.budget-summary-card--balance-neutral[^\n]*\{[^}]*\}/);
-  assert.ok(rule, '.budget-summary-card--balance-neutral fehlt in budget.css');
+  const rule = panelCss.match(/\.metric-card--balance-neutral[^\n]*\{[^}]*\}/);
+  assert.ok(rule, '.metric-card--balance-neutral fehlt in panel.css');
   assert.match(rule[0], /var\(--color-text-primary\)/);
   assert.doesNotMatch(rule[0], /var\(--color-danger\)|var\(--color-success\)/);
 });
@@ -822,12 +1194,12 @@ test('die Ausgaben-Karte trägt im „Nur Ausgaben"-Modus die volle Breite', () 
   // Die Spaltenzahl der geteilten Kennzahl-Zeile kommt seit der Baustein-
   // Extraktion aus --summary-cards; geprüft wird die Invariante (eine Spalte),
   // nicht mehr die grid-template-columns-Schreibweise.
-  const rule = budgetCss.match(/\.budget-summary--expenses-only[^\n]*\{[^}]*\}/);
-  assert.ok(rule, '.budget-summary--expenses-only fehlt in budget.css');
+  const rule = panelCss.match(/\.metric-grid--expenses-only[^\n]*\{[^}]*\}/);
+  assert.ok(rule, '.metric-grid--expenses-only fehlt in panel.css');
   assert.match(rule[0], /--summary-cards:\s*1/);
 
-  const base = budgetCss.match(/\n\.budget-summary\s*\{[^}]*\}/);
-  assert.ok(base, '.budget-summary fehlt in budget.css');
+  const base = panelCss.match(/\n\.metric-grid\s*\{[^}]*\}/);
+  assert.ok(base, '.metric-grid fehlt in panel.css');
   assert.match(base[0], /grid-template-columns:\s*repeat\(var\(--summary-cards[^)]*\)/);
 });
 
@@ -995,4 +1367,167 @@ test('die Bestätigungspflicht ist eine Eigenschaft der Serie', () => {
   assert.ok(modal.includes('bm-confirm-first'), 'Schalter fehlt im Wiederholungs-Block');
   assert.ok(modal.includes('budget.confirmFirstLabel'), 'Beschriftung fehlt');
   assert.ok(budget.includes('recurrence_confirm: confirmFirst'), 'Feld reist nicht zum Server');
+});
+
+// --------------------------------------------------------
+// Rate eines Darlehens im Eintrags-Dialog (#638/#859)
+// --------------------------------------------------------
+
+test('der Typ-Umschalter nimmt bei einer Darlehensrate keine Eingabe entgegen', () => {
+  // Ob eine Rate Einnahme oder Ausgabe ist, entscheidet die Richtung des Darlehens.
+  // Der Server bucht danach und würde eine hier gewählte Umkehr still zurückdrehen -
+  // ein Umschalter, der scheinbar etwas ändert und dann überstimmt wird, ist die
+  // schlechtere Hälfte von beidem.
+  const toggle = budget.slice(budget.indexOf('class="amount-type-toggle'), budget.indexOf('id="bm-title"'));
+  const buttons = [...toggle.matchAll(/id="type-(expense|income)"[^>]*/g)].map((m) => m[0]);
+  assert.equal(buttons.length, 2, 'die beiden Typ-Schalter sind nicht mehr auffindbar');
+  for (const btn of buttons) {
+    assert.match(btn, /isLoanPayment \? 'disabled' : ''/,
+      `${btn.slice(0, 24)} ist bei einer Darlehensrate weiter bedienbar`);
+  }
+  assert.ok(toggle.includes('budget.loanPaymentTypeLocked'), 'die Sperre bleibt unerklärt');
+});
+
+test('das Bearbeiten-Modal bekommt immer einen echten Eintrag, nie einen nachgebauten', () => {
+  // loanPaymentToEntry() baut aus einer Rate ein Anzeige-Objekt: Betrag in
+  // Darlehenswährung, ohne Konto, ohne Sichtbarkeit, ohne Belege. Als Vorlage zum
+  // Bearbeiten schriebe es den Ratenbetrag als Budget-Betrag zurück (bei
+  // Fremdwährung um den Kurs daneben) und leerte jedes Feld, das es nicht kennt.
+  // Es ist deshalb kein Einstieg ins Modal - der Drilldown liefert den echten.
+  const built = budget.slice(budget.indexOf('function loanPaymentToEntry'), budget.indexOf('function renderLoanPaymentEntry'));
+  assert.doesNotMatch(built, /openBudgetModal/, 'der Nachbau oeffnet selbst das Modal');
+
+  const handler = budget.slice(budget.indexOf("data-action=\"loan-payment-edit\"]').forEach"));
+  const body = handler.slice(0, handler.indexOf('});'));
+  assert.doesNotMatch(body, /loanPaymentToEntry/,
+    'der Bearbeiten-Knopf oeffnet das Modal mit dem nachgebauten Objekt');
+  assert.match(body, /openLoanPaymentEntry/, 'der Bearbeiten-Knopf laedt den Eintrag nicht nach');
+
+  const loader = budget.slice(budget.indexOf('async function openLoanPaymentEntry'));
+  const loaderBody = loader.slice(0, loader.indexOf('\nfunction '));
+  assert.match(loaderBody, /api\.get\(`\/budget\?loan_id=/, 'der Eintrag kommt nicht aus dem Drilldown');
+  assert.match(loaderBody, /loan_payment_id === paymentId/, 'die geladene Zeile wird nicht der Rate zugeordnet');
+  assert.match(loaderBody, /openBudgetModal\(\{ mode: 'edit', entry \}\)/, 'das Modal wird nicht mit dem geladenen Eintrag geoeffnet');
+});
+
+/**
+ * Ein leeres Konto-Feld an einer kontolosen Instanz nimmt der Serie nicht ihr
+ * Konto (#973).
+ *
+ * Das Feld zeigt das Konto DIESER Buchung, der Serien-Dialog gilt aber der
+ * ganzen Serie. Genau die Instanzen, denen #973 das Konto vorenthalten hat,
+ * hätten es beim Bearbeiten mit `account_id: null` an die Serie weitergereicht
+ * und deren Konto gelöscht - reproduziert, bevor die Zeile entstand.
+ *
+ * EHRLICH ZUM GELTUNGSBEREICH: das hier misst die Schreibweise, nicht die
+ * Sache. `public/pages/budget.js` hat keine `__test`-Naht, der Sendepfad ist
+ * also aus einer Suite nicht aufrufbar. Der Guard hält damit den Fall fest, dass
+ * jemand die Zeile entfernt - nicht den, dass jemand sie unwirksam macht. Die
+ * Naht ist die richtige Folgearbeit; sie gehört nicht in einen Bugfix.
+ */
+test('Serien-Speichern reicht ein leeres Konto einer kontolosen Instanz nicht weiter (#973)', () => {
+  const start = budget.indexOf("if (scope === 'series')");
+  assert.ok(start >= 0, 'der Serien-Zweig muss auffindbar sein');
+  const zweig = budget.slice(start, start + 1400);
+
+  assert.match(zweig, /const seriesBody = \{ \.\.\.body \}/,
+    'der Serien-Aufruf braucht einen eigenen Body, sonst wirkt jede Korrektur auch auf den Einzel-PUT');
+  assert.match(zweig, /seriesBody\.account_id === null && entry\.account_id == null/,
+    'ein leeres Feld zählt nur als "Konto entfernen", wenn die Instanz vorher eines trug');
+  assert.match(zweig, /delete seriesBody\.account_id/,
+    'sonst muss das Feld ungesendet bleiben - weglassen heißt serverseitig "unverändert"');
+  assert.match(zweig, /api\.put\(`\/budget\/\$\{entry\.id\}\/series`, seriesBody\)/,
+    'gesendet wird der bereinigte Body, nicht der ursprüngliche');
+});
+
+// --------------------------------------------------------
+// Split-Ausgaben: eine Primäraktion statt vier (Cross-Modul-Review)
+// --------------------------------------------------------
+
+/**
+ * Split-Ausgaben bringt seinen eigenen Kopfknopf UND seinen eigenen FAB mit
+ * (split-expenses.js). Solange TAB_CAPS['split-expenses'].add einen Aktionsnamen
+ * trug, zeigte Budgets EIGENER Toolbar-Knopf (#budget-add) und Budgets EIGENER
+ * FAB (#fab-new-budget) auf diesem Tab ZUSAETZLICH auf, beide per Klick an
+ * #split-add-expense delegiert - macht mit dem Unterseiten-eigenen Kopfknopf
+ * und dessen eigenem FAB vier Ausloeser fuer dieselbe Handlung, gemessen als
+ * "drei violette Add-Knoepfe zugleich" im UX-Review. `add: null` (wie Berichte)
+ * haelt Budgets generische Knoepfe auf diesem Tab unsichtbar.
+ */
+test('Split-Ausgaben bietet keine zweite, generische Neu-Aktion aus dem Budget-Kopf', () => {
+  const table = budget.match(/const TAB_CAPS = \{[\s\S]*?\n\};/);
+  assert.ok(table, 'TAB_CAPS-Tabelle fehlt');
+  assert.match(table[0], /'split-expenses':\s*\{[^}]*add:\s*null/,
+    'Split-Ausgaben bringt seinen eigenen Kopfknopf/FAB mit - Budgets generischer ' +
+    '#budget-add/#fab-new-budget-Knopf darf hier keine zweite Aktion anbieten');
+  // Der Kontext-Schalter darf die Unterseite nicht mehr direkt anklicken -
+  // sonst bliebe der alte Vierfach-Ausloeser ueber einen zweiten Codepfad stehen.
+  assert.doesNotMatch(withoutComments(budget), /case 'split-expenses':/,
+    'addHandler darf für Split-Ausgaben keinen eigenen Zweig mehr brauchen - ' +
+    'der Tab hat keine generische Neu-Aktion mehr');
+});
+
+/**
+ * Eingebettet (der einzige heute erreichte Fall - budget.js ruft immer mit
+ * embedded:true) darf Split-Ausgaben keine zweite Seiten-Ueberschrift unter
+ * Budgets eigenem <h1> führen, und sein Kopfknopf darf nicht als zweiter
+ * Primärknopf neben dem FAB (#split-fab) auftreten.
+ */
+test('eingebettete Split-Ausgaben tragen keine zweite <h1> und keinen zweiten Primärknopf', () => {
+  assert.match(splitExpenses, /const TitleTag = embedded \? 'h2' : 'h1'/,
+    'die Überschrift muss im eingebetteten Fall eine Bereichs-Überschrift sein, kein zweites <h1>');
+  assert.match(splitExpenses, /const addExpenseBtnVariant = embedded \? 'btn--secondary' : 'btn--primary'/,
+    'der Kopfknopf muss im eingebetteten Fall zurücktreten - die Primäraktion ist der FAB');
+  assert.match(splitExpenses, /<\$\{TitleTag\} class="split-title">/,
+    'die Überschrift muss über TitleTag gerendert werden, nicht fest als <h1>');
+  assert.match(splitExpenses, /<button class="btn \$\{addExpenseBtnVariant\}" id="split-add-expense">/,
+    'der Kopfknopf muss über addExpenseBtnVariant gerendert werden, nicht fest als --primary');
+});
+
+/**
+ * Mit dem Tab-Titel als <h2> stand der Gruppenname auf derselben Stufe wie der
+ * Titel, die Karten darunter auf <h3>. Eingebettet sinkt die Gliederung deshalb
+ * eine Stufe: Budget > Split-Ausgaben > Gruppe > Abschnitt (Nachtrag aus dem
+ * Review von #1148). Weil der Tag damit wechselt, darf die Optik nicht an ihm
+ * haengen - ein Selektor wie `.split-card h3` griffe nur noch ausserhalb des Budgets.
+ */
+test('eingebettete Split-Ausgaben gliedern Gruppe und Karten eine Stufe tiefer', () => {
+  const src = withoutHtmlComments(withoutComments(splitExpenses));
+  assert.match(src, /_embedded = embedded;/,
+    'render() muss den Einbettungs-Schalter festhalten, renderMain() bekommt ihn nicht übergeben');
+  assert.match(src, /const GroupTag = _embedded \? 'h3' : 'h2'/,
+    'der Gruppenname steht eingebettet unter dem <h2>-Tab-Titel, also <h3>');
+  assert.match(src, /const SectionTag = _embedded \? 'h4' : 'h3'/,
+    'die Karten stehen eingebettet unter dem Gruppennamen, also <h4>');
+  assert.match(src, /<\$\{GroupTag\} class="split-group-name">/,
+    'der Gruppenname muss über GroupTag gerendert werden');
+  assert.equal((src.match(/<\$\{SectionTag\} class="split-card-title">/g) ?? []).length, 3,
+    'Salden, letzte Ausgaben und Verlauf müssen über SectionTag gerendert werden');
+  assert.doesNotMatch(src, /<h[1-6][\s>]/,
+    'eine fest geschriebene Überschrift folgt der Einbettung nicht - über eine Tag-Variable rendern');
+
+  const byTag = [];
+  for (const file of readdirSync(new URL('../public/styles/', import.meta.url))) {
+    if (!file.endsWith('.css')) continue;
+    for (const { selector } of eachRule(read(`../public/styles/${file}`))) {
+      if (/\.split[\w-]*[^,]*\bh[1-6]\b/.test(selector)) byTag.push(`${file}: ${selector}`);
+    }
+  }
+  assert.deepEqual(byTag, [],
+    'Split-Überschriften wechseln mit der Einbettung den Tag - Stile an die Klasse hängen, nicht an h2/h3');
+});
+
+/**
+ * Löschen einer Gruppe ist unumkehrbar (die Gruppe fällt mitsamt ihrer
+ * Ausgaben), Bearbeiten/Archivieren nicht - dieselbe Kapsel für alle drei
+ * verwischte den Unterschied (UX-Review).
+ */
+test('Gruppe löschen trägt eine andere Gewichtung als bearbeiten/archivieren', () => {
+  assert.match(splitExpenses, /id="split-edit-group"[^>]*>/);
+  assert.match(splitExpenses, /class="btn btn--secondary btn--icon" id="split-edit-group"/,
+    'Bearbeiten bleibt eine gewöhnliche Sekundäraktion');
+  assert.match(splitExpenses, /class="btn btn--secondary btn--icon" id="split-archive-group"/,
+    'Archivieren bleibt eine gewöhnliche Sekundäraktion');
+  assert.match(splitExpenses, /class="btn btn--icon btn--danger-outline" id="split-delete-group"/,
+    'Löschen muss sich sichtbar von Bearbeiten/Archivieren abheben, ohne die Zeile zu dominieren');
 });

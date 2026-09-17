@@ -94,9 +94,15 @@ router.get('/export/meds-logs', (req, res) => {
       SELECT l.*, m.name AS medication_name FROM medication_logs l
       JOIN medications m ON m.id = l.medication_id
       WHERE ${clause.sql}`;
-    if (from) { sql += ' AND l.scheduled_at >= ?'; params.push(`${from}T00:00`); }
-    if (to)   { sql += ' AND l.scheduled_at <= ?'; params.push(`${to}T23:59`); }
-    sql += ' ORDER BY COALESCE(l.scheduled_at, l.created_at) ASC, l.id ASC';
+    // Gefiltert wird nach demselben Ausdruck, nach dem sortiert wird - und auf
+    // Minuten zugeschnitten, weil `scheduled_at` Wanduhrzeit fuehrt und
+    // `created_at` auf 'Z' endet. Eine Bedarfsdosis hat keinen Zeitplan; ueber
+    // `l.scheduled_at` allein fiel sie aus jedem Zeitraum und stand damit in
+    // keinem Auszug, den jemand seiner Aerztin hinlegt (#700).
+    const WHEN = 'COALESCE(l.scheduled_at, l.taken_at, l.created_at)';
+    if (from) { sql += ` AND substr(${WHEN}, 1, 16) >= ?`; params.push(`${from}T00:00`); }
+    if (to)   { sql += ` AND substr(${WHEN}, 1, 16) <= ?`; params.push(`${to}T23:59`); }
+    sql += ` ORDER BY ${WHEN} ASC, l.id ASC`;
 
     const rows = db.get().prepare(sql).all(...params);
     sendCsv(res, exportFilename('meds-logs', from, to), medLogsToCsv(rows));

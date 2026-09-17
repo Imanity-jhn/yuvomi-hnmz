@@ -34,6 +34,7 @@ const {
   markTodoOutbound, queueTodoDeletion, queueTodoDeletions,
   pendingDeletions, pendingDeletionUids, pendingUpdateUids,
   processPendingDeletions, processPendingUpdates, flushOutbound,
+  pendingCreations, processPendingCreations, buildTodoICS, todoUidFor,
 } = await import('../server/services/caldav-todo-outbound.js');
 const { patchICSTodo } = await import('../server/utils/ics-patch.js');
 const { mapVtodoPriority, mapVtodoStatus, splitDue, sync } =
@@ -128,8 +129,8 @@ function reloadTask(id) {
 }
 
 /** Attrappe: sammelt die Aufrufe und beantwortet sie nach Skript. */
-function fakeClient({ objects = [], onUpdate = null, onDelete = null } = {}) {
-  const calls = { updated: [], deleted: [], fetched: [] };
+function fakeClient({ objects = [], onUpdate = null, onDelete = null, onCreate = null } = {}) {
+  const calls = { updated: [], deleted: [], fetched: [], created: [] };
   return {
     calls,
     fetchCalendars: async () => [{ url: LIST_URL, displayName: 'Erinnerungen', components: ['VTODO'] }],
@@ -142,6 +143,11 @@ function fakeClient({ objects = [], onUpdate = null, onDelete = null } = {}) {
     deleteCalendarObject: async (args) => {
       calls.deleted.push(args.calendarObject);
       if (onDelete) return onDelete(args);
+      return {};
+    },
+    createCalendarObject: async (args) => {
+      calls.created.push(args);
+      if (onCreate) return onCreate(args);
       return {};
     },
   };
@@ -656,11 +662,82 @@ test('flushOutbound holt die Objekte aus der abgeleiteten Collection', async () 
   assert.strictEqual(reloadTask(task.id).outbound_dirty, 0);
 });
 
+test('Zwei Sofortversuche laufen nicht ineinander (#593)', async () => {
+  // Aufgaben und Einkauf teilen die Buchhaltung derselben Konten. Hinter jeder
+  // Schreibroute steht ein Sofortversuch, und zwei davon gleichzeitig laesen
+  // einander den Stand zwischen zwei Netzaufrufen weg - dieselbe Regel wie beim
+  // Kalender, mit eigenem Schlüssel: server/utils/sync-lock.js.
+  const accountId = reset();
+  const first  = insertTask({ accountId, title: 'Erste' });
+  db.prepare('UPDATE tasks SET outbound_dirty = 1 WHERE id = ?').run(first.id);
+
+  let gateResolve;
+  const gate = new Promise((resolve) => { gateResolve = resolve; });
+  let clients = 0;
+  const objects = [{ url: OBJ_URL, etag: 'e9', data: serverTodo() }];
+
+  const running = flushOutbound({
+    createClient: async () => {
+      clients++;
+      const client = fakeClient({ objects });
+      const update = client.updateCalendarObject;
+      client.updateCalendarObject = async (args) => { await gate; return update(args); };
+      return client;
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const waiting = [
+    flushOutbound({ createClient: async () => { clients++; return fakeClient({ objects }); } }),
+    flushOutbound({ createClient: async () => { clients++; return fakeClient({ objects }); } }),
+  ];
+
+  gateResolve();
+  await running;
+  await Promise.all(waiting);
+
+  assert.strictEqual(clients, 1,
+    'der Nachlauf findet nichts mehr offen und baut gar keine Verbindung auf');
+  assert.strictEqual(reloadTask(first.id).outbound_dirty, 0);
+});
+
+test('Ein Sofortversuch wartet auf den laufenden VTODO-Sync (#593)', async () => {
+  // Der Sync arbeitet dieselbe Rückrichtung ab wie der Sofortversuch. Beide
+  // gleichzeitig hiesse: der eine zählt die Fehlversuche des anderen hoch und
+  // verwirft am Ende dessen Arbeit.
+  const accountId = reset();
+  enableList(accountId);
+  const task = insertTask({ accountId, title: 'Wartet' });
+  db.prepare('UPDATE tasks SET outbound_dirty = 1 WHERE id = ?').run(task.id);
+
+  let gateResolve;
+  const gate = new Promise((resolve) => { gateResolve = resolve; });
+  const syncClient = { fetchCalendars: async () => { await gate; return []; } };
+  let flushed = 0;
+
+  const syncing = sync({ createClient: async () => syncClient });
+  await new Promise((resolve) => setImmediate(resolve));
+  const flushing = flushOutbound({
+    createClient: async () => { flushed++; return fakeClient({ objects: [] }); },
+  });
+  for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
+
+  try {
+    assert.strictEqual(flushed, 0, 'solange der Sync läuft, baut der Sofortversuch nichts auf');
+  } finally {
+    // Auch wenn die Zusicherung fällt: der hängende Abruf muss enden, sonst
+    // wartet die Suite auf einen Lauf, der nie zurückkehrt.
+    gateResolve();
+    await Promise.allSettled([syncing, flushing]);
+  }
+  assert.strictEqual(flushed, 1, 'danach holt er es nach');
+});
+
 test('Ohne offene Arbeit baut flushOutbound keinen Client auf', async () => {
   reset();
   let built = 0;
   const result = await flushOutbound({ createClient: async () => { built++; return fakeClient(); } });
-  assert.deepStrictEqual(result, { deleted: 0, updated: 0 });
+  assert.deepStrictEqual(result, { deleted: 0, updated: 0, created: 0 });
   assert.strictEqual(built, 0);
 });
 
@@ -888,4 +965,307 @@ test('Der Push eines Einkaufspostens fasst CATEGORIES nicht an', () => {
   const fields = icsFieldsForShoppingItem({ id: 1, name: 'Milch', is_checked: 0 });
   assert.ok(!('CATEGORIES' in fields),
     'Ein Feld, das nicht im Patch steht, lässt die Property auf dem Server unberührt');
+});
+
+// ── Anlegen: Yuvomi → Server (#695) ─────────────────────────────────────────────
+
+/** Eine hier entstandene Aufgabe mit gewaehltem Ziel. */
+function insertLocalTask({ accountId, listUrl = LIST_URL, ...fields } = {}) {
+  const f = {
+    title: 'Reifen wechseln', description: null, priority: 'none', status: 'open',
+    due_date: null, due_time: null, parent: null, ...fields,
+  };
+  const r = db.prepare(`
+    INSERT INTO tasks (title, description, priority, status, due_date, due_time, created_by,
+                       parent_task_id, external_source,
+                       target_caldav_account_id, target_caldav_list_url)
+    VALUES (@title, @description, @priority, @status, @due_date, @due_time, 1,
+            @parent, 'local', @accountId, @listUrl)
+  `).run({ ...f, accountId: accountId ?? null, listUrl });
+  return db.prepare('SELECT * FROM tasks WHERE id = ?').get(r.lastInsertRowid);
+}
+
+const listsByUrl = () => new Map([[LIST_URL, { url: LIST_URL, displayName: 'Erinnerungen' }]]);
+
+test('Ein neues VTODO traegt die Felder der Aufgabe, gebaut aus demselben Patcher', () => {
+  // Der Grund fuer das Geruest-plus-Patch-Verfahren: es darf keine zweite
+  // Serialisierung neben icsFieldsForTask geben, sonst laeuft sie beim naechsten
+  // Feld auseinander.
+  const uid = todoUidFor('tasks', 42);
+  const ics = buildTodoICS('tasks', {
+    id: 42, title: 'Reifen wechseln', description: 'Sommerreifen',
+    priority: 'high', status: 'open', due_date: '2026-09-01', due_time: null, tags: ['Auto'],
+  }, uid);
+
+  assert.match(ics, /BEGIN:VTODO/);
+  assert.match(ics, new RegExp(`UID:${uid.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')}`));
+  assert.match(ics, /SUMMARY:Reifen wechseln/);
+  assert.match(ics, /DESCRIPTION:Sommerreifen/);
+  assert.match(ics, /DUE;VALUE=DATE:20260901/);
+  assert.match(ics, /PRIORITY:2/);
+  assert.match(ics, /STATUS:NEEDS-ACTION/);
+  assert.match(ics, /CATEGORIES:Auto/);
+});
+
+test('Die UID einer neuen Aufgabe haengt an ihrer Id, nicht am Zufall', () => {
+  // Scheitert der Schritt NACH dem Upload, nimmt der naechste Lauf dieselbe UID
+  // und ueberschreibt das Objekt. Mit einer Zufalls-UID staende die Aufgabe
+  // danach doppelt auf dem Server.
+  assert.strictEqual(todoUidFor('tasks', 7), todoUidFor('tasks', 7));
+  assert.notStrictEqual(todoUidFor('tasks', 7), todoUidFor('tasks', 8));
+});
+
+test('pendingCreations findet nur lokale Aufgaben mit Ziel - keine Spiegel, keine Unteraufgaben', () => {
+  const accountId = reset();
+  enableList(accountId);
+  const wanted = insertLocalTask({ accountId });
+  insertLocalTask({ accountId, listUrl: null });          // ohne Ziel
+  insertTask({ accountId });                              // bereits gespiegelt
+  const parent = insertLocalTask({ accountId, title: 'Umzug' });
+  insertLocalTask({ accountId, title: 'Kartons', parent: parent.id });
+
+  const rows = pendingCreations(accountId, 'tasks');
+  assert.deepStrictEqual(rows.map((r) => r.title), [wanted.title, parent.title]);
+});
+
+test('Ein Upload macht die Aufgabe zum Spiegel und raeumt ihr Ziel ab', async () => {
+  const accountId = reset();
+  enableList(accountId);
+  const task = insertLocalTask({ accountId, due_date: '2026-09-01' });
+  const client = fakeClient();
+
+  const created = await processPendingCreations(client, accountId, 'tasks', listsByUrl());
+
+  assert.strictEqual(created, 1);
+  assert.strictEqual(client.calls.created.length, 1);
+  assert.match(client.calls.created[0].iCalString, /SUMMARY:Reifen wechseln/);
+
+  const row = reloadTask(task.id);
+  assert.strictEqual(row.external_source, 'caldav');
+  assert.strictEqual(row.external_uid, todoUidFor('tasks', task.id));
+  assert.strictEqual(row.external_account_id, accountId);
+  assert.strictEqual(row.external_object_url, `${LIST_URL}${todoUidFor('tasks', task.id)}.ics`);
+  // Das Ziel ist erledigt und darf nicht als Dauerauftrag stehen bleiben.
+  assert.strictEqual(row.target_caldav_account_id, null);
+  assert.strictEqual(row.target_caldav_list_url, null);
+  // Und ab hier laeuft sie ueber den normalen Aenderungspfad.
+  assert.strictEqual(pendingCreations(accountId, 'tasks').length, 0);
+});
+
+test('Eine verschwundene Zielliste laesst die Aufgabe lokal, statt es ewig zu versuchen', async () => {
+  const accountId = reset();
+  enableList(accountId);
+  const task = insertLocalTask({ accountId, listUrl: 'https://dav.example/dav/u/weg/' });
+  const client = fakeClient();
+
+  const created = await processPendingCreations(client, accountId, 'tasks', listsByUrl());
+
+  assert.strictEqual(created, 0);
+  assert.strictEqual(client.calls.created.length, 0);
+  const row = reloadTask(task.id);
+  assert.strictEqual(row.external_source, 'local');
+  assert.strictEqual(row.target_caldav_list_url, null,
+    'Ohne erreichbares Ziel wird die Aufgabe freigegeben - das ist der Zustand vor #695 und kostet nichts');
+});
+
+test('Ein gescheiterter Upload bleibt vorgemerkt und gibt nicht auf', async () => {
+  // Anders als eine Aenderung hat ein Upload keinen Stand, der veralten koennte.
+  // Er darf deshalb nicht nach N Versuchen verworfen werden - sonst waere die
+  // Aufgabe still fuer immer lokal.
+  const accountId = reset();
+  enableList(accountId);
+  const task = insertLocalTask({ accountId });
+  const client = fakeClient({ onCreate: async () => { throw new Error('503 Service Unavailable'); } });
+
+  const created = await processPendingCreations(client, accountId, 'tasks', listsByUrl());
+
+  assert.strictEqual(created, 0);
+  const row = reloadTask(task.id);
+  assert.strictEqual(row.external_source, 'local');
+  assert.strictEqual(row.target_caldav_account_id, accountId);
+  assert.strictEqual(pendingCreations(accountId, 'tasks').length, 1);
+});
+
+test('Der Sofortversuch laedt neue Aufgaben hoch', async () => {
+  const accountId = reset();
+  enableList(accountId);
+  const task = insertLocalTask({ accountId });
+  const client = fakeClient();
+
+  const result = await flushOutbound({ createClient: async () => client });
+
+  assert.strictEqual(result.created, 1);
+  assert.strictEqual(reloadTask(task.id).external_source, 'caldav');
+});
+
+test('Der Sync-Lauf laedt hoch, ohne dass der Prune die frische Aufgabe gleich wieder entfernt', async () => {
+  // Die Reihenfolge ist der Punkt: der Prune raeumt lokale Spiegel weg, die der
+  // Server nicht mehr fuehrt. Liefe der Upload VOR ihm, saehe er eine Aufgabe,
+  // die in diesem Lauf noch nicht abgerufen wurde - und loeschte sie sofort.
+  const accountId = reset();
+  enableList(accountId);
+  const task = insertLocalTask({ accountId });
+  const client = fakeClient({ objects: [] });
+
+  await sync({ createClient: async () => client });
+
+  const row = reloadTask(task.id);
+  assert.ok(row, 'Die Aufgabe hat den Lauf ueberlebt');
+  assert.strictEqual(row.external_source, 'caldav');
+  assert.strictEqual(client.calls.created.length, 1);
+});
+
+test('Eine Liste, die auf den Einkauf zeigt, nimmt keine Aufgaben an', async () => {
+  // Sonst kaeme die Aufgabe als Einkaufsposten zurueck. Die Route weist das
+  // bereits ab; hier zaehlt der zweite Riegel im Dienst selbst.
+  const accountId = reset();
+  enableList(accountId, 'shopping');
+  const task = insertLocalTask({ accountId });
+  const client = fakeClient();
+
+  await sync({ createClient: async () => client });
+
+  assert.strictEqual(client.calls.created.length, 0);
+  assert.strictEqual(reloadTask(task.id).external_source, 'local');
+});
+
+// ════════════════════════════════════════════════════════════════════════════════
+// Neu angelegte Einkaufsartikel hochladen (#831)
+//
+// Umbenennen, Abhaken und Loeschen liefen laengst zum Server, ein hier
+// angelegter Artikel blieb aber fuer immer lokal - die Liste lief nach jedem
+// neuen Eintrag auseinander, obwohl die Oberflaeche einen Zwei-Wege-Sync
+// verspricht. Anders als eine Aufgabe traegt ein Artikel kein eigenes Ziel:
+// die Zuordnung Server-Liste <-> Yuvomi-Liste IST die Zielangabe.
+// ════════════════════════════════════════════════════════════════════════════════
+
+function insertShoppingList(name = 'Einkauf') {
+  const r = db.prepare('INSERT INTO shopping_lists (name, created_by) VALUES (?, 1)').run(name);
+  return Number(r.lastInsertRowid);
+}
+
+function insertLocalItem(listId, name = 'Brot') {
+  const r = db.prepare(
+    "INSERT INTO shopping_items (list_id, name, external_source) VALUES (?, ?, 'local')"
+  ).run(listId, name);
+  return db.prepare('SELECT * FROM shopping_items WHERE id = ?').get(r.lastInsertRowid);
+}
+
+const reloadItem = (id) => db.prepare('SELECT * FROM shopping_items WHERE id = ?').get(id);
+const shoppingTargets = (listId) => [{ listUrl: LIST_URL, targetListId: listId }];
+
+test('pendingShoppingCreations findet nur lokale Artikel der zugeordneten Liste', async () => {
+  const { pendingShoppingCreations } = await import('../server/services/caldav-todo-outbound.js');
+  const accountId = reset();
+  const listId    = insertShoppingList();
+  const other     = insertShoppingList('Baumarkt');
+  enableList(accountId, 'shopping', listId);
+
+  const local = insertLocalItem(listId);
+  insertLocalItem(other, 'Schrauben');
+  db.prepare(
+    "INSERT INTO shopping_items (list_id, name, external_source, external_uid, external_account_id) VALUES (?, 'Milch', 'caldav', 'todo-1@test', ?)"
+  ).run(listId, accountId);
+
+  const rows = pendingShoppingCreations(listId);
+  assert.deepEqual(rows.map((r) => r.id), [local.id],
+    'Ein Spiegel ist kein Kandidat, und eine fremde Liste geht diesen Account nichts an');
+});
+
+test('Ein Upload macht den Einkaufsartikel zum Spiegel', async () => {
+  const { processPendingShoppingCreations } = await import('../server/services/caldav-todo-outbound.js');
+  const accountId = reset();
+  const listId    = insertShoppingList();
+  enableList(accountId, 'shopping', listId);
+  const item   = insertLocalItem(listId);
+  const client = fakeClient();
+
+  const created = await processPendingShoppingCreations(client, accountId, shoppingTargets(listId), listsByUrl());
+
+  assert.strictEqual(created, 1);
+  assert.strictEqual(client.calls.created.length, 1);
+  assert.match(client.calls.created[0].iCalString, /SUMMARY:Brot/);
+
+  const row = reloadItem(item.id);
+  assert.strictEqual(row.external_source, 'caldav');
+  assert.strictEqual(row.external_uid, todoUidFor('shopping', item.id));
+  assert.strictEqual(row.external_account_id, accountId);
+  assert.strictEqual(row.external_object_url, `${LIST_URL}${todoUidFor('shopping', item.id)}.ics`);
+});
+
+test('Eine verschwundene Zielliste laesst den Artikel lokal', async () => {
+  const { processPendingShoppingCreations } = await import('../server/services/caldav-todo-outbound.js');
+  const accountId = reset();
+  const listId    = insertShoppingList();
+  enableList(accountId, 'shopping', listId);
+  const item   = insertLocalItem(listId);
+  const client = fakeClient();
+
+  const created = await processPendingShoppingCreations(
+    client, accountId, [{ listUrl: 'https://dav.example/dav/u/weg/', targetListId: listId }], listsByUrl()
+  );
+
+  assert.strictEqual(created, 0);
+  assert.strictEqual(client.calls.created.length, 0);
+  assert.strictEqual(reloadItem(item.id).external_source, 'local');
+});
+
+test('Ein gescheiterter Upload laesst den Artikel als Kandidaten stehen', async () => {
+  const { processPendingShoppingCreations, pendingShoppingCreations } =
+    await import('../server/services/caldav-todo-outbound.js');
+  const accountId = reset();
+  const listId    = insertShoppingList();
+  enableList(accountId, 'shopping', listId);
+  const item   = insertLocalItem(listId);
+  const client = fakeClient({ onCreate: () => { throw new Error('507 Insufficient Storage'); } });
+
+  const created = await processPendingShoppingCreations(client, accountId, shoppingTargets(listId), listsByUrl());
+
+  assert.strictEqual(created, 0);
+  assert.strictEqual(reloadItem(item.id).external_source, 'local');
+  assert.strictEqual(pendingShoppingCreations(listId).length, 1,
+    'Ein Upload hat keinen Stand, der veralten koennte - er laeuft im naechsten Lauf wieder mit');
+});
+
+test('Der Sync-Lauf laedt neue Einkaufsartikel hoch (#831)', async () => {
+  const accountId = reset();
+  const listId    = insertShoppingList();
+  enableList(accountId, 'shopping', listId);
+  const item   = insertLocalItem(listId);
+  const client = fakeClient({ objects: [] });
+
+  await sync({ createClient: async () => client });
+
+  const row = reloadItem(item.id);
+  assert.ok(row, 'Der Artikel hat den Lauf ueberlebt - der Prune darf den frischen Spiegel nicht gleich wieder raeumen');
+  assert.strictEqual(row.external_source, 'caldav');
+  assert.strictEqual(client.calls.created.length, 1);
+});
+
+test('Der Sofortversuch laedt neue Einkaufsartikel hoch', async () => {
+  const accountId = reset();
+  const listId    = insertShoppingList();
+  enableList(accountId, 'shopping', listId);
+  const item   = insertLocalItem(listId);
+  const client = fakeClient();
+
+  const result = await flushOutbound({ createClient: async () => client });
+
+  assert.strictEqual(result.created, 1);
+  assert.strictEqual(reloadItem(item.id).external_source, 'caldav');
+});
+
+test('Eine Liste, die auf Aufgaben zeigt, nimmt keine Einkaufsartikel an', async () => {
+  // Spiegelbild des Riegels fuer Aufgaben: sonst kaeme der Artikel als Aufgabe
+  // zurueck.
+  const accountId = reset();
+  const listId    = insertShoppingList();
+  enableList(accountId, 'tasks', listId);
+  const item   = insertLocalItem(listId);
+  const client = fakeClient({ objects: [] });
+
+  await sync({ createClient: async () => client });
+
+  assert.strictEqual(client.calls.created.length, 0);
+  assert.strictEqual(reloadItem(item.id).external_source, 'local');
 });

@@ -10,7 +10,12 @@
  * stillen Rückfall auf die PNGs bedeutete (die WebP zeigten dann noch den alten
  * Stand, denn onerror greift nur bei FEHLENDEN Dateien, nicht bei veralteten).
  *
- * Usage: node scripts/build-screenshot-webp.mjs
+ * Usage: node scripts/build-screenshot-webp.mjs [muster ...]
+ *
+ * Ohne Argument wird alles gebaut. Ein Argument beschränkt den Lauf auf
+ * Dateinamen, die es enthalten (`… dashboard-light-mobile`) - gedacht für den
+ * Fall, dass sich eine einzelne Aufnahme oder ihr Profil geändert hat und ein
+ * Vollauf sonst hundertfünfzig unveränderte Dateien anfasst.
  *
  * Welche Bilder Derivate bekommen, steht nicht hier, sondern in den HTML-Dateien
  * unter docs/: gebaut wird, was `data-light`/`data-dark` referenziert, plus alles,
@@ -31,25 +36,65 @@ const ROOT = resolve(__dirname, '..');
 const DOCS = resolve(ROOT, 'docs');
 const SHOTS = resolve(DOCS, 'screenshots');
 
-// Anzeigebreiten der beiden Geräteprofile auf der Seite. 2x ist die
-// Retina-Variante, 1x exakt die Hälfte - dieselben Größen, die der bisherige
-// Bestand hat, damit ein Lauf die Seite nicht unbemerkt neu layoutet.
+// Anzeigebreiten der Geräteprofile auf der Seite. 2x ist die Retina-Variante,
+// 1x exakt die Hälfte.
+//
+// `mobile-lead` kam mit der Critique vom 2026-08-20 dazu, und der Grund ist ein
+// Konstruktionsfehler: EINE Telefonaufnahme bediente zwei völlig verschiedene
+// Slots. In den Modulkarten landet sie bei 176px, im Hero und in der Galerie
+// bei 340px. Auf 480px ausgelegt deckte sie damit den kleinen Slot dreifach und
+// den großen gar nicht - gemessen lieferte der mobile Hero bei DPR3 nur 0,47
+// der nötigen Pixel und war schon bei DPR1 auf das 1,42-fache hochskaliert.
+// Das Ausgangs-PNG hat 1320px, die Schärfe war also die ganze Zeit da; es fehlte
+// die Stufe, die sie abholt.
+//
+// Welche Aufnahme im großen Slot steht, entscheidet nicht dieses Skript, sondern
+// das Markup: `data-shot-profile="lead"` am <img>. Eine Liste hier wäre die
+// zweite Quelle, vor der schon der Kopf dieser Datei warnt.
 const WIDTHS = {
-  web:    { '2x': 1400, '1x': 700 },
-  mobile: { '2x': 480,  '1x': 240 },
+  web:           { '2x': 1400, '1x': 700 },
+  'mobile-lead': { '2x': 1020, '1x': 510 },  // 340px Slot x DPR3
+  mobile:        { '2x': 480,  '1x': 240 },  // 176px Slot, mit Reserve
 };
 const QUALITY = 0.82;
 
-/** Alle von den Doc-Seiten referenzierten Screenshot-Dateinamen. */
+/**
+ * Alle von den Doc-Seiten referenzierten Screenshot-Dateinamen, je mit dem
+ * Profil, in dem sie angezeigt werden.
+ *
+ * Gelesen wird je `<img>`-Tag statt über die ganze Datei, weil
+ * `data-shot-profile` dem Bild gehört, an dem es steht - ein Treffer quer über
+ * zwei Tags hinweg ordnete das Profil dem falschen Bild zu.
+ *
+ * `data-light-m`/`data-dark-m` standen bis zum 2026-08-20 NICHT in diesem
+ * Ausdruck: die Telefonvarianten des Heroes fielen durch und überlebten nur,
+ * weil `shotsWithExistingWebp()` sie am alten Bestand wieder einsammelte. Eine
+ * NEU hinzugefügte Telefonvariante hätte nie Ableitungen bekommen - während
+ * `test-docs-landing.js` sie längst einfordert, denn dessen Guard (4) las die
+ * beiden Attribute von Anfang an. Zwei Ausdrücke für dieselbe Frage, einer
+ * davon lückenhaft.
+ */
+const SHOT_ATTR = /(?:src|data-light|data-dark|data-light-m|data-dark-m)="screenshots\/([^"]+\.png)"/g;
+const IS_MOBILE = /-mobile(?=[.@]|$)/;
+
 function referencedShots() {
-  const names = new Set();
+  const shots = new Map();
   for (const file of readdirSync(DOCS).filter((f) => f.endsWith('.html'))) {
     const html = readFileSync(resolve(DOCS, file), 'utf8');
-    for (const m of html.matchAll(/data-(?:light|dark)="screenshots\/([^"]+\.png)"/g)) {
-      names.add(m[1]);
+    for (const tag of html.matchAll(/<img\b[^>]*>/g)) {
+      const lead = /data-shot-profile="lead"/.test(tag[0]);
+      for (const m of tag[0].matchAll(SHOT_ATTR)) {
+        const name = m[1];
+        const profile = !IS_MOBILE.test(name.replace(/\.png$/, '')) ? 'web'
+          : lead ? 'mobile-lead' : 'mobile';
+        // Steht dieselbe Datei in zwei Slots, gewinnt der GRÖSSERE: zu scharf
+        // kostet Bytes, zu unscharf ist nicht reparierbar.
+        const seen = shots.get(name);
+        if (!seen || WIDTHS[profile]['2x'] > WIDTHS[seen]['2x']) shots.set(name, profile);
+      }
     }
   }
-  return names;
+  return shots;
 }
 
 /** Dateien, die bereits ein WebP haben - sie bleiben aktuell, auch wenn die
@@ -104,35 +149,49 @@ async function main() {
   const page = await browser.newPage();
   await page.setContent('<!doctype html><meta charset="utf-8"><title>webp</title>');
 
+  const filters = process.argv.slice(2);
+  const wantedByFilter = (name) => !filters.length || filters.some((f) => name.includes(f));
+  if (filters.length) console.log(`Filter: ${filters.join(', ')}`);
+
   let written = 0;
   let skipped = 0;
+  let filtered = 0;
 
   try {
     for (const dir of localeDirs()) {
       const label = dir === SHOTS ? 'en' : dir.slice(SHOTS.length + 1);
-      const wanted = new Set([...referencedShots(), ...shotsWithExistingWebp(dir)]);
+      // Referenzierte Aufnahmen bringen ihr Profil aus dem Markup mit;
+      // Altbestand ohne Referenz bekommt es aus dem Namen - er stand vor dieser
+      // Aenderung ohnehin im kleinen Profil.
+      const wanted = new Map(referencedShots());
+      for (const name of shotsWithExistingWebp(dir)) {
+        if (!wanted.has(name)) {
+          wanted.set(name, IS_MOBILE.test(name.replace(/\.png$/, '')) ? 'mobile' : 'web');
+        }
+      }
       console.log(`\n── ${label} (${wanted.size} shots) ──`);
 
-      for (const name of [...wanted].sort()) {
+      for (const [name, profile] of [...wanted].sort((a, b) => a[0].localeCompare(b[0]))) {
+        if (!wantedByFilter(name)) { filtered++; continue; }
         const png = resolve(dir, name);
         if (!existsSync(png)) {
           console.log(`  – ${name} (no PNG in this locale)`);
           skipped++;
           continue;
         }
-        const profile = name.includes('-mobile') ? 'mobile' : 'web';
         const stem = name.replace(/\.png$/, '');
         await convert(page, png, resolve(dir, `${stem}.webp`), WIDTHS[profile]['2x']);
         await convert(page, png, resolve(dir, `${stem}@1x.webp`), WIDTHS[profile]['1x']);
         written += 2;
-        console.log(`  ✓ ${stem}.webp + @1x.webp`);
+        console.log(`  ✓ ${stem}.webp + @1x.webp  (${profile}: ${WIDTHS[profile]['2x']}/${WIDTHS[profile]['1x']}px)`);
       }
     }
   } finally {
     await browser.close();
   }
 
-  console.log(`\nDone. ${written} WebP files written, ${skipped} shot(s) skipped.`);
+  console.log(`\nDone. ${written} WebP files written, ${skipped} shot(s) skipped`
+    + (filtered ? `, ${filtered} filtered out.` : '.'));
 }
 
 main().catch((err) => {

@@ -10,7 +10,9 @@
     "toggleVisibility": "Érték megjelenítése vagy elrejtése",
     "copy": "Másolás",
     "copied": "Másolva ✓",
-    "language": "Nyelv"
+    "language": "Nyelv",
+    "copyRedirect": "Átirányítási URI másolása",
+    "opt": "(opcionális)"
   },
   "config": {
     "title": "Alapbeállítások",
@@ -22,7 +24,12 @@
     "tzLabel": "Időzóna",
     "errHost": "Érvénytelen hosztnév. Csak betűk, számok, kötőjelek és pontok használhatók.",
     "errPort": "Érvénytelen port. 1 és 65535 közötti számnak kell lennie.",
-    "prereqMissing": "Hiányzó előfeltételek: {{list}}. Kérjük, telepítse őket, majd töltse újra az oldalt."
+    "prereqMissing": "Hiányzó előfeltételek: {{list}}. A {{link}} megmutatja, hogyan telepítheted őket.",
+    "prereqLinkDocker": "Docker útmutató",
+    "prereqLinkCompose": "podman-compose útmutató",
+    "prereqRecheck": "Ellenőrzés újra",
+    "errSecureOverHttp": "A nyilvános cím http://-tel kezdődik, ez a választás viszont biztonságos sütiket követel meg - így senki sem tud bejelentkezni. Válaszd a „Közvetlen hozzáférés\" lehetőséget, vagy használj https:// címet.",
+    "errTz": "Érvénytelen időzóna. IANA-név szükséges, például Europe/Berlin."
   },
   "secrets": {
     "title": "Biztonsági kulcsok",
@@ -32,7 +39,7 @@
     "dbLabel": "Adatbázis titkosító kulcs",
     "dbHint": "Titkosítja az SQLite adatbázist nyugalmi állapotban.",
     "errBoth": "Mindkét kulcs megadása kötelező.",
-    "dangerWarn": "Mentsd el most ezeket a kulcsokat. Ha elveszíted őket, a titkosított adataid helyreállíthatatlanok — nincs visszaállítás.",
+    "dangerWarn": "Mentsd el most ezeket a kulcsokat. Ha elveszíted őket, a titkosított adataid helyreállíthatatlanok — nincs visszaállítás. A beállítás végén letöltheted a .env fájlt mindkét kulccsal.",
     "preserved": "A meglévő kulcsaid megmaradnak, így ez a beállítás nem zár ki a jelenlegi adatbázisból. Hagyj egy mezőt üresen a kulcs megtartásához; új érték megadása lecseréli.",
     "keepPlaceholder": "Meglévő kulcs megtartva"
   },
@@ -53,7 +60,7 @@
   },
   "calendar": {
     "title": "Naptár szinkronizálás",
-    "subtitle": "Csatlakoztassa a Yuvomi-t a Google Naptárhoz vagy az Apple iCloudhoz. Mindkettő opcionális — bővítse a konfigurációhoz.",
+    "subtitle": "Csatlakoztassa a Yuvomi-t a Google Naptárhoz, az Apple iCloudhoz vagy az Outlookhoz. Mindegyik opcionális - bővítse a konfigurációhoz.",
     "google": "Google Naptár",
     "googleHint": "Hozzon létre OAuth hitelesítő adatokat itt: {{link}}. Átirányítási URI: {{redirect}}",
     "googleLink": "console.cloud.google.com",
@@ -66,8 +73,13 @@
     "appleUserLabel": "Apple ID (email)",
     "applePassLabel": "Alkalmazás-specifikus jelszó",
     "appleUrlLabel": "CalDAV URL",
-    "appleUrlOpt": "(opcionális)",
-    "appleUrlHint": "Hagyja üresen, hacsak a szolgáltatója nem használ más CalDAV végpontot."
+    "appleUrlHint": "Hagyja üresen, hacsak a szolgáltatója nem használ más CalDAV végpontot.",
+    "outlook": "Outlook naptár (Microsoft Graph)",
+    "outlookHint": "Hozzon létre ingyenes Entra ID alkalmazásregisztrációt („csak személyes Microsoft-fiókok\") itt: {{link}} - lásd a telepítési útmutatót. Átirányítási URI: {{redirect}}",
+    "outlookLink": "entra.microsoft.com",
+    "outlookIdLabel": "Ügyfél azonosító",
+    "outlookSecretLabel": "Ügyfél titkos kulcs",
+    "outlookNote": "Egyirányú push: a Yuvomi marad a mérvadó - az Outlookban tett módosítások felülíródnak. A családi fiókok később, az alkalmazás beállításaiban csatlakoztathatók."
   },
   "review": {
     "title": "Áttekintés",
@@ -96,7 +108,20 @@
     "webdavBackup": "Külső mentések",
     "on": "bekapcsolva",
     "off": "kikapcsolva",
-    "documentGoogleDrive": "Google Drive-dokumentumok"
+    "documentGoogleDrive": "Google Drive-dokumentumok",
+    "sessionSecret": "Munkamenetkulcs",
+    "dbKey": "Adatbáziskulcs",
+    "keyGenerated": "Újonnan létrehozva",
+    "keyPreserved": "A meglévő kulcs megmarad",
+    "dataDir": "Adatmappa",
+    "privateNetwork": "Hozzáférés a helyi hálózathoz",
+    "privateNetworkIcs": "Naptár-feliratkozások",
+    "privateNetworkRecipes": "Receptek",
+    "privateNetworkWaste": "Hulladékgyűjtés",
+    "privateNetworkWebdav": "WebDAV-dokumentumok",
+    "baseUrl": "Nyilvános cím",
+    "outlook": "Outlook naptár",
+    "notEnabled": "nincs engedélyezve"
   },
   "docker": {
     "title": "Yuvomi indítása",
@@ -114,7 +139,8 @@
     "stalled": "A szokásosnál tovább tart. Az alábbi napló megmutatja, miért.",
     "showLogs": "Napló megjelenítése",
     "hideLogs": "Napló elrejtése",
-    "timedOut": "15 perc után sem érkezett válasz. Nézd meg a naplót, és próbáld újra."
+    "timedOut": "15 perc után sem érkezett válasz. Nézd meg a naplót, és próbáld újra.",
+    "logLabel": "Konténernapló"
   },
   "admin": {
     "title": "Adminisztrátor fiók létrehozása",
@@ -139,16 +165,26 @@
     "open": "Yuvomi megnyitása →",
     "backupReminder": "Ne feledd most menteni a .env fájlt — ez tartalmazza a kulcsaidat.",
     "download": ".env fájl letöltése",
-    "savedTo": "Elmentve ide: {{path}}"
+    "savedTo": "Elmentve ide: {{path}}",
+    "downloadFailed": "A fájlt nem sikerült betölteni - a telepítő valószínűleg már leállt. A kulcsaid a szervereden lévő .env fájlban vannak.",
+    "serverStops": "A telepítő néhány percen belül leáll. Töltsd le a fájlt, mielőtt bezárod ezt a lapot.",
+    "nextTitle": "Következő lépések",
+    "nextInvite": "Hívd meg a családod",
+    "nextInviteDesc": "Hozz létre meghívó linkeket, hogy mindenki saját jelszót válasszon.",
+    "nextModules": "Válaszd ki a modulokat",
+    "nextModulesDesc": "Kapcsold be, amit a háztartásod tényleg használ, a többit rejtsd el.",
+    "nextInstall": "Telepítsd a telefonokra",
+    "nextInstallDesc": "Nyisd meg a Yuvomit telefonon, és tedd a kezdőképernyőre - offline is működik.",
+    "subtitleExisting": "A Yuvomi fut. Ennek a telepítésnek már van rendszergazdai fiókja - jelentkezz be a meglévő adataiddal."
   },
   "advanced": {
     "tag": "Speciális · opcionális",
     "title": "Speciális beállítások",
-    "subtitle": "Reverse proxy, egyetlen bejelentkezés és automatikus biztonsági mentések. Mind opcionális — kihagyása biztonságos.",
+    "subtitle": "Egyszeri bejelentkezés, hozzáférés az otthoni hálózathoz és néhány finombeállítás. Minden opcionális.",
     "proxyLabel": "Hogyan van kitéve a Yuvomi?",
     "proxyBehindHttps": "Reverse proxy mögött HTTPS-sel (Caddy, nginx, Traefik)",
     "proxyDirect": "Közvetlen hozzáférés localhost / HTTP-n keresztül",
-    "proxyHint": "A közvetlen hozzáférés letiltja a csak biztonságos sütiket, így a bejelentkezés HTTPS nélkül is működik.",
+    "proxyHint": "Válaszd a „Közvetlen hozzáférés\" lehetőséget, ha http://-en nyitod meg a Yuvomit - különben nem tudsz bejelentkezni. HTTPS-es fordított proxy mögött az első lehetőséget válaszd.",
     "oidc": "Egyszeri bejelentkezés (OIDC)",
     "oidcHint": "Töltse ki mind a négy mezőt az SSO engedélyezéséhez, vagy hagyja üresen.",
     "oidcIssuerLabel": "Kibocsátó URL",
@@ -173,8 +209,7 @@
     "documentLocalEnable": "Új dokumentumok mentése helyi mappába",
     "documentLocalPathLabel": "Mappa elérési útja",
     "documentLocalPathHint": "Elérési út a konténerben. Hagyja üresen a /documents használatához.",
-    "sectionNetwork": "Hálózat",
-    "sectionIntegrations": "Integrációk és biztonsági mentések",
+    "sectionIntegrations": "Egyszeri bejelentkezés",
     "errSchedule": "Érvénytelen cron-ütemezés (öt, szóközzel elválasztott mező szükséges, pl. 0 2 * * *).",
     "errKeep": "A megőrzendő mentések számának pozitív számnak kell lennie.",
     "webdavBackup": "Külső biztonsági mentések (WebDAV)",
@@ -206,8 +241,23 @@
     "documentWebdavPrivateNetworkHint": "Saját hálózaton lévő Nextcloudhoz szükséges. Feloldja az SSRF védelmet ehhez a célhoz.",
     "icsPrivateNetwork": "Naptár-feliratkozások engedélyezése a helyi hálózatról",
     "icsPrivateNetworkHint": "Saját hálózaton lévő eszközök ICS hírcsatornáihoz szükséges. Feloldja az SSRF védelmet a naptár-feliratkozásokhoz.",
+    "recipeProviderPrivateNetwork": "Recept-provider tükrök engedélyezése a helyi hálózaton",
+    "recipeProviderPrivateNetworkHint": "Saját hálózaton lévő Mealie vagy Tandoor példányhoz szükséges. Feloldja az SSRF védelmet a recept-provider tükrökhez.",
+    "wasteSourcePrivateNetwork": "Hulladékgyűjtési feedek engedélyezése a helyi hálózaton",
+    "wasteSourcePrivateNetworkHint": "Saját hálózaton tükrözött önkormányzati hulladékgyűjtési naptárhoz szükséges. Feloldja az SSRF védelmet a hulladékgyűjtési URL-forrásokhoz.",
     "oidcTrustEmail": "E-mail megbízhatónak tekintése verified claim nélkül",
-    "oidcTrustEmailHint": "Csak akkor kapcsold be, ha a szolgáltatód nem küld email_verified értéket, és megbízol benne."
+    "oidcTrustEmailHint": "Csak akkor kapcsold be, ha a szolgáltatód nem küld email_verified értéket, és megbízol benne.",
+    "oidcAllowSignup": "Az SSO bejelentkezések létrehozhatnak új fiókokat",
+    "oidcAllowSignupHint": "Kapcsolja ki, ha a szolgáltató több embert szolgál ki, mint ez a háztartás. A meglévő fiókok továbbra is bejelentkeznek és összekapcsolódnak.",
+    "baseUrlLabel": "Nyilvános cím",
+    "baseUrlHint": "Az a cím, amelyen a családod megnyitja a Yuvomit - nem a konténer gazdagépe és portja. Jelszó-visszaállítási és meghívó linkekhez használatos.",
+    "syncIntervalLabel": "Naptár-szinkronizálás gyakorisága (perc)",
+    "syncIntervalHint": "Milyen gyakran szinkronizálja a Yuvomi a naptárakat és névjegyeket. Növeld, ha a szolgáltatód korlátozza.",
+    "errSyncInterval": "Adj meg egy pozitív egész számot percben.",
+    "sectionPrivateNetwork": "Hozzáférés az otthoni hálózatodhoz",
+    "privateNetworkHint": "A Yuvomi alapértelmezés szerint elutasítja a saját hálózatod címeire irányuló kapcsolatokat, ami megvédi attól, hogy a kiszolgálót belső szolgáltatások elérésére vegyék rá. Engedélyezd, amit valóban futtatsz otthon.",
+    "authPasswordLogin": "A felhasználónévvel és jelszóval való belépés megtartása",
+    "authPasswordLoginHint": "Kikapcsolásával az SSO lesz az egyetlen út befelé: a bejelentkezési űrlap és a jelszó-visszaállítás eltűnik. Ha a szolgáltató elérhetetlenné válik, a visszaút a .env fájl szerkesztése és egy újraindítás."
   },
   "welcome": {
     "title": "Üdvözöl a Yuvomi",
@@ -218,7 +268,9 @@
     "simpleTime": "Körülbelül 2 perc",
     "advancedTitle": "Speciális telepítés",
     "advancedDesc": "Teljes irányítás: reverse proxy, naptárszinkron, e-mail, egyszeri bejelentkezés és biztonsági mentések.",
-    "advancedTime": "Minden lehetőség, lépésről lépésre"
+    "advancedTime": "Minden lehetőség, lépésről lépésre",
+    "existingLocked": "Meglévő telepítést találtunk. Használd a haladó beállítást, hogy a jelenlegi beállításaid megmaradjanak.",
+    "containerRunning": "A Yuvomi éppen fut. A mentés újraindítja a konténert, így az rövid ideig nem lesz elérhető."
   },
   "simple": {
     "title": "Minden kész",
@@ -250,5 +302,11 @@
     "fromHint": "A „Feladó\" cím, amelyet a címzettek látnak. Sok szolgáltató megköveteli, hogy egyezzen a felhasználónévvel.",
     "fromNameLabel": "Feladó neve",
     "errIncomplete": "Az SMTP-kiszolgáló és a feladó címe kötelező."
+  },
+  "storage": {
+    "title": "Tárolás és mentések",
+    "subtitle": "Hol élnek az adataid a kiszolgálón, és hová kerülnek a másolataik. Minden opcionális - az alapértelmezések működnek.",
+    "sectionBackups": "Biztonsági mentések",
+    "sectionDocuments": "Dokumentumtárolás"
   }
 }

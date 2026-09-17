@@ -9,6 +9,7 @@ import express from 'express';
 import * as db from '../db.js';
 import { str, oneOf, date, num, collectErrors, MAX_TITLE, MAX_TEXT, MAX_SHORT, DATE_RE } from '../middleware/validate.js';
 import { addDays, mealWeekday, datesForTemplateInRange } from '../services/meal-recurrence.js';
+import { todayKey } from '../utils/timezone.js';
 
 const log = createLogger('Meals');
 
@@ -201,7 +202,7 @@ router.get('/', (req, res) => {
   try {
     const refDate = req.query.week && DATE_RE.test(req.query.week)
       ? req.query.week
-      : new Date().toISOString().slice(0, 10);
+      : todayKey(db.get());
 
     const from = weekStart(refDate);
     const to   = weekEnd(refDate);
@@ -213,10 +214,19 @@ router.get('/', (req, res) => {
     // nachfragen. NULL heißt unbegrenzt.
     const meals = db.get().prepare(`
       SELECT m.*, u.display_name AS creator_name, u.avatar_color AS creator_color,
-             mrt.end_date AS recurrence_end_date
+             mrt.end_date AS recurrence_end_date,
+             -- Hat das verknuepfte Rezept ein Bild (#1059)? Der Planer stellt
+             -- damit den Platzhalter ODER das Vorschaubild, ohne je Karte
+             -- nachzufragen - und ohne einen Request, der fuer ein bildloses
+             -- Rezept ohnehin nur ein 404 waere. Zwei Quellen, zwei Flags: das
+             -- eigene Bild (Schritt 2) und das des Providers (Schritt 1). Die
+             -- Bilddaten selbst gehen NIE mit, die holt der Browser je Route.
+             r.provider_has_image AS recipe_has_image,
+             (r.image_data IS NOT NULL) AS recipe_has_own_image
       FROM meals m
       LEFT JOIN users u ON u.id = m.created_by
       LEFT JOIN meal_recurrence_templates mrt ON mrt.id = m.recurrence_template_id
+      LEFT JOIN recipes r ON r.id = m.recipe_id
       WHERE m.date BETWEEN ? AND ?
       ORDER BY m.date ASC,
         CASE m.meal_type

@@ -137,6 +137,12 @@ const WIPE = [
   // Sie zu leeren ließ den Haushalt ohne einen einzigen Lagerort zurück -
   // niemand legt sie danach wieder an.
   'pantry_items',
+  // inventory_item_documents haengt per CASCADE an inventory_items, steht aber
+  // bewusst zuerst: foreign_keys ist hier aus, CASCADE greift also nicht.
+  // inventory_categories fehlt aus demselben Grund wie pantry_locations und
+  // shopping_categories - es ist Referenzdatum aus Migration 145, nicht Demo-Inhalt.
+  // inventory_locations dagegen legt keine Migration an, die kommen aus diesem Seed.
+  'inventory_item_documents', 'inventory_items', 'inventory_locations',
   'reminders',
   'event_assignments', 'task_assignments', 'task_tags', 'task_documents', 'calendar_events', 'tasks',
   'birthdays',
@@ -173,6 +179,13 @@ const cfgSet = db.prepare(`
   ON CONFLICT(key) DO UPDATE SET value = excluded.value
 `);
 cfgSet.run('currency', 'EUR');
+// Migration 145 schaltet `inventory` ab, weil es sonst in der Navigation JEDES
+// Haushalts staende (Diskussion #696). Fuer die Demo gilt das Gegenteil: die
+// Landingpage wirbt mit achtzehn Modulen, und ein Modul ohne einen einzigen
+// Screenshot ist eines, das der Leser nirgends sehen kann. Der Seed schaltet
+// deshalb alles ein - explizit als leere Liste, nicht durch Loeschen des
+// Schluessels, damit der Grund am Wert selbst ablesbar bleibt.
+cfgSet.run('disabled_modules', '[]');
 cfgSet.run('date_format', 'dmy_dot');
 cfgSet.run('time_format', '24h');
 cfgSet.run('app_name', 'Yuvomi');
@@ -184,18 +197,46 @@ cfgSet.run('weather_lon', '7.4653');
 cfgSet.run('weather_city', 'Dortmund');
 cfgSet.run('weather_units', 'metric');
 
-// Dashboard-Kacheln: kuratiert statt Vorgabe. Die Standardaufteilung ließ das
-// Budget-Widget als 1x2 stehen, obwohl sein Inhalt nur die halbe Höhe füllt
-// (209 px Loch), schob das Wetter als letztes Widget in eine eigene Zeile und
-// ließ links daneben eine leere Fläche. Gemessen, nicht geraten: die Web-Ansicht
-// hat vier Spalten, die beiden Zeilen unten gehen exakt auf (2+1+1 / 1+1+2).
-// Auf schmalen Geräten fällt das Raster einspaltig - dort zählt allein die
-// Reihenfolge, und das Wetter steht als erstes oben.
+// Dashboard-Kacheln: kuratiert statt Vorgabe, aber entlang der Autor-Defaults
+// des Seele-Pakets. Das Wetter wohnt seit dem Umbau als Zeile im Masthead -
+// die Karte ist Wandtablet-Opt-in und bleibt hier ausgeblendet, sonst zeigte
+// jede Demo und jeder Screenshot den Legacy-Pfad OHNE Masthead-Zeile (kein
+// Echo: sichtbare Karte schaltet die Zeile stumm). family ist die „Heute
+// dran"-Karte und stapelt Mitglieder-Zeilen -> 1x2 wie im Autor-Default.
+//
+// DIE FUENF KACHELN MUESSEN AUFGEHEN, und sie taten es nicht: budget stand hier
+// auf 1x1, waehrend der Autor-Default es (wie jede stapelnde Karte) auf 1x2
+// fuehrt. Damit belegten die fuenf zusammen sieben Rasterzellen - bei den vier
+// Spalten, die der Desktop-Screenshot (1376px) aufmacht, eine volle Zeile plus
+// drei Viertel, und rechts unten blieb genau eine Zelle leer, die `dense` nicht
+// mehr schliessen konnte, weil kein Widget mehr uebrig war. Mit budget auf 1x2
+// sind es acht Zellen: zwei volle Zeilen, kein Loch. Gemessen am gerenderten
+// Raster, nicht am Reissbrett - die Kachelbreiten stehen im CSS, die
+// Spaltenzahl aber erst im Fenster.
 const dashboardWidgets = [
+  { id: 'family',    visible: true,  size: '1x2' },
+  { id: 'budget',    visible: true,  size: '1x2' },
+  // 1x2 wie der Autor-Default (defaultWidgetSize in public/pages/dashboard.js).
+  // Auf 1x1 war die Geburtstagskachel die KURZE Karte einer Rasterzeile - und
+  // damit bestimmte SIE die Zeilenhoehe, waehrend Familie und Budget daneben
+  // ueber zwei Zeilen spannten und je ~200px leer auslaufen mussten. Gemessen
+  // bei 1440px: 535px Kachelhoehe fuer 377px Inhalt. Mit drei gleich hohen
+  // 1x2-Karten deckt die Zeile sich mit ihrem Inhalt.
+  { id: 'birthdays', visible: true,  size: '1x2' },
+  // Das Wetter ist per Autor-Default AUS, weil es als Masthead-Zeile unter dem
+  // Gruss schon spricht (Seele-Paket, „kein Echo": ist die Karte da, entfaellt
+  // die Zeile). Die Demo zeigt trotzdem die Karte - sie ist der Wandtablet-Fall
+  // und traegt Ort und Vorhersage, die die Zeile nicht hat.
+  //
+  // SIE STEHT VOR DEN BEIDEN FLACHEN KARTEN, und das ist eine Anforderung an den
+  // SCREENSHOT, nicht ans Layout: der Bildausschnitt ist 1032 logische Pixel
+  // hoch, und als letztes Widget lag die Karte darunter - im Bild also gar
+  // nicht. Hier faellt sie in die dritte Rasterzeile und damit ins Bild.
+  //
+  // 2x1, weil breiter nicht geht: `normalizeDashboardConfig` bildet jede Groesse
+  // auf eines der vier kuratierten Presets ab (1x1, 1x2, 2x1, 2x2), ein `3x1`
+  // im Seed kaeme als `2x1` an.
   { id: 'weather',   visible: true,  size: '2x1' },
-  { id: 'family',    visible: true,  size: '1x1' },
-  { id: 'budget',    visible: true,  size: '1x1' },
-  { id: 'birthdays', visible: true,  size: '1x1' },
   { id: 'rewards',   visible: true,  size: '1x1' },
   { id: 'notes',     visible: true,  size: '2x1' },
   // Ausgeblendet, aber in der Liste: die Reihenfolge bleibt stabil, wenn ein
@@ -773,15 +814,23 @@ const insertBirthday = db.prepare(`
   INSERT INTO birthdays (name, birth_date, notes, family_user_id, reminder_offset, created_by)
   VALUES (?, ?, ?, ?, ?, ?)
 `);
+// reminder_offset ist ein Minutenwert als Text, wie ihn das Formular schreibt
+// (REMINDER_OFFSETS in public/pages/birthdays.js - nur deren Werte, sonst zeigt das Formular
+// eine Auswahl, die es nicht kennt; der Server liest ihn per
+// parseInt). Hier stand '1d'/'3d'/'1w' - daraus wurden 1, 3 und wieder 1 Minute (parseInt liest nur die Ziffer), und
+// jeder Demo-Geburtstag erinnerte kurz vor Mittag AM Tag selbst statt Tage vorher.
+const DAY_BEFORE  = '1440';
+const TWO_DAYS    = '2880';
+const WEEK_BEFORE = '10080';
 [
-  ['Emma Johnson',                                    '2018-06-14', L('Turning 8 — chocolate cake & bouncy castle', 'Wird 8 — Schokotorte und Hüpfburg'), emmaId, '1w', lindaId],
-  ['Leo Johnson',                                     '2016-03-22', L('Loves football & LEGO',                      'Liebt Fußball und LEGO'),            leoId,  '1w', lindaId],
-  ['Margaret Johnson',                                '1958-06-19', L("Alex's mum — 'Grandma'",                     'Alex’ Mutter — „Oma"'),              null,   '3d', alexId],
-  [L('Uncle Mike Johnson', 'Onkel Mike Johnson'),     '1985-11-02', L("Alex's brother in Hamburg",                  'Alex’ Bruder in Hamburg'),           null,   '1d', alexId],
-  [L('Aunt Claire Becker', 'Tante Claire Becker'),    '1989-08-30', L("Linda's sister",                             'Lindas Schwester'),                  null,   '1d', lindaId],
-  ['Lena Braun',                                      '2018-09-12', L("Emma's best friend",                         'Emmas beste Freundin'),              null,   '1d', lindaId],
-  ['Alex Johnson',                                    '1986-02-08', '',                                                                                   alexId, '3d', lindaId],
-  ['Linda Johnson',                                   '1988-04-25', '',                                                                                   lindaId,'3d', alexId],
+  ['Emma Johnson',                                    '2018-06-14', L('Turning 8 — chocolate cake & bouncy castle', 'Wird 8 — Schokotorte und Hüpfburg'), emmaId, WEEK_BEFORE, lindaId],
+  ['Leo Johnson',                                     '2016-03-22', L('Loves football & LEGO',                      'Liebt Fußball und LEGO'),            leoId,  WEEK_BEFORE, lindaId],
+  ['Margaret Johnson',                                '1958-06-19', L("Alex's mum — 'Grandma'",                     'Alex’ Mutter — „Oma"'),              null,   TWO_DAYS,    alexId],
+  [L('Uncle Mike Johnson', 'Onkel Mike Johnson'),     '1985-11-02', L("Alex's brother in Hamburg",                  'Alex’ Bruder in Hamburg'),           null,   DAY_BEFORE,  alexId],
+  [L('Aunt Claire Becker', 'Tante Claire Becker'),    '1989-08-30', L("Linda's sister",                             'Lindas Schwester'),                  null,   DAY_BEFORE,  lindaId],
+  ['Lena Braun',                                      '2018-09-12', L("Emma's best friend",                         'Emmas beste Freundin'),              null,   DAY_BEFORE,  lindaId],
+  ['Alex Johnson',                                    '1986-02-08', '',                                                                                   alexId, TWO_DAYS,    lindaId],
+  ['Linda Johnson',                                   '1988-04-25', '',                                                                                   lindaId,TWO_DAYS,    alexId],
 ].forEach(row => insertBirthday.run(...row));
 
 // ── Documents ────────────────────────────────────────────────────────────────
@@ -1282,6 +1331,64 @@ const insertSub = db.prepare(`
   [L('Kids magazine', 'Kindermagazin'), L('12-month subscription', '12-Monats-Abo'), 4.90, 'monthly', 16, 5, 6, null, '#F97316', L('Ends after the school year', 'Endet nach dem Schuljahr'), 'on_date', daysFromNow(128)],
 ].forEach(([name, desc, amount, cycle, nextDays, cat, pm, url, color, notes, endType, endDate]) =>
   insertSub.run({ name, desc, amount, cycle, next: daysFromNow(nextDays), cat, pm, url, color, notes, endType, endDate, by: alexId }));
+
+// ── Inventory ────────────────────────────────────────────────────────────────
+
+console.log('Inserting inventory…');
+// Lagerorte legt keine Migration an (anders als die Kategorien), sie kommen
+// also von hier. Flach gehalten: `parent_id` kann verschachteln, aber ein
+// Screenshot, der zwei Ebenen zeigt, erklaert weniger als einer, der acht
+// Gegenstaende zeigt.
+const insertInvLocation = db.prepare(`
+  INSERT INTO inventory_locations (name, icon, sort_order) VALUES (?, ?, ?)
+`);
+const invLocationId = {};
+[
+  ['livingroom', L('Living room', 'Wohnzimmer'), 'sofa',   0],
+  ['office',     L('Office',      'Büro'),        'laptop', 1],
+  ['basement',   L('Basement',    'Keller'),      'archive',2],
+  ['garage',     L('Garage',      'Garage'),      'car',    3],
+].forEach(([key, name, icon, sort]) => {
+  invLocationId[key] = insertInvLocation.run(name, icon, sort).lastInsertRowid;
+});
+
+const insertInvItem = db.prepare(`
+  INSERT INTO inventory_items
+    (name, brand, model, serial_number, category, location_id, purchase_date,
+     purchase_price, currency, vendor, warranty_months, condition, status, notes, created_by)
+  VALUES (@name, @brand, @model, @serial, @cat, @loc, @date, @price, 'EUR', @vendor,
+          @warranty, @cond, 'active', @notes, @by)
+`);
+// Die Mischung ist absichtlich: ein Posten mit laufender Garantie, einer mit
+// abgelaufener, ein teures Fahrzeug und ein billiges Werkzeug. Genau daran
+// haengt der Nutzen des Moduls - Kaufpreis, Garantie und Ort an einem Ort -
+// und genau das muss ein Screenshot in einem Blick zeigen.
+[
+  [L('Television', 'Fernseher'), 'LG', 'OLED55C4', 'LG4C55-882174', 'electronics', 'livingroom',
+   -420, 1299.00, L('Local electronics store', 'Elektromarkt vor Ort'), 24, 'good',
+   L('Wall mount included', 'Wandhalterung dabei')],
+  [L('Laptop', 'Notebook'), 'Apple', 'MacBook Air M3', 'C02XJ1QWLVDL', 'electronics', 'office',
+   -180, 1499.00, 'Apple', 12, 'new', null],
+  [L('Washing machine', 'Waschmaschine'), 'Miele', 'WWD660', '31-4471902', 'household', 'basement',
+   -910, 949.00, 'Miele', 120, 'good',
+   L('Ten-year warranty, receipt in Documents', 'Zehn Jahre Garantie, Beleg in Dokumenten')],
+  [L('Family car', 'Familienauto'), 'Škoda', 'Octavia Combi', 'TMBJJ7NE0J0123456', 'vehicles', 'garage',
+   -1250, 18900.00, L('Dealership', 'Autohaus'), 24, 'good',
+   L('Next inspection in spring', 'Nächste HU im Frühjahr')],
+  [L("Emma's bike", 'Emmas Fahrrad'), 'Cube', 'Acid 240', 'CU240-77120', 'sports', 'garage',
+   -300, 449.00, L('Bike shop', 'Fahrradladen'), 24, 'good', null],
+  [L('Cordless drill', 'Akkuschrauber'), 'Bosch', 'GSR 18V-55', '3601JJ2000', 'household', 'basement',
+   -640, 159.00, 'Bosch', 36, 'fair', null],
+  [L('Espresso machine', 'Espressomaschine'), 'Sage', 'Barista Express', 'SES875-441209', 'household', 'livingroom',
+   -1100, 699.00, L('Coffee specialist', 'Kaffeehändler'), 24, 'good',
+   L('Warranty expired', 'Garantie abgelaufen')],
+  [L('Monitor', 'Monitor'), 'Dell', 'U2723QE', 'CN-0M4H2X', 'electronics', 'office',
+   -95, 549.00, 'Dell', 36, 'new', null],
+].forEach(([name, brand, model, serial, cat, loc, dayOffset, price, vendor, warranty, cond, notes]) =>
+  insertInvItem.run({
+    name, brand, model, serial, cat, loc: invLocationId[loc],
+    date: daysFromNow(dayOffset), price, vendor, warranty, cond, notes, by: alexId,
+  }));
 
 // ── Reminders ────────────────────────────────────────────────────────────────
 

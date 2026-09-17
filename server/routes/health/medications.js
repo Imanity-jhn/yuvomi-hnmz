@@ -8,13 +8,45 @@
 import express from 'express';
 import * as db from '../../db.js';
 import * as v from '../../middleware/validate.js';
+import { defaultVisibilityFor } from './visibility-defaults.js';
 import {
   log, VISIBILITIES, LOG_STATUS, MAX_UNIT,
   viewerId, careAwareClause, toBit, applyUpdate, badRequest,
-  resolveOwner, writableClause,
+  resolveOwner, writableClause, writableChild,
 } from './helpers.js';
 
 const router = express.Router();
+
+// Ein Mindestabstand von mehr als vier Wochen beschreibt keine Bedarfsdosis
+// mehr, sondern einen Zeitplan - und ein negativer oder 0 ergaebe einen
+// Countdown, der immer abgelaufen ist. Die Grenze liegt deshalb hier und nicht
+// erst im Formular (#700).
+const MAX_INTERVAL_HOURS = 24 * 28;
+
+/**
+ * Bedarfsdosis: leer erlaubt, sonst nicht negativ.
+ *
+ * `v.num` nimmt negative Zahlen ausdruecklich an (Budget rechnet damit), und der
+ * Bestandsabzug rechnet `stock_qty - dose`: eine Dosis von -2 wuerde den Bestand
+ * bei jeder Einnahme ERHOEHEN. Das Formularfeld sperrt das ohnehin, ein
+ * API-Token oder MCP-Client nicht.
+ */
+function prnDose(raw) {
+  const r = v.num(raw, 'prn_dose_qty');
+  if (r.error || r.value === null) return r;
+  if (r.value < 0) return { value: null, error: 'prn_dose_qty must not be negative.' };
+  return r;
+}
+
+/** Mindestabstand in Stunden: leer erlaubt, sonst > 0 und hoechstens 28 Tage. */
+function prnInterval(raw) {
+  const r = v.num(raw, 'min_interval_hours');
+  if (r.error || r.value === null) return r;
+  if (r.value <= 0 || r.value > MAX_INTERVAL_HOURS) {
+    return { value: null, error: `min_interval_hours must be greater than 0 and at most ${MAX_INTERVAL_HOURS}.` };
+  }
+  return r;
+}
 
 // Diese beiden Helfer sind der einzige Zugang zu einem Medikament: Plaene und
 // Einnahmeprotokolle haengen daran und erben ihr Scoping von hier. Die Betreuung
@@ -69,8 +101,10 @@ router.post('/medications', (req, res) => {
     const refill     = v.num(b.refill_threshold, 'refill_threshold');
     const note       = v.str(b.note, 'note', { max: v.MAX_TEXT, required: false });
     const visibility = v.oneOf(b.visibility, VISIBILITIES, 'visibility');
+    const interval   = prnInterval(b.min_interval_hours);
+    const prnDoseQty = prnDose(b.prn_dose_qty);
 
-    const errors = v.collectErrors([name, dosageText, form, stockQty, stockUnit, refill, note, visibility]);
+    const errors = v.collectErrors([name, dosageText, form, stockQty, stockUnit, refill, note, visibility, interval, prnDoseQty]);
     if (errors.length) return badRequest(res, errors);
 
     const active = toBit(b.active); // undefined → default 1
@@ -82,11 +116,14 @@ router.post('/medications', (req, res) => {
     if (owner.error) return res.status(owner.status).json({ error: owner.error, code: owner.status });
 
     const result = db.get().prepare(`
-      INSERT INTO medications (user_id, name, dosage_text, form, active, prn, stock_qty, stock_unit, refill_threshold, note, visibility)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO medications (user_id, name, dosage_text, form, active, prn, stock_qty, stock_unit, refill_threshold, note, visibility,
+                               min_interval_hours, prn_dose_qty)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(owner.ownerId, name.value, dosageText.value, form.value,
            active === undefined ? 1 : active, prn === undefined ? 0 : prn,
-           stockQty.value, stockUnit.value, refill.value, note.value, visibility.value || 'private');
+           stockQty.value, stockUnit.value, refill.value, note.value,
+           visibility.value || defaultVisibilityFor(db.get(), owner.ownerId, 'meds'),
+           interval.value, prnDoseQty.value);
 
     const row = db.get().prepare('SELECT * FROM medications WHERE id = ?').get(result.lastInsertRowid);
     res.status(201).json({ data: row });
@@ -120,6 +157,8 @@ router.patch('/medications/:id', (req, res) => {
     if (b.visibility !== undefined)       { const r = v.oneOf(b.visibility, VISIBILITIES, 'visibility');                checks.push(r); if (!r.error && r.value) fields.visibility = r.value; }
     if (b.active !== undefined) { const bit = toBit(b.active); if (bit === undefined) checks.push({ error: 'active must be a boolean.' }); else fields.active = bit; }
     if (b.prn !== undefined)    { const bit = toBit(b.prn);    if (bit === undefined) checks.push({ error: 'prn must be a boolean.' });    else fields.prn = bit; }
+    if (b.min_interval_hours !== undefined) { const r = prnInterval(b.min_interval_hours); checks.push(r); if (!r.error) fields.min_interval_hours = r.value; }
+    if (b.prn_dose_qty !== undefined)       { const r = prnDose(b.prn_dose_qty); checks.push(r); if (!r.error) fields.prn_dose_qty = r.value; }
 
     const errors = v.collectErrors(checks);
     if (errors.length) return badRequest(res, errors);
@@ -219,11 +258,11 @@ router.patch('/schedules/:id', (req, res) => {
     const id = parseInt(req.params.id, 10);
     if (!id) return res.status(400).json({ error: 'Ungültige ID.', code: 400 });
 
-    const existing = db.get().prepare(`
+    const existing = writableChild(`
       SELECT s.* FROM medication_schedules s
       JOIN medications m ON m.id = s.medication_id
-      WHERE s.id = ? AND m.user_id = ?
-    `).get(id, viewer);
+      WHERE s.id = ?
+    `, 'm', id, viewer);
     if (!existing) return res.status(404).json({ error: 'Einnahmeplan nicht gefunden.', code: 404 });
 
     const b = req.body || {};
@@ -262,11 +301,11 @@ router.delete('/schedules/:id', (req, res) => {
     const id = parseInt(req.params.id, 10);
     if (!id) return res.status(400).json({ error: 'Ungültige ID.', code: 400 });
 
-    const existing = db.get().prepare(`
+    const existing = writableChild(`
       SELECT s.id FROM medication_schedules s
       JOIN medications m ON m.id = s.medication_id
-      WHERE s.id = ? AND m.user_id = ?
-    `).get(id, viewer);
+      WHERE s.id = ?
+    `, 'm', id, viewer);
     if (!existing) return res.status(404).json({ error: 'Einnahmeplan nicht gefunden.', code: 404 });
 
     db.get().prepare('DELETE FROM medication_schedules WHERE id = ?').run(id);
@@ -287,11 +326,25 @@ router.get('/medications/:id/logs', (req, res) => {
     if (!medId) return res.status(400).json({ error: 'Ungültige ID.', code: 400 });
     if (!medicationForRead(medId, viewer)) return res.status(404).json({ error: 'Medikament nicht gefunden.', code: 404 });
 
+    // Gefiltert wird ueber denselben Ausdruck, nach dem auch sortiert wird.
+    // Vorher stand hier `scheduled_at`, und weil eine Bedarfsdosis keinen
+    // Zeitplan hat, ist die Spalte bei ihr NULL - jeder Vergleich damit ist
+    // unbekannt, also fiel sie aus JEDEM Zeitraum heraus. Sichtbar war das
+    // bisher kaum, weil sich eine Bedarfsdosis gar nicht buchen liess (#700);
+    // seit sie es tut, waere ihr Eintrag im Protokoll unauffindbar und der
+    // Countdown haette nichts, woraus er rechnet.
+    //
+    // Verglichen wird auf 'YYYY-MM-DDTHH:MM' zugeschnitten, weil in derselben
+    // Spalte zwei Schreibweisen liegen: `scheduled_at` fuehrt Wanduhrzeit ohne
+    // Zone, `created_at` endet auf 'Z' und traegt Sekunden. Ohne den Schnitt
+    // waere '…T23:59:30Z' groesser als die Obergrenze '…T23:59' und die Dosis
+    // der letzten Minute des Tages fiele aus ihrem eigenen Tag heraus.
+    const WHEN = 'COALESCE(scheduled_at, taken_at, created_at)';
     const params = [medId];
-    let sql = 'SELECT * FROM medication_logs WHERE medication_id = ?';
-    if (req.query.from) { sql += ' AND scheduled_at >= ?'; params.push(String(req.query.from)); }
-    if (req.query.to)   { sql += ' AND scheduled_at <= ?'; params.push(String(req.query.to)); }
-    sql += ' ORDER BY COALESCE(scheduled_at, created_at) DESC, id DESC';
+    let sql = `SELECT * FROM medication_logs WHERE medication_id = ?`;
+    if (req.query.from) { sql += ` AND substr(${WHEN}, 1, 16) >= ?`; params.push(String(req.query.from).slice(0, 16)); }
+    if (req.query.to)   { sql += ` AND substr(${WHEN}, 1, 16) <= ?`; params.push(String(req.query.to).slice(0, 16)); }
+    sql += ` ORDER BY ${WHEN} DESC, id DESC`;
 
     res.json({ data: db.get().prepare(sql).all(...params) });
   } catch (err) {
@@ -348,11 +401,7 @@ function updateLogStatus(req, res, newStatus) {
   const id = parseInt(req.params.id, 10);
   if (!id) return res.status(400).json({ error: 'Ungültige ID.', code: 400 });
 
-  const logRow = db.get().prepare(`
-    SELECT l.*, m.user_id AS owner_id FROM medication_logs l
-    JOIN medications m ON m.id = l.medication_id
-    WHERE l.id = ? AND m.user_id = ?
-  `).get(id, viewer);
+  const logRow = ownLogRow(id, viewer);
   if (!logRow) return res.status(404).json({ error: 'Dosis-Eintrag nicht gefunden.', code: 404 });
 
   const b = req.body || {};
@@ -367,6 +416,120 @@ function updateLogStatus(req, res, newStatus) {
 
   res.json({ data: db.get().prepare('SELECT * FROM medication_logs WHERE id = ?').get(id) });
 }
+
+/**
+ * Der Log-Eintrag samt Besitzer, oder null.
+ *
+ * Bewusst über das Schreibrecht am Medikament und nicht über die Sichtbarkeit:
+ * ein Dosis-Eintrag ist eine Aufzeichnung über den eigenen Körper. Wer ein
+ * Medikament sehen darf, darf deshalb noch lange nicht in seinem Protokoll
+ * korrigieren - dieselbe Grenze, die take/skip seit jeher ziehen. Die Betreuung
+ * (#584) liegt innerhalb dieser Grenze: sie ist ausdrücklich erteilt, und ohne
+ * sie könnte ein Elternteil die Dosis, die es selbst eingetragen hat, nicht
+ * abhaken (#884).
+ */
+function ownLogRow(id, viewer) {
+  return writableChild(`
+    SELECT l.*, m.user_id AS owner_id FROM medication_logs l
+    JOIN medications m ON m.id = l.medication_id
+    WHERE l.id = ?
+  `, 'm', id, viewer);
+}
+
+// --------------------------------------------------------
+// PATCH /logs/:id (#701)
+// Body: { status?, taken_at?, dose_qty?, note? }
+//
+// Einen Fehlgriff korrigieren, statt mit ihm zu leben. Vorher gab es nur
+// take/skip, also zwei Einbahnstraßen: die falsche Uhrzeit blieb stehen, und
+// zwar nicht nur in der App - sie steht genauso im Export, den jemand
+// ausdruckt und einer Ärztin hinlegt.
+//
+// `status: 'pending'` ist das Zurücknehmen: der Eintrag steht wieder aus, als
+// wäre nichts angehakt worden.
+// --------------------------------------------------------
+router.patch('/logs/:id', (req, res) => {
+  try {
+    const viewer = viewerId(req);
+    const id = parseInt(req.params.id, 10);
+    if (!id) return res.status(400).json({ error: 'Ungültige ID.', code: 400 });
+
+    const logRow = ownLogRow(id, viewer);
+    if (!logRow) return res.status(404).json({ error: 'Dosis-Eintrag nicht gefunden.', code: 404 });
+
+    const b = req.body || {};
+    const status  = v.oneOf(b.status, LOG_STATUS, 'status');
+    const takenAt = v.datetime(b.taken_at, 'taken_at');
+    const dose    = v.num(b.dose_qty, 'dose_qty');
+    const note    = v.str(b.note, 'note', { max: v.MAX_TEXT, required: false });
+
+    const errors = v.collectErrors([status, takenAt, dose, note]);
+    if (errors.length) return badRequest(res, errors);
+
+    const nextStatus = status.value || logRow.status;
+
+    // Der Zeitpunkt gehört zum Status und wird mit ihm gesetzt, nicht daneben:
+    // ein „nicht genommen" mit Einnahmezeit wäre ein Eintrag, der sich selbst
+    // widerspricht, und genau so einer stünde nachher im Export.
+    let nextTakenAt;
+    if (nextStatus === 'taken') {
+      nextTakenAt = takenAt.value ?? logRow.taken_at ?? new Date().toISOString();
+    } else {
+      nextTakenAt = null;
+    }
+
+    db.get().prepare(`
+      UPDATE medication_logs
+         SET status = ?, taken_at = ?,
+             dose_qty = COALESCE(?, dose_qty),
+             note     = CASE WHEN ? THEN ? ELSE note END
+       WHERE id = ?
+    `).run(
+      nextStatus, nextTakenAt, dose.value ?? null,
+      b.note === undefined ? 0 : 1, note.value ?? null,
+      id,
+    );
+
+    res.json({ data: db.get().prepare('SELECT * FROM medication_logs WHERE id = ?').get(id) });
+  } catch (err) {
+    log.error('Error updating log:', err.message);
+    res.status(500).json({ error: 'Internal error.', code: 500 });
+  }
+});
+
+// --------------------------------------------------------
+// DELETE /logs/:id (#701)
+//
+// Nur für Einträge ohne Zeitplan, also für die von Hand oder als Bedarfsdosis
+// erfassten. Ein geplanter Eintrag lässt sich nicht löschen, und das ist keine
+// Bequemlichkeitsgrenze: der Scheduler legt ihn beim nächsten Lauf wieder an,
+// weil die Dosis ja weiterhin für diesen Zeitpunkt geplant ist. Das Löschen
+// sähe aus wie ein Erfolg und wäre eine Rückkehr auf Raten. Zurücknehmen heißt
+// dort `PATCH { status: 'pending' }`, und darauf verweist die Antwort auch.
+// --------------------------------------------------------
+router.delete('/logs/:id', (req, res) => {
+  try {
+    const viewer = viewerId(req);
+    const id = parseInt(req.params.id, 10);
+    if (!id) return res.status(400).json({ error: 'Ungültige ID.', code: 400 });
+
+    const logRow = ownLogRow(id, viewer);
+    if (!logRow) return res.status(404).json({ error: 'Dosis-Eintrag nicht gefunden.', code: 404 });
+
+    if (logRow.schedule_id) {
+      return res.status(409).json({
+        error: 'Ein geplanter Dosis-Eintrag lässt sich nicht löschen, nur zurücknehmen.',
+        code: 409,
+      });
+    }
+
+    db.get().prepare('DELETE FROM medication_logs WHERE id = ?').run(id);
+    res.json({ data: { id } });
+  } catch (err) {
+    log.error('Error deleting log:', err.message);
+    res.status(500).json({ error: 'Internal error.', code: 500 });
+  }
+});
 
 // POST /logs/:id/take
 router.post('/logs/:id/take', (req, res) => {

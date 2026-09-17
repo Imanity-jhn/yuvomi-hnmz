@@ -14,6 +14,7 @@ import {
   parseLocalDateKey,
   addLocalDays,
   startOfLocalWeekKey,
+  todayKey,
 } from '/utils/date.js';
 
 // --------------------------------------------------------
@@ -208,7 +209,7 @@ function toFiniteOrNull(value) {
  * @returns {{ buckets: Array<{key,date,gran}>, from: string, to: string, gran: string }}
  */
 export function buildVitalBuckets(range, anchorKey, weekStartsOn = 1) {
-  const anchor = anchorKey || toLocalDateKey(new Date());
+  const anchor = anchorKey || todayKey();
 
   if (range === 'year') {
     const year = parseLocalDateKey(anchor).getFullYear();

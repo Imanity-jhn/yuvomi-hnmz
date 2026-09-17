@@ -48,8 +48,12 @@ podman-compose.yml
 # Scripts (dev-only)
 scripts/
 
-# Markdown files (README, CHANGELOG, etc.)
+# Markdown files (README etc.)
 *.md
+# Exception: the changelog view falls back to this file when api.github.com
+# does not answer (#838). Without it in the image, an instance without outbound
+# network shows no history at all.
+!CHANGELOG.md
 
 # Installer tools (not part of the running app)
 tools/

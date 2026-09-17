@@ -317,6 +317,63 @@ test('das Secret-Feld bekommt auf dem Handy die volle Zeile, nicht den Rest', ()
     + 'Ein 64-Zeichen-Schlüssel gehört auf eine eigene Zeile, die Buttons darunter.');
 });
 
+/* Die Pruefseite traegt unzerbrechliche Maschinenwerte (BASE_URL mit DDNS-Host,
+ * Nextcloud-WebDAV-URL) in einem Grid mit fester Schluesselspalte. Gemessen
+ * 2026-08-31: 534px body-scrollWidth bei 375px Viewport - die GANZE Seite
+ * scrollte seitlich, inklusive Sticky-Footer (WCAG 1.4.10), ausgerechnet auf
+ * dem Kontrollschirm vor dem irreversiblen Klick. Die damalige Suite mass nur
+ * die .secret-row; dieselbe Luecke gab es hier ohne Guard.
+ *
+ * Modelliert wird die WIRKUNG, nicht die Regel: wie breit wird die Seite mit
+ * einem 500px-Wert in der Wertspalte? `overflow-wrap: anywhere` senkt dessen
+ * min-content auf ~0 (anders als break-word, das die Messung nicht aendert),
+ * minmax(0, ...) erlaubt der Spur, unter min-content zu schrumpfen. */
+function reviewGridNeed(viewport, unbreakable) {
+  const media = appliesAt(viewport);
+  const columns = declared(sel => sel === '.review-grid', 'grid-template-columns', media) || '160px 1fr';
+  const tracks = columns.match(/minmax\([^)]*\)|\S+/g) || [];
+  const gapParts = (declared(sel => sel === '.review-grid', 'gap', media) || '0').trim().split(/\s+/);
+  const gapX = toPx(gapParts[1] ?? gapParts[0]) ?? 0;
+
+  const trackMin = track => {
+    const m = track.match(/minmax\(\s*([^,]+),/);
+    if (m) return toPx(m[1]) ?? 0;
+    if (/fr$/.test(track)) return null;   // auto-Minimum: der Inhalt bestimmt
+    return toPx(track) ?? 0;
+  };
+  const keyMin = trackMin(tracks[0] ?? '160px') ?? 0;
+
+  const wrap = (declared(sel => sel === '.review-grid > :not(.review-key)', 'overflow-wrap', media) || 'normal').trim();
+  // Nur `anywhere` geht in die min-content-Rechnung ein (CSS Text 3, §5.2).
+  const valueContentMin = wrap === 'anywhere' ? 0 : unbreakable;
+  const valueTrackMin = trackMin(tracks[1] ?? '1fr');
+  // Spur mindestens so breit wie ihr Minimum; Inhalt, der nicht umbricht,
+  // blutet ueber die Spur hinaus und verbreitert die Seite trotzdem.
+  return keyMin + gapX + Math.max(valueTrackMin ?? valueContentMin, valueContentMin);
+}
+
+test('ein unzerbrechlicher Wert verbreitert die Pruefseite nicht (WCAG 1.4.10)', () => {
+  const need = reviewGridNeed(MOBILE_VIEWPORT, 500);
+  const available = cardContentWidth(MOBILE_VIEWPORT);
+  assert.ok(need <= available,
+    `Das Review-Grid braucht mit einem 500px-Wert ${need.toFixed(0)}px von ${available.toFixed(0)}px `
+    + 'verfuegbarer Breite. Wertspalte minmax(0, ...) plus overflow-wrap: anywhere '
+    + 'auf den Wertzellen halten lange URLs in der Karte.');
+});
+
+test('Redirect-URIs in Hints brechen um, statt an der Kartenkante zu clippen', () => {
+  // Die drei Redirect-<code>-Knoten stehen in .hint-Absaetzen innerhalb von
+  // toggle-cards mit overflow: hidden - ohne Umbruch wird der zeichengenau zu
+  // kopierende Wert kommentarlos abgeschnitten (gemessen 472px Inhalt in einer
+  // 343px-Karte). word-break: break-all senkt die min-content-Breite auf ~0.
+  const rule = declared(sel => sel === '.hint code', 'word-break');
+  const breaks = rule === 'break-all'
+    || (declared(sel => sel === '.hint code', 'overflow-wrap') === 'anywhere');
+  assert.ok(breaks,
+    'Redirect-URIs (<code> in .hint) brauchen word-break: break-all oder '
+    + 'overflow-wrap: anywhere - sonst clippt overflow:hidden der Toggle-Card sie mobil.');
+});
+
 test('das Secret-Feld ist mindestens 14px gross (12px war unlesbar)', () => {
   const size = toPx(declared(sel => sel === '.secret-row input', 'font-size'));
   assert.ok(size >= 14, `Secret-Felder stehen auf ${size}px, mindestens 14px sind nötig`);
@@ -344,6 +401,72 @@ test('Bedienelemente erfüllen die Zielgrössen (44px Höhe, 24px Kästchen)', (
     const size = toPx(declared(sel => sel === 'input[type=checkbox]', prop));
     assert.ok(size >= 24, `Checkbox-${prop} ist ${size}px, WCAG 2.2 verlangt 24px`);
   }
+});
+
+/* Der Test darueber fragt drei bekannte Selektoren ab - und war deshalb gruen,
+ * waehrend der Browser 36px am Sprachumschalter und 43px an den sieben
+ * Akkordeon-Koepfen mass (Critique 2026-08-15). Zwei verschiedene Luecken, eine
+ * Ursache: er prueft die REGEL, die er kennt, nicht die WIRKUNG am Element.
+ *
+ *   - `.lang-switch select` (0,1,1) schlaegt das nackte `select` (0,0,1) aus der
+ *     mobilen Haertung, und eine Media-Query hebt die Spezifitaet nicht an.
+ *     Die 44px-Regel galt fuer dieses Element nie.
+ *   - `.toggle-head` ist ein <button> OHNE .btn-Klasse und fiel durch beide
+ *     Netze - weder `.btn` noch `.btn-sm` erfassen ihn.
+ *
+ * Dieser Guard dreht die Frage um: er sucht JEDE min-height unter 44px auf einem
+ * Bedienelement und verlangt, dass eine spaetere Regel mit demselben Selektor sie
+ * wieder anhebt. Ein neues Bedienelement kann so nicht mehr unbemerkt darunter
+ * rutschen, egal wie es heisst. */
+const CONTROL_SELECTOR = /(?:^|[\s>+~])(?:button|select|textarea|input\b[^\s]*|a)$|\.(?:btn|btn-sm|toggle-head|link-btn|mode-card|open-link)\b[^\s]*$/;
+
+test('keine Regel druckt ein Bedienelement unter 44px, ohne es wieder anzuheben', () => {
+  const mobile = appliesAt(MOBILE_VIEWPORT);
+  const offenders = [];
+
+  RULES.forEach((rule, i) => {
+    if (!mobile(rule.media)) return;
+    if (!CONTROL_SELECTOR.test(rule.selector)) return;
+    const found = rule.body.match(/(?:^|;)\s*min-height\s*:\s*([^;]+)/i);
+    if (!found) return;
+    const px = toPx(found[1].trim());
+    if (!(px < 44)) return;
+
+    // Hebt eine spaetere Regel mit demselben Selektor den Wert wieder an? Nur
+    // dann ist die niedrige Deklaration folgenlos.
+    const lifted = RULES.some((later, j) =>
+      j > i && later.selector === rule.selector && mobile(later.media) &&
+      toPx((later.body.match(/(?:^|;)\s*min-height\s*:\s*([^;]+)/i) || [])[1]?.trim()) >= 44);
+    if (!lifted) offenders.push(`${rule.selector} = ${px}px`);
+  });
+
+  assert.deepEqual(offenders, [],
+    `Bedienelemente unter der 44px-Zielgroesse, ohne spaetere Anhebung: ${offenders.join(', ')}`);
+});
+
+/* Die zweite Haelfte derselben Luecke: .toggle-head stand bei 43px, OHNE eine
+ * min-height zu deklarieren - die Hoehe kam aus 13px Padding plus 17px Inhalt.
+ * Der Guard darueber sieht nur Deklarationen und konnte das prinzipiell nicht
+ * fangen. Geprueft wird deshalb die Gruppe, nicht die Klasse: jeder
+ * data-toggle-Trigger sichert seine Hoehe ausdruecklich. Ein achter Akkordeon-
+ * Kopf ist damit automatisch mit erfasst.
+ *
+ * Bewusst NICHT enthalten ist .link-btn (34px, "Mehr Optionen noetig?"): das ist
+ * ein Textlink im Fliesstext, fuer den WCAG 2.5.8 die Inline-Ausnahme vorsieht -
+ * dieselbe Abwaegung, die das Projekt schon bei den Sammelaktions-Pillen
+ * getroffen hat. Er bleibt ueber 24x24 und damit im gruenen Bereich. */
+test('die Akkordeon-Koepfe sichern ihre Zielgroesse ausdruecklich', () => {
+  const triggers = [...html.matchAll(/<button[^>]*\bdata-toggle="[^"]+"[^>]*>/g)];
+  assert.ok(triggers.length >= 4, 'erwartet mindestens vier Akkordeon-Trigger');
+
+  // Alle tragen dieselbe Klasse; ueber sie laeuft die Zusicherung.
+  for (const m of triggers) {
+    assert.match(m[0], /class="[^"]*\btoggle-head\b/,
+      `Akkordeon-Trigger ohne .toggle-head-Klasse: ${m[0]}`);
+  }
+  const height = toPx(declared(sel => sel === '.toggle-head', 'min-height', appliesAt(MOBILE_VIEWPORT)));
+  assert.ok(height >= 44,
+    `.toggle-head sichert keine Zielgroesse (min-height ${height}px) - ${triggers.length} Koepfe stehen im Erweitert-Schritt untereinander`);
 });
 
 // ── 1.9 Tinte auf Akzentflächen erfüllt AA, in beiden Themes ──────────────────
@@ -385,6 +508,43 @@ function cssVar(css, name, from = 0) {
   return match[1];
 }
 
+/* Platzhaltertext erfüllt AA auf dem Feldgrund, in beiden Themes.
+ *
+ * Der Installer stylte ::placeholder NIRGENDS und fiel damit auf Chromes
+ * UA-Default #757575 zurück, der im Dark Mode nicht mitkippt: gemessen 3.36:1
+ * auf #262422, über alle 25 Felder mit placeholder-Attribut (Critique
+ * 2026-08-15). Ein Textscan über Elementfarben kann das prinzipiell nicht sehen,
+ * weil ein Pseudo-Element keinen eigenen Knoten hat.
+ *
+ * Dieselbe Falle hatte die App an ihren Quick-Add-Feldern (Critique 2026-07-29,
+ * layout.css:4225) und dort einen Elementselektor dagegen gesetzt. Der Installer
+ * hat diese Lehre nie bekommen, weil test-frontend-audit.js nur public/ scannt -
+ * deshalb steht der Guard hier, nicht dort. */
+test('Platzhaltertext erfüllt AA auf dem Feldgrund, in beiden Themes', () => {
+  // Die Regel muss überhaupt existieren, sonst gewinnt der UA-Default.
+  assert.match(html, /input::placeholder/,
+    'ohne eigene ::placeholder-Regel gilt Chromes #757575, das dem Theme nicht folgt');
+  assert.match(html, /::placeholder[\s\S]{0,200}?opacity:\s*1/,
+    'Firefox setzt ::placeholder sonst auf opacity < 1 und senkt den Kontrast erneut');
+
+  const htmlDark = html.indexOf('@media (prefers-color-scheme: dark)');
+  const tokensDark = tokensCss.indexOf('@media (prefers-color-scheme: dark)');
+
+  const paare = [
+    ['Inline-Fallback hell', cssVar(html, '--color-text-placeholder'), cssVar(html, '--color-surface')],
+    ['Inline-Fallback dunkel', cssVar(html, '--color-text-placeholder', htmlDark), cssVar(html, '--color-surface', htmlDark)],
+    // tokens.css leitet --color-text-placeholder aus --color-text-tertiary ab.
+    ['tokens.css hell', cssVar(tokensCss, '--_color-text-tertiary'), cssVar(tokensCss, '--_color-surface')],
+    ['tokens.css dunkel', cssVar(tokensCss, '--_color-text-tertiary', tokensDark), cssVar(tokensCss, '--_color-surface', tokensDark)],
+  ];
+
+  for (const [label, fg, bg] of paare) {
+    const ratio = contrastRatio(fg, bg);
+    assert.ok(ratio >= 4.5,
+      `${label}: Platzhalter ${fg} auf ${bg} erreicht nur ${ratio.toFixed(2)}:1, WCAG 1.4.3 verlangt 4.5:1`);
+  }
+});
+
 test('Primäraktionen des Installers erfüllen AA auf Akzentgrund, in beiden Themes', () => {
   // Inline-Fallback: :root ist Light, der prefers-color-scheme-Block ist Dark.
   const htmlDark = html.indexOf('@media (prefers-color-scheme: dark)');
@@ -415,4 +575,124 @@ test('der Installer nutzt kein --color-text-on-accent (folgt dem Theme nicht)', 
   // --color-ink-on-vivid, das dem Theme folgt.
   assert.doesNotMatch(html, /var\(--color-text-on-accent/,
     'auf Akzentflächen gehört --color-ink-on-vivid, nicht --color-text-on-accent');
+});
+
+/* Der Inline-Fallback spiegelt tokens.css - Wert fuer Wert, in beiden Themes.
+ *
+ * install.html und tools/installer/README.md sagen beide zu, der Fallback zeige
+ * "die aktuellen Tokens, weil ein Fallback, der den vorherigen Release zeigt,
+ * die Diagnose in die falsche Richtung schickt". Genau dort war er falsch:
+ * --color-ink-on-vivid stand im Dark Mode auf #191816, tokens.css auf #0A0A0C
+ * (Critique 2026-08-15). Wirksam wird der Fallback nur, wenn tokens.css fehlt -
+ * also in exakt dem Stoerfall, fuer den er gebaut wurde.
+ *
+ * Nichts hat das geprueft: die Werte sind zwei Kopien ohne Naht dazwischen.
+ * Dieser Guard ist die Naht. Er prueft nur Tokens, die BEIDE Seiten fuehren -
+ * der Fallback darf bewusst kleiner sein als tokens.css. */
+test('der Inline-Fallback stimmt Wert fuer Wert mit tokens.css ueberein', () => {
+  const darkHtml = html.indexOf('@media (prefers-color-scheme: dark)');
+  const darkTokens = tokensCss.indexOf('@media (prefers-color-scheme: dark)');
+  assert.ok(darkHtml > 0 && darkTokens > 0, 'Dark-Block nicht gefunden');
+
+  // Die :root-Deklarationen des Fallbacks, je Theme.
+  const fallbackVars = (from, to) => {
+    const map = new Map();
+    // Nicht nur Hex: auch Werte, die mit einer Zahl beginnen (Schatten, Radien,
+    // Typo-Stufen), driften sonst stumm. Gemessen 2026-08-31: der Dark-
+    // Kantenring aus tokens.css (0 0 0 1px rgba(255,255,255,.06)) fehlte im
+    // Fallback, und dieser Guard blieb gruen, weil er nur Hex verglich - Guard
+    // prueft Schreibweise, nicht Sache. Verglichen wird weiterhin nur, was
+    // tokens.css als privates --_-Token fuehrt.
+    for (const [, name, value] of html.slice(from, to).matchAll(/(--[\w-]+)\s*:\s*(#[0-9a-fA-F]{3,8}|[\d.][^;]*)/g)) {
+      map.set(name, value.replace(/\s+/g, ' ').trim().toLowerCase());
+    }
+    return map;
+  };
+  const light = fallbackVars(0, darkHtml);
+  const dark = fallbackVars(darkHtml, html.indexOf('</style>', darkHtml));
+
+  const drift = [];
+  for (const [theme, vars, tokensFrom] of [['light', light, 0], ['dark', dark, darkTokens]]) {
+    for (const [name, value] of vars) {
+      // tokens.css fuehrt die Basiswerte auf privaten --_-Variablen.
+      const privateName = name.replace(/^--/, '--_');
+      const re = new RegExp(`${privateName}:\\s*([^;]+);`, 'g');
+      re.lastIndex = tokensFrom;
+      const hit = re.exec(tokensCss);
+      if (!hit) continue; // Token nur im Fallback - erlaubt
+      const tokensValue = hit[1].replace(/\s+/g, ' ').trim().toLowerCase();
+      if (tokensValue !== value) {
+        drift.push(`${theme}: ${name} = ${value}, tokens.css = ${tokensValue}`);
+      }
+    }
+  }
+  assert.deepEqual(drift, [],
+    `Fallback-Tokens weichen von tokens.css ab (der Fallback greift nur, wenn tokens.css fehlt - dort waere die Abweichung dann sichtbar): ${drift.join(' | ')}`);
+});
+
+/* Kein Schritt sammelt wieder alles ein.
+ *
+ * Der Erweitert-Schritt trug 18 Entscheidungspunkte auf einem Bildschirm, der
+ * zweitgroesste 12 (Critique 2026-08-15). Er ist entlang einer Frage geteilt
+ * worden - wo liegen Daten (Speicher) gegen womit verbindet sich Yuvomi
+ * (Erweitert).
+ *
+ * Gezaehlt werden ENTSCHEIDUNGSPUNKTE, nicht Eingabefelder: ein Akkordeon-Kopf
+ * ist eine eigene Frage ("brauche ich das?"), sein Inhalt zaehlt erst, wenn er
+ * offen ist. Die erste Fassung zaehlte nur sichtbare inputs und war gegen den
+ * Vorzustand gruen, weil die Felder ja in zugeklappten Akkordeons lagen - die
+ * Last steckte aber gerade in den Koepfen.
+ *
+ * Die zugeklappten Inhalte werden per KLAMMERZAEHLUNG ausgeschnitten, nicht per
+ * Regex: ein non-greedy Muster endete am ersten passenden Doppel-</div> und
+ * liess damit Felder aus der Mitte eines Akkordeons durchrutschen - der Guard
+ * meldete 6 Felder auf einem Schritt, der genau eines hat. */
+test('kein Wizard-Schritt sammelt wieder alle Entscheidungen auf einem Bildschirm', () => {
+  const steps = [...html.matchAll(/<div class="step" id="step-([a-z-]+)">/g)].map(m => m[1]);
+  assert.ok(steps.length >= 10, `nur ${steps.length} Schritte gefunden - der Scanner greift nicht`);
+
+  /** Bereiche aller toggle-body-Blocks (Start/Ende) per div-Klammerzaehlung. */
+  const hiddenRanges = (seg) => {
+    const out = [];
+    let at = 0;
+    while ((at = seg.indexOf('<div class="toggle-body"', at)) !== -1) {
+      let depth = 0, close = -1;
+      for (let k = at; k < seg.length; k++) {
+        if (seg.startsWith('<div', k)) depth++;
+        else if (seg.startsWith('</div>', k)) {
+          depth--;
+          if (depth === 0) { close = k; break; }
+        }
+      }
+      if (close === -1) break;
+      out.push([at, close]);
+      at = close;
+    }
+    return out;
+  };
+
+  const LIMIT = 10;
+  const oversized = [];
+
+  for (const name of steps) {
+    const from = html.indexOf(`<div class="step" id="step-${name}">`);
+    const nextStep = html.indexOf('<div class="step" id="step-', from + 10);
+    const seg = html.slice(from, nextStep === -1 ? html.indexOf('</main>') : nextStep);
+
+    const hidden = hiddenRanges(seg);
+    const isHidden = (i) => hidden.some(([a, b]) => i > a && i < b);
+
+    const heads = (seg.match(/data-toggle="/g) || []).length;
+    let fields = 0;
+    for (const m of seg.matchAll(/<(?:input|select|textarea)\b/g)) {
+      if (!isHidden(m.index)) fields++;
+    }
+
+    const points = heads + fields;
+    if (points > LIMIT) oversized.push(`step-${name}: ${points} (${heads} Akkordeons + ${fields} Felder)`);
+  }
+
+  assert.deepEqual(oversized, [],
+    `Diese Schritte stellen beim Betreten mehr als ${LIMIT} Entscheidungen auf einmal: ${oversized.join(', ')}. `
+    + 'Entweder hinter Akkordeons legen oder entlang einer Frage in zwei Schritte teilen.');
 });
