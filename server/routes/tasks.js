@@ -29,6 +29,10 @@ import { householdMemberSql, isHouseholdMember, newNonMembers, nonMemberMessage 
 import { displayActingPerson, isDisplayRequest } from '../services/display-acting.js';
 import { pushService } from '../services/push.js';
 import { todayKey } from '../utils/timezone.js';
+import { resolveHouseholdFormats, translate } from '../utils/i18n.js';
+import {
+  fanOutTaskReminders, dropInheritedTaskReminders, taskAuthorId, syncTaskAutoReminders,
+} from '../services/task-reminders.js';
 import {
   allTags, applyTagChanges, loadTags, loadTagsFor, normalizeTags,
   removeTagEverywhere, renameTag, setTags, tagKey, tagsKey, taskIdsWithTag,
@@ -243,9 +247,39 @@ function parseAssignedTo(val) {
 }
 
 function setAssignments(d, taskId, userIds) {
+  const before = d.prepare('SELECT user_id FROM task_assignments WHERE task_id = ?')
+    .all(taskId).map((r) => r.user_id);
   d.prepare('DELETE FROM task_assignments WHERE task_id = ?').run(taskId);
   const ins = d.prepare('INSERT OR IGNORE INTO task_assignments (task_id, user_id) VALUES (?, ?)');
   for (const uid of userIds) ins.run(taskId, uid);
+  const removed = before.filter((uid) => !userIds.includes(uid));
+  dropInheritedTaskReminders(d, taskId, removed);
+  const author = taskAuthorId(d, taskId);
+  if (author !== null) fanOutTaskReminders(d, taskId, author);
+  syncTaskAutoReminders(d, taskId);
+}
+
+/**
+ * Sofort-Push an neu zugewiesene Personen - nach der Antwort, wie Erwaehnungen.
+ * Die Faelligkeit selbst laeuft ueber reminders + den Minuten-Scheduler.
+ */
+function notifyNewAssignees(task, addedIds, actorId) {
+  if (!task || !addedIds?.length) return;
+  const { locale } = resolveHouseholdFormats(db.get());
+  for (const id of addedIds) {
+    if (id === actorId) continue;
+    if (!findVisibleTask(task.id, id)) continue;
+    const target = db.get().prepare('SELECT id, role, family_role FROM users WHERE id = ?').get(id);
+    if (!target) continue;
+    const perms = resolvePermissions(db.get(), target);
+    if (!perms.admin && perms.modules?.tasks === 'none') continue;
+    pushService.sendPushToUser(id, {
+      title: translate(locale, 'nav.tasks'),
+      body: task.title,
+      url: `/tasks?open=${task.id}`,
+      tag: `task-assigned-${task.id}`,
+    }).catch((err) => log.warn('Zuweisungs-Push fehlgeschlagen:', err?.message || err));
+  }
 }
 
 function syncHousekeepingPaymentStatus(d, taskId, status) {
@@ -1092,6 +1126,7 @@ router.post('/', (req, res) => {
     addAssignedUsers(task);
     attachTags([task]);
     res.status(201).json({ data: task });
+    notifyNewAssignees(task, userIds, req.authUserId || req.session.userId);
     if (syncTarget) pushToCalDAV('Neue Aufgabe');
   } catch (err) {
     log.error('POST / error:', err);
@@ -1301,6 +1336,11 @@ router.put('/:id', (req, res) => {
     updated.subtasks = loadSubtasks(updated.id, req.authUserId || req.session.userId);
 
     res.json({ data: updated });
+    notifyNewAssignees(
+      updated,
+      userIds.filter((id) => !assignedBefore.includes(id)),
+      req.authUserId || req.session.userId,
+    );
 
     if (pending || undone || syncTarget) pushToCalDAV('Änderung');
   } catch (err) {
@@ -1683,6 +1723,7 @@ router.patch('/:id/status', (req, res) => {
       }
     })();
 
+    syncTaskAutoReminders(db.get(), Number(req.params.id));
     res.json({ data: { id: Number(req.params.id), status, archived_at: prev.archived_at } });
 
     if (pending || undone) pushToCalDAV('Statuswechsel');
@@ -1719,6 +1760,7 @@ router.patch('/:id/archive', (req, res) => {
     // Der Status bleibt unangetastet - eine zurückgeholte Aufgabe steht wieder
     // genau dort, wo sie beim Ablegen stand.
     const archivedAt = setArchived(task.id, req.body.archived !== false);
+    syncTaskAutoReminders(db.get(), task.id);
     res.json({ data: { id: task.id, status: task.status, archived_at: archivedAt } });
   } catch (err) {
     log.error('PATCH /:id/archive error:', err);

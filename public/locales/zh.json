@@ -2488,7 +2488,7 @@
         "personalWeatherSourceHousehold": "家庭默认位置已启用",
         "personalWeatherSaved": "位置已保存",
         "personalWeatherReset": "已重置为家庭默认值",
-        "pushDeviceDescription": "Web Push 仅适用于此设备和此浏览器。",
+        "pushDeviceDescription": "Web Push 仅适用于此设备和此浏览器。日历和任务提醒会发给被指派的人——请在每个想接收通知的设备上开启推送。",
         "notificationChannelsTitle": "家庭频道",
         "notificationChannelsDescription": "管理员可以添加在 Web Push 之外接收提醒的通道。",
         "notificationChannelAdd": "添加频道",

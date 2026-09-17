@@ -2500,7 +2500,7 @@
         "personalWeatherSourceHousehold": "Lokasi default rumah tangga aktif",
         "personalWeatherSaved": "Lokasi disimpan",
         "personalWeatherReset": "Diatur ulang ke default rumah tangga",
-        "pushDeviceDescription": "Web Push hanya berlaku untuk perangkat dan browser ini.",
+        "pushDeviceDescription": "Web Push hanya berlaku untuk perangkat dan browser ini. Pengingat kalender dan tugas dikirim ke orang yang ditugaskan — aktifkan notifikasi di setiap perangkat tempat Anda ingin menerimanya.",
         "notificationChannelsTitle": "Saluran rumah tangga",
         "notificationChannelsDescription": "Admin dapat menambahkan saluran yang menerima pengingat selain Web Push.",
         "notificationChannelAdd": "Tambah saluran",

@@ -2488,7 +2488,7 @@
         "personalWeatherSourceHousehold": "Localização padrão da família ativa",
         "personalWeatherSaved": "Localização guardada",
         "personalWeatherReset": "Reposto para o padrão da família",
-        "pushDeviceDescription": "O Web Push se aplica apenas a este dispositivo e navegador.",
+        "pushDeviceDescription": "O Web Push se aplica apenas a este dispositivo e navegador. Lembretes de agenda e tarefas vão para as pessoas atribuídas: ative as notificações em cada dispositivo onde quiser recebê-las.",
         "notificationChannelsTitle": "Canais da casa",
         "notificationChannelsDescription": "Os administradores podem adicionar canais que recebem lembretes além do Web Push.",
         "notificationChannelAdd": "Adicionar canal",

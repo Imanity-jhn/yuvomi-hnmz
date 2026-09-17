@@ -24,7 +24,7 @@ set_env() {
 
 # Always pin non-secret runtime values for the isolated dev instance.
 set_env OIKOS_HTTP_PORT 3008
-set_env DB_ENCRYPTION_KEY ""
+# set_env DB_ENCRYPTION_KEY ""  # keep existing key for copied prod DB
 set_env NODE_ENV development
 set_env SESSION_SECURE false
 set_env TRUST_PROXY loopback
@@ -42,7 +42,7 @@ mkdir -p /mnt/user/appdata/yuvomi-hnmz-dev/data \
          /mnt/user/appdata/yuvomi-hnmz-dev/documents
 
 echo "=== prod before (must stay Up on :3007) ==="
-docker ps --filter name=^Yuvomi$ --format '{{.Names}} {{.Status}} {{.Ports}}'
+docker ps --filter name=yuvomi --format '{{.Names}} {{.Status}} {{.Ports}}'
 
 echo "=== building / starting yuvomi-hnmz-dev ==="
 # Unraid compose/buildx combo rejects `compose ... --build`; build image first.
@@ -51,4 +51,4 @@ docker compose -f docker-compose.dev.yml up -d
 
 echo "=== status ==="
 docker ps --filter name=yuvomi-hnmz-dev --format '{{.Names}} {{.Status}} {{.Ports}}'
-docker ps --filter name=^Yuvomi$ --format '{{.Names}} {{.Status}} {{.Ports}}'
+docker ps --filter name=yuvomi --format '{{.Names}} {{.Status}} {{.Ports}}'

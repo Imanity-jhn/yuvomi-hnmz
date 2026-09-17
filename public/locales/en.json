@@ -2511,7 +2511,7 @@
         "personalWeatherSourceHousehold": "Household default location active",
         "personalWeatherSaved": "Location saved",
         "personalWeatherReset": "Reset to household default",
-        "pushDeviceDescription": "Web Push applies only to this device and browser.",
+        "pushDeviceDescription": "Web Push applies only to this device and browser. Calendar and task reminders go to the people assigned to them — enable notifications on each device where you want to receive them.",
         "notificationChannelsTitle": "Household channels",
         "notificationChannelsDescription": "Admins can add channels that receive reminders in addition to Web Push.",
         "notificationChannelAdd": "Add channel",

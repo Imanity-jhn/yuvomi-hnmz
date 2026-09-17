@@ -2488,7 +2488,7 @@
         "personalWeatherSourceHousehold": "घर का डिफ़ॉल्ट स्थान सक्रिय है",
         "personalWeatherSaved": "स्थान सहेजा गया",
         "personalWeatherReset": "घर के डिफ़ॉल्ट पर रीसेट किया गया",
-        "pushDeviceDescription": "Web Push केवल इस डिवाइस और इस ब्राउज़र पर लागू होता है।",
+        "pushDeviceDescription": "Web Push केवल इस डिवाइस और इस ब्राउज़र पर लागू होता है। कैलेंडर और कार्य अनुस्मारक नियुक्त लोगों को जाते हैं — प्रत्येक डिवाइस पर सूचनाएँ चालू करें जहाँ आप उन्हें पाना चाहते हैं।",
         "notificationChannelsTitle": "घर के चैनल",
         "notificationChannelsDescription": "व्यवस्थापक ऐसे चैनल जोड़ सकते हैं जो वेब पुश के अतिरिक्त अनुस्मारक प्राप्त करते हैं।",
         "notificationChannelAdd": "चैनल जोड़ें",

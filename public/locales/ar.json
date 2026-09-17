@@ -2488,7 +2488,7 @@
         "personalWeatherSourceHousehold": "موقع الأسرة الافتراضي نشط",
         "personalWeatherSaved": "تم حفظ الموقع",
         "personalWeatherReset": "تمت العودة إلى الافتراضي للأسرة",
-        "pushDeviceDescription": "ينطبق Web Push على هذا الجهاز وهذا المتصفح فقط.",
+        "pushDeviceDescription": "ينطبق Web Push على هذا الجهاز وهذا المتصفح فقط. تذكيرات التقويم والمهام تُرسل للأشخاص المعيّنين — فعّل الإشعارات على كل جهاز تريد استلامها عليه.",
         "notificationChannelsTitle": "قنوات المنزل",
         "notificationChannelsDescription": "يمكن للمسؤولين إضافة قنوات تتلقى التذكيرات إلى جانب إشعارات الويب.",
         "notificationChannelAdd": "إضافة قناة",

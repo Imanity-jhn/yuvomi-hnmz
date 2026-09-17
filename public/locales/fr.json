@@ -2488,7 +2488,7 @@
         "personalWeatherSourceHousehold": "Emplacement par défaut du foyer actif",
         "personalWeatherSaved": "Emplacement enregistré",
         "personalWeatherReset": "Réinitialisé au défaut du foyer",
-        "pushDeviceDescription": "Web Push s’applique uniquement à cet appareil et à ce navigateur.",
+        "pushDeviceDescription": "Web Push s’applique uniquement à cet appareil et à ce navigateur. Les rappels d’agenda et de tâches sont envoyés aux personnes assignées : activez les notifications sur chaque appareil où vous voulez les recevoir.",
         "notificationChannelsTitle": "Canaux du foyer",
         "notificationChannelsDescription": "Les administrateurs peuvent ajouter des canaux qui reçoivent les rappels en plus des notifications Web Push.",
         "notificationChannelAdd": "Ajouter un canal",

@@ -2488,7 +2488,7 @@
         "personalWeatherSourceHousehold": "Hane varsayılan konumu etkin",
         "personalWeatherSaved": "Konum kaydedildi",
         "personalWeatherReset": "Hane varsayılanına sıfırlandı",
-        "pushDeviceDescription": "Web Push yalnızca bu cihaz ve bu tarayıcı için geçerlidir.",
+        "pushDeviceDescription": "Web Push yalnızca bu cihaz ve bu tarayıcı için geçerlidir. Takvim ve görev hatırlatmaları atanan kişilere gider — almak istediğiniz her cihazda bildirimleri açın.",
         "notificationChannelsTitle": "Ev kanalları",
         "notificationChannelsDescription": "Yöneticiler, Web Push'a ek olarak hatırlatıcı alan kanallar ekleyebilir.",
         "notificationChannelAdd": "Kanal ekle",

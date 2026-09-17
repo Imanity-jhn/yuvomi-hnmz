@@ -2488,7 +2488,7 @@
         "personalWeatherSourceHousehold": "Hushållets standardplats aktiv",
         "personalWeatherSaved": "Plats sparad",
         "personalWeatherReset": "Återställt till hushållets standard",
-        "pushDeviceDescription": "Web Push gäller bara den här enheten och webbläsaren.",
+        "pushDeviceDescription": "Web Push gäller bara den här enheten och webbläsaren. Kalender- och uppgiftspåminnelser går till tilldelade personer — aktivera aviseringar på varje enhet där du vill ta emot dem.",
         "notificationChannelsTitle": "Hushållskanaler",
         "notificationChannelsDescription": "Administratörer kan lägga till kanaler som tar emot påminnelser utöver Web Push.",
         "notificationChannelAdd": "Lägg till kanal",

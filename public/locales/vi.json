@@ -2488,7 +2488,7 @@
         "personalWeatherSourceHousehold": "Vị trí mặc định của hộ gia đình đang bật",
         "personalWeatherSaved": "Đã lưu vị trí",
         "personalWeatherReset": "Đã đặt lại về mặc định của hộ gia đình",
-        "pushDeviceDescription": "Web Push chỉ áp dụng cho thiết bị và trình duyệt này.",
+        "pushDeviceDescription": "Web Push chỉ áp dụng cho thiết bị và trình duyệt này. Nhắc lịch và công việc được gửi cho người được giao — bật thông báo trên mỗi thiết bị nơi bạn muốn nhận chúng.",
         "notificationChannelsTitle": "Kênh gia đình",
         "notificationChannelsDescription": "Quản trị viên có thể thêm các kênh nhận lời nhắc bên cạnh Web Push.",
         "notificationChannelAdd": "Thêm kênh",

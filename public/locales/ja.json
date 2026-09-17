@@ -2488,7 +2488,7 @@
         "personalWeatherSourceHousehold": "世帯の既定の場所が有効",
         "personalWeatherSaved": "場所を保存しました",
         "personalWeatherReset": "世帯の既定にリセットしました",
-        "pushDeviceDescription": "Web Push はこのデバイスとこのブラウザーにのみ適用されます。",
+        "pushDeviceDescription": "Web Push はこのデバイスとこのブラウザーにのみ適用されます。カレンダーとタスクのリマインダーは担当者に届きます。受け取りたい端末ごとに通知を有効にしてください。",
         "notificationChannelsTitle": "世帯チャンネル",
         "notificationChannelsDescription": "管理者は、Web プッシュに加えてリマインダーを受け取るチャンネルを追加できます。",
         "notificationChannelAdd": "チャンネルを追加",

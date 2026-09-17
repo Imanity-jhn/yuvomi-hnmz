@@ -2523,7 +2523,7 @@
         "personalWeatherSourceHousehold": "Haushalts-Standardstandort aktiv",
         "personalWeatherSaved": "Standort gespeichert",
         "personalWeatherReset": "Auf Haushalts-Standard zurückgesetzt",
-        "pushDeviceDescription": "Web Push gilt nur für dieses Gerät und diesen Browser.",
+        "pushDeviceDescription": "Web Push gilt nur für dieses Gerät und diesen Browser. Kalender- und Aufgaben-Erinnerungen gehen an die zugewiesenen Personen – aktiviere Benachrichtigungen auf jedem Gerät, auf dem du sie empfangen willst.",
         "notificationChannelsTitle": "Haushaltskanäle",
         "notificationChannelsDescription": "Admins können Kanäle hinzufügen, die Erinnerungen zusätzlich zu Web Push erhalten.",
         "notificationChannelAdd": "Kanal hinzufügen",

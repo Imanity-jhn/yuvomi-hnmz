@@ -2488,7 +2488,7 @@
         "personalWeatherSourceHousehold": "Ubicación predeterminada del hogar activa",
         "personalWeatherSaved": "Ubicación guardada",
         "personalWeatherReset": "Restablecido a la predeterminada del hogar",
-        "pushDeviceDescription": "Web Push solo se aplica a este dispositivo y navegador.",
+        "pushDeviceDescription": "Web Push solo se aplica a este dispositivo y navegador. Los recordatorios de agenda y tareas llegan a las personas asignadas: activa las notificaciones en cada dispositivo donde quieras recibirlas.",
         "notificationChannelsTitle": "Canales del hogar",
         "notificationChannelsDescription": "Los administradores pueden añadir canales que reciban recordatorios además de Web Push.",
         "notificationChannelAdd": "Añadir canal",

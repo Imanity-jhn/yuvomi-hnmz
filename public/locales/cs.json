@@ -2488,7 +2488,7 @@
         "personalWeatherSourceHousehold": "Výchozí poloha domácnosti je aktivní",
         "personalWeatherSaved": "Poloha uložena",
         "personalWeatherReset": "Obnovena výchozí poloha domácnosti",
-        "pushDeviceDescription": "Web Push platí pouze pro toto zařízení a tento prohlížeč.",
+        "pushDeviceDescription": "Web Push platí pouze pro toto zařízení a tento prohlížeč. Připomínky kalendáře a úkolů dostávají přiřazené osoby — zapněte oznámení na každém zařízení, kde je chcete dostávat.",
         "notificationChannelsTitle": "Kanály domácnosti",
         "notificationChannelsDescription": "Správci mohou přidat kanály, které dostávají připomínky navíc k Web Push.",
         "notificationChannelAdd": "Přidat kanál",

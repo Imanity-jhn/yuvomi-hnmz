@@ -2488,7 +2488,7 @@
         "personalWeatherSourceHousehold": "Типове місце дому активне",
         "personalWeatherSaved": "Місце збережено",
         "personalWeatherReset": "Скинуто до типового місця дому",
-        "pushDeviceDescription": "Web Push застосовується лише до цього пристрою та браузера.",
+        "pushDeviceDescription": "Web Push застосовується лише до цього пристрою та браузера. Нагадування календаря й завдань надходять призначеним людям — увімкніть сповіщення на кожному пристрої, де хочете їх отримувати.",
         "notificationChannelsTitle": "Канали домогосподарства",
         "notificationChannelsDescription": "Адміністратори можуть додавати канали, які отримують нагадування на додачу до Web Push.",
         "notificationChannelAdd": "Додати канал",

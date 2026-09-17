@@ -2488,7 +2488,7 @@
         "personalWeatherSourceHousehold": "Семейное местоположение по умолчанию активно",
         "personalWeatherSaved": "Местоположение сохранено",
         "personalWeatherReset": "Сброшено к семейному по умолчанию",
-        "pushDeviceDescription": "Web Push действует только для этого устройства и браузера.",
+        "pushDeviceDescription": "Web Push действует только для этого устройства и браузера. Напоминания календаря и задач приходят назначенным людям — включите уведомления на каждом устройстве, где хотите их получать.",
         "notificationChannelsTitle": "Каналы семьи",
         "notificationChannelsDescription": "Администраторы могут добавлять каналы, которые получают напоминания в дополнение к Web Push.",
         "notificationChannelAdd": "Добавить канал",

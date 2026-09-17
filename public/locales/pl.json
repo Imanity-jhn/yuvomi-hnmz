@@ -2500,7 +2500,7 @@
         "personalWeatherSourceHousehold": "Domyślna lokalizacja domu aktywna",
         "personalWeatherSaved": "Lokalizacja zapisana",
         "personalWeatherReset": "Przywrócono domyślną lokalizację domu",
-        "pushDeviceDescription": "Web Push dotyczy tylko tego urządzenia i tej przeglądarki.",
+        "pushDeviceDescription": "Web Push dotyczy tylko tego urządzenia i tej przeglądarki. Przypomnienia z kalendarza i zadań trafiają do przypisanych osób — włącz powiadomienia na każdym urządzeniu, na którym chcesz je otrzymywać.",
         "notificationChannelsTitle": "Kanały domowe",
         "notificationChannelsDescription": "Administratorzy mogą dodawać kanały, które otrzymują przypomnienia oprócz Web Push.",
         "notificationChannelAdd": "Dodaj kanał",

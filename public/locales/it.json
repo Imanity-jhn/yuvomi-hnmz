@@ -2488,7 +2488,7 @@
         "personalWeatherSourceHousehold": "Posizione predefinita famiglia attiva",
         "personalWeatherSaved": "Posizione salvata",
         "personalWeatherReset": "Ripristinata la predefinita della famiglia",
-        "pushDeviceDescription": "Web Push vale solo per questo dispositivo e questo browser.",
+        "pushDeviceDescription": "Web Push vale solo per questo dispositivo e questo browser. I promemoria di agenda e attività vanno alle persone assegnate: attiva le notifiche su ogni dispositivo dove vuoi riceverle.",
         "notificationChannelsTitle": "Canali della famiglia",
         "notificationChannelsDescription": "Gli amministratori possono aggiungere canali che ricevono i promemoria oltre alle Web Push.",
         "notificationChannelAdd": "Aggiungi canale",

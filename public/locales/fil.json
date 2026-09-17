@@ -2523,7 +2523,7 @@
         "personalWeatherSourceHousehold": "Aktibo ang default na lokasyon ng sambahayan",
         "personalWeatherSaved": "Na-save ang lokasyon",
         "personalWeatherReset": "Ibalik sa default ng sambahayan",
-        "pushDeviceDescription": "Naaangkop lamang ang Web Push sa device at browser na ito.",
+        "pushDeviceDescription": "Naaangkop lamang ang Web Push sa device at browser na ito. Ang mga paalala sa kalendaryo at gawain ay pumupunta sa mga naka-assign — i-enable ang notifications sa bawat device kung saan mo gusto itong matanggap.",
         "notificationChannelsTitle": "Mga channel ng sambahayan",
         "notificationChannelsDescription": "Makakapagdagdag ang mga admin ng mga channel na tumatanggap ng paalala bukod sa Web Push.",
         "notificationChannelAdd": "Magdagdag ng channel",

@@ -19,6 +19,8 @@ import { syncAllPantryExpiryReminders } from './pantry-reminders.js';
 import { syncAllCycleReminders } from './cycle-reminders.js';
 import { syncAllScheduleReminders } from './schedule-reminders.js';
 import { syncAllWasteReminders } from './waste-reminders.js';
+import { syncAllEventReminderFanout } from './event-reminder-fanout.js';
+import { syncAllTaskReminders } from './task-reminders.js';
 
 const log = createLogger('Notifications');
 const APP_NAME = 'Yuvomi';
@@ -235,14 +237,16 @@ function reminderPayload(reminder, locale, dateFormat) {
   } else if (reminder.entity_type === 'waste_pickup' && reminder.entity_title) {
     body = wastePickupBody(reminder);
   }
-  // Waste is the one entity_type with a real per-occurrence deep link
-  // (?type=<id>&date=<date_key>, the same contract every other Waste
-  // projection - Dashboard widget, Calendar chip - already uses); every other
-  // origin's url is a static page. Falls back to the origin's plain /waste
-  // only if the anchor/type vanished between sync and delivery.
-  const url = (reminder.entity_type === 'waste_pickup' && reminder.waste_type_id && reminder.waste_date_key)
-    ? `/waste?type=${reminder.waste_type_id}&date=${reminder.waste_date_key}`
-    : (origin ? origin.url : '/');
+  // Waste carries a per-occurrence deep link (?type=&date=). Tasks and events
+  // have a matching ?open=<id> contract on their pages; without entity_id the
+  // payload would only open the list, which is the old miss: the tap named the
+  // item and landed on an overview.
+  let url = origin ? origin.url : '/';
+  if (reminder.entity_type === 'waste_pickup' && reminder.waste_type_id && reminder.waste_date_key) {
+    url = `/waste?type=${reminder.waste_type_id}&date=${reminder.waste_date_key}`;
+  } else if ((reminder.entity_type === 'task' || reminder.entity_type === 'event') && reminder.entity_id) {
+    url = `${origin ? origin.url : (reminder.entity_type === 'task' ? '/tasks' : '/calendar')}?open=${reminder.entity_id}`;
+  }
   return {
     // Ohne bekannte Herkunft bleibt der App-Name: er ist nichtssagend, aber nie
     // falsch - und ein roher `entity_type` im Titel waere beides. Das Ziel
@@ -416,9 +420,19 @@ export async function processDueNotifications({
   } catch (err) {
     log.error('Waste reminder sync failed:', err?.message || err);
   }
+  try {
+    syncAllEventReminderFanout(activeDb);
+  } catch (err) {
+    log.error('Event reminder fan-out sync failed:', err?.message || err);
+  }
+  try {
+    syncAllTaskReminders(activeDb, now);
+  } catch (err) {
+    log.error('Task reminder sync failed:', err?.message || err);
+  }
 
   const due = activeDb.prepare(`
-    SELECT r.id, r.created_by, r.entity_type,
+    SELECT r.id, r.created_by, r.entity_type, r.entity_id,
       CASE r.entity_type
         WHEN 'task'  THEN (SELECT title FROM tasks           WHERE id = r.entity_id)
         WHEN 'event' THEN (SELECT title FROM calendar_events WHERE id = r.entity_id)

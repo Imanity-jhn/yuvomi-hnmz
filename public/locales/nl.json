@@ -2488,7 +2488,7 @@
         "personalWeatherSourceHousehold": "Standaardlocatie huishouden actief",
         "personalWeatherSaved": "Locatie opgeslagen",
         "personalWeatherReset": "Teruggezet naar standaard huishouden",
-        "pushDeviceDescription": "Web Push geldt alleen voor dit apparaat en deze browser.",
+        "pushDeviceDescription": "Web Push geldt alleen voor dit apparaat en deze browser. Agenda- en taakherinneringen gaan naar de toegewezen personen — zet meldingen aan op elk apparaat waarop je ze wilt ontvangen.",
         "notificationChannelsTitle": "Huishoudkanalen",
         "notificationChannelsDescription": "Beheerders kunnen kanalen toevoegen die herinneringen ontvangen naast Web Push.",
         "notificationChannelAdd": "Kanaal toevoegen",

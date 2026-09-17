@@ -283,23 +283,19 @@ test('ein Termin ohne weitere Zugewiesene aendert nichts', async () => {
 // Die Herkunft anderer Module bleibt unberuehrt
 // --------------------------------------------------------------------------
 
-test('Aufgaben-Erinnerungen werden nicht verteilt', async () => {
+test('Aufgaben-Erinnerungen der Erstellerin erreichen die Zustaendigen', async () => {
   const taskId = database
     .prepare("INSERT INTO tasks (title, created_by, visibility) VALUES ('T', ?, 'all')")
     .run(ANNA).lastInsertRowid;
+  database.prepare('INSERT INTO task_assignments (task_id, user_id) VALUES (?, ?)').run(taskId, ANNA);
+  database.prepare('INSERT INTO task_assignments (task_id, user_id) VALUES (?, ?)').run(taskId, BEN);
   actingUser = ANNA;
   await call('PUT', `/?entity_type=task&entity_id=${taskId}`, { remind_ats: ['2026-08-31T10:00:00'] });
 
-  const all = database.prepare(
-    "SELECT created_by FROM reminders WHERE entity_type='task' AND entity_id=?"
-  ).all(taskId);
-  assert.equal(all.length, 1, 'die Regel gilt Terminen - Aufgaben haben ihre eigene Zuweisungslogik');
-  assert.equal(all[0].created_by, ANNA);
-});
-
-test('assigned_from steht auf NULL, wo niemand geerbt hat', () => {
-  const rows = database.prepare(
-    "SELECT assigned_from FROM reminders WHERE entity_type='task'"
-  ).all();
-  for (const r of rows) assert.equal(r.assigned_from, null);
+  const bens = database.prepare(
+    "SELECT created_by, assigned_from, remind_at FROM reminders WHERE entity_type='task' AND entity_id=? AND created_by=?"
+  ).all(taskId, BEN);
+  const inherited = bens.filter((r) => r.assigned_from === ANNA);
+  assert.equal(inherited.length, 1, 'die Regel gilt jetzt auch Aufgaben - sonst erfuehrt Ben nichts');
+  assert.equal(inherited[0].remind_at, '2026-08-31T10:00:00');
 });

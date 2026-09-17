@@ -926,6 +926,27 @@ test('task reminders keep their bare title as body (#581)', async () => {
   await processDueNotifications({ database: db, channelStore: store, pushService, providers, now: new Date() });
   assert.equal(payloads.length, 1);
   assert.equal(payloads[0].body, 'Müll rausbringen');
+  assert.equal(payloads[0].url, '/tasks?open=1');
+});
+
+test('event reminders deep-link to the calendar item', async () => {
+  const { createNotificationChannelStore } = await import('../server/services/notification-channels.js');
+  const { processDueNotifications } = await import('../server/services/notifications.js');
+  const db = makeDb();
+  const store = createNotificationChannelStore({ db });
+  store.createChannel({ provider: 'ntfy', name: 'ntfy', enabled: true, config: { baseUrl: 'https://ntfy.test', topic: 'family' }, secrets: {} });
+  db.prepare("INSERT INTO calendar_events (id, title) VALUES (1, 'Zahnarzt')").run();
+  db.prepare("INSERT INTO reminders (id, entity_type, entity_id, remind_at, created_by) VALUES (1, 'event', 1, ?, 1)")
+    .run('2026-06-19T09:59:00.000Z');
+  const payloads = [];
+  const providers = {
+    ntfy: { id: 'ntfy', send: async ({ payload }) => { payloads.push(payload); return { ok: true, status: 200 }; } },
+  };
+  const pushService = { sendPushToUser: async () => 0 };
+
+  await processDueNotifications({ database: db, channelStore: store, pushService, providers, now: new Date() });
+  assert.equal(payloads.length, 1);
+  assert.equal(payloads[0].url, '/calendar?open=1');
 });
 
 test('reminders for deleted entities never send the app name as body (#581)', async () => {

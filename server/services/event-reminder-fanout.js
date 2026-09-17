@@ -139,3 +139,19 @@ export function eventAuthorId(database, eventId) {
   return database.prepare('SELECT created_by FROM calendar_events WHERE id = ?')
     .get(eventId)?.created_by ?? null;
 }
+
+/**
+ * Bestand nachziehen fuer Termine, die nie erneut gespeichert wurden.
+ * Idempotent: fanOutEventReminders schreibt nur, wenn die Menge abweicht.
+ */
+export function syncAllEventReminderFanout(database) {
+  const rows = database.prepare(`
+    SELECT DISTINCT e.id, e.created_by
+    FROM calendar_events e
+    JOIN event_assignments a ON a.event_id = e.id
+    WHERE a.user_id != e.created_by
+  `).all();
+  let written = 0;
+  for (const row of rows) written += fanOutEventReminders(database, row.id, row.created_by);
+  return written;
+}

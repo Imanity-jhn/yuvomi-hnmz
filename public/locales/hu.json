@@ -2488,7 +2488,7 @@
         "personalWeatherSourceHousehold": "Háztartás alapértelmezett helye aktív",
         "personalWeatherSaved": "Hely mentve",
         "personalWeatherReset": "Háztartás alapértelmezett hely visszaállítva",
-        "pushDeviceDescription": "A Web push értesítések csak ezen az eszközön és böngészőben érvényesek.",
+        "pushDeviceDescription": "A Web push értesítések csak ezen az eszközön és böngészőben érvényesek. A naptár- és feladat-emlékeztetők a hozzárendelt személyekhez mennek — kapcsold be az értesítéseket minden eszközön, ahol fogadni szeretnéd őket.",
         "notificationChannelsTitle": "Háztartási csatornák",
         "notificationChannelsDescription": "Az adminok olyan csatornákat adhatnak hozzá, amelyek a Web Push mellett kapják az emlékeztetőket.",
         "notificationChannelAdd": "Csatorna hozzáadása",

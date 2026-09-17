@@ -2500,7 +2500,7 @@
         "personalWeatherSourceHousehold": "مکان پیش‌فرض خانوار فعال",
         "personalWeatherSaved": "مکان ذخیره شد",
         "personalWeatherReset": "به پیش‌فرض خانوار بازنشانی شد",
-        "pushDeviceDescription": "Web Push فقط برای این دستگاه و این مرورگر معتبر است.",
+        "pushDeviceDescription": "Web Push فقط برای این دستگاه و این مرورگر معتبر است. یادآورهای تقویم و کارها به افراد تخصیص‌یافته می‌رسند — اعلان‌ها را در هر دستگاهی که می‌خواهید دریافت کنید فعال کنید.",
         "notificationChannelsTitle": "کانال‌های خانوار",
         "notificationChannelsDescription": "مدیران می‌توانند کانال‌هایی اضافه کنند که یادآوری‌ها را افزون بر وب‌پوش دریافت کنند.",
         "notificationChannelAdd": "افزودن کانال",

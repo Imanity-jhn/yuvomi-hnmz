@@ -10,6 +10,7 @@ import * as db from '../db.js';
 import * as v from '../middleware/validate.js';
 import { syncAllBirthdayReminders } from '../services/birthdays.js';
 import { fanOutEventReminders, eventAuthorId } from '../services/event-reminder-fanout.js';
+import { fanOutTaskReminders, taskAuthorId, syncTaskAutoReminders } from '../services/task-reminders.js';
 import { deniedModules } from '../permissions.js';
 import { tokenAllows } from '../scopes.js';
 
@@ -43,6 +44,25 @@ function syncEventFanout(entityType, entityId, userId) {
     log.error('Error fanning out event reminders:', err.message);
   }
 }
+
+function syncTaskFanout(entityType, entityId, userId) {
+  if (entityType !== 'task') return;
+  try {
+    if (taskAuthorId(db.get(), entityId) !== userId) return;
+    fanOutTaskReminders(db.get(), entityId, userId);
+    syncTaskAutoReminders(db.get(), entityId);
+  } catch (err) {
+    log.error('Error fanning out task reminders:', err.message);
+  }
+}
+
+function syncEntityFanout(entityType, entityId, userId) {
+  syncEventFanout(entityType, entityId, userId);
+  syncTaskFanout(entityType, entityId, userId);
+}
+
+/** Aus dem Formular: die automatisch nachgezogenen Zeilen gehoeren nicht dazu. */
+const MANUAL_REMINDER_SQL = `AND NOT (assigned_from IS NOT NULL AND assigned_from = created_by)`;
 
 /**
  * HERKÜNFTE, DIE EIN LAUF LAUFEND HERSTELLT und die deshalb keine Handeingabe
@@ -280,6 +300,7 @@ router.get('/all', (req, res) => {
     const rows = db.get().prepare(`
       SELECT * FROM reminders
       WHERE entity_type = ? AND entity_id = ? AND created_by = ? AND dismissed = 0
+        ${MANUAL_REMINDER_SQL}
       ORDER BY remind_at ASC
     `).all(entityType, entityId, userId);
 
@@ -311,6 +332,7 @@ router.get('/', (req, res) => {
     const row = db.get().prepare(`
       SELECT * FROM reminders
       WHERE entity_type = ? AND entity_id = ? AND created_by = ? AND dismissed = 0
+        ${MANUAL_REMINDER_SQL}
       ORDER BY created_at DESC LIMIT 1
     `).get(entityType, entityId, userId);
 
@@ -360,6 +382,7 @@ router.post('/', (req, res) => {
     db.get().prepare(`
       DELETE FROM reminders
       WHERE entity_type = ? AND entity_id = ? AND created_by = ?
+        ${MANUAL_REMINDER_SQL}
     `).run(entity_type, entityId, userId);
 
     const result = db.get().prepare(`
@@ -367,7 +390,7 @@ router.post('/', (req, res) => {
       VALUES (?, ?, ?, ?)
     `).run(entity_type, entityId, remind_at, userId);
 
-    syncEventFanout(entity_type, entityId, userId);
+    syncEntityFanout(entity_type, entityId, userId);
 
     const row = db.get().prepare('SELECT * FROM reminders WHERE id = ?').get(result.lastInsertRowid);
     res.status(201).json({ data: row });
@@ -422,6 +445,7 @@ router.put('/', (req, res) => {
       db.get().prepare(`
         DELETE FROM reminders
         WHERE entity_type = ? AND entity_id = ? AND created_by = ?
+          ${MANUAL_REMINDER_SQL}
       `).run(entityType, entityId, userId);
 
       const insert = db.get().prepare(`
@@ -433,11 +457,12 @@ router.put('/', (req, res) => {
       }
     });
     replace(unique);
-    syncEventFanout(entityType, entityId, userId);
+    syncEntityFanout(entityType, entityId, userId);
 
     const rows = db.get().prepare(`
       SELECT * FROM reminders
       WHERE entity_type = ? AND entity_id = ? AND created_by = ? AND dismissed = 0
+        ${MANUAL_REMINDER_SQL}
       ORDER BY remind_at ASC
     `).all(entityType, entityId, userId);
 
@@ -515,7 +540,7 @@ router.delete('/:id', (req, res) => {
     }
 
     db.get().prepare('DELETE FROM reminders WHERE id = ?').run(reminderId);
-    syncEventFanout(reminder.entity_type, reminder.entity_id, userId);
+    syncEntityFanout(reminder.entity_type, reminder.entity_id, userId);
     res.status(204).end();
   } catch (err) {
     log.error('Error deleting reminder:', err.message);
@@ -553,8 +578,9 @@ router.delete('/', (req, res) => {
     db.get().prepare(`
       DELETE FROM reminders
       WHERE entity_type = ? AND entity_id = ? AND created_by = ?
+        ${MANUAL_REMINDER_SQL}
     `).run(entityType, entityId, userId);
-    syncEventFanout(entityType, entityId, userId);
+    syncEntityFanout(entityType, entityId, userId);
 
     res.status(204).end();
   } catch (err) {
