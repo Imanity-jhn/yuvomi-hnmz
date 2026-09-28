@@ -1029,6 +1029,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Deleting a folder no longer tells you about records and documents you may not see.** Before
+  deleting a folder the app asks the server what the deletion would affect. That answer counted,
+  per module, the calendar events, housekeeping visits, shared expenses, tasks, budget entries and
+  inventory items linked to the documents in the folder, without checking whether you may open
+  that module or see those records. A member without access to the budget, or an API token
+  limited to `documents:read`, learned how many bookings link to a document, and a member learned
+  about links from another member's private event or task; the confirmation code in the same
+  answer changed with them. The counts now include only modules you may open and only records
+  you can see there. Deleting a folder together with its documents also gave hidden documents
+  away: when the folder held another member's private document, the request was refused with a
+  different answer than when it did not, so a member with write access to documents could test
+  any folder for private documents of others. Such a document is now left alone instead: it is
+  not deleted, keeps its sharing and only loses its folder, exactly as when you keep the
+  documents, and the answer is the same whether it is there or not. This replaces the refusal
+  described in 2.68.1 and 2.69.0; nobody can delete a document through a folder that they cannot
+  see, administrators included. When a document arrived in the folder while a deletion was still
+  running, the partial result named it even if it was private to someone else; it now names only
+  documents you can see. For API clients: in the response of
+  `GET /api/v1/documents/folders/{id}/delete-impact`, `linked_records` has `null` for a module the
+  caller may not read (member right or token scope; shared expenses follow `budget`), not a
+  count. `DELETE /api/v1/documents/folders/{id}?documents=delete` now compares the snapshot
+  first (409 `FOLDER_CONTENT_CHANGED`) and answers 403 `FOLDER_DOCUMENTS_NOT_MANAGEABLE` only
+  for a visible document the caller may not manage; `deleted_documents` and `failed_documents`
+  cover only visible documents.
+
 - **Documents and images are no longer kept in the browser's cache.** A document opened in the
   viewer stayed there for five minutes, and document thumbnails, Paperless thumbnails, recipe
   images, screensaver photos and weather icons were marked as cacheable, so signing out left copies
