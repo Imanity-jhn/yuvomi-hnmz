@@ -27,6 +27,7 @@ import { ensureModuleFolder, isModuleFolderKey } from '../services/document-fold
 import { subtreeIds, folderMoveIssue, MAX_FOLDER_DEPTH } from '../../public/utils/folder-tree.js';
 import { getAdapter as defaultGetDmsAdapter } from '../services/dms/index.js';
 import { getStatus as getGoogleDriveStatus } from '../services/google-drive-storage.js';
+import { refuseWhileRestoring } from '../middleware/restore-gate.js';
 import {
   StorageError,
   assertWebdavTargetAllowed,
@@ -1439,7 +1440,10 @@ router.get('/:id/thumbnail', async (req, res) => {
   }
 });
 
-router.get('/:id/preview', async (req, res) => {
+// Preview und Download lesen ein Drive-Dokument ueber den Google-Client, dessen
+// `tokens`-Listener ein erneuertes Token nach dem Warten speichert: waehrend
+// eines Restores 503, sonst festgehalten wie eine schreibende Anfrage (#1551).
+router.get('/:id/preview', refuseWhileRestoring, async (req, res) => {
   try {
     const id = Number(req.params.id);
     const doc = getVisibleDocument(id, req, true);
@@ -1482,7 +1486,7 @@ router.get('/:id/preview', async (req, res) => {
   }
 });
 
-router.get('/:id/download', async (req, res) => {
+router.get('/:id/download', refuseWhileRestoring, async (req, res) => {
   try {
     const id = Number(req.params.id);
     const doc = getVisibleDocument(id, req, true);
