@@ -1001,6 +1001,77 @@ test('default-assignee-backfill - Vorschau und Bestaetigung haben dieselbe Oberg
   }
 });
 
+test('default-assignee-backfill - die Bestaetigung prueft die Umzuege in Happen mit EINER vorbereiteten Abfrage (#1440)', async () => {
+  // Eine volle Seite sind 5000 Umzuege. Je Eintrag eine frisch vorbereitete
+  // Abfrage, alle ohne Pause, blockierte den Server fuer die ganze Pruefung.
+  const route = '/external-calendars/default-assignee-backfill';
+  const { backfillBatch } = await import('../server/services/sync-assignment.js');
+  const { ids, cleanup } = seedMovedFixture();
+  const original = db.prepare;
+  const saved = backfillBatch.size;
+  let prepared = 0;
+  const log = [];
+  try {
+    const counted = (await call('GET', route)).body.data;
+    const moves = counted.moved.filter((m) => MOVED_KEYS.some((k) => ids[k] === m.event_id)).map(pick);
+    assert.equal(moves.length, 5, 'Vorbedingung: fuenf abgehakte Umzuege');
+    backfillBatch.size = 2;
+    // Jede Punktabfrage der Umzugsregel wird gezaehlt, jede Ausfuehrung notiert.
+    // Beim ersten Aufruf reiht sich ein Rivale ein: steht er vor dem dritten
+    // Aufruf im Protokoll, hat die Pruefung nach dem ersten Happen Luft gegeben.
+    db.prepare = function prepareSpy(sql) {
+      const stmt = original.call(this, sql);
+      if (!String(sql).includes('JOIN event_assignments cur') || !String(sql).includes('e.id = @eventId')) return stmt;
+      prepared += 1;
+      const get = stmt.get.bind(stmt);
+      stmt.get = (...args) => {
+        if (!log.length) setImmediate(() => log.push('rivale'));
+        log.push('get');
+        return get(...args);
+      };
+      return stmt;
+    };
+    const applied = await call('POST', route, { body: {
+      expected_count: counted.count, expected_token: counted.token, moves,
+    } });
+    db.prepare = original;
+    assert.equal(applied.status, 200, JSON.stringify(applied.body));
+    assert.equal(applied.body.data.assigned, counted.count + moves.length);
+    assert.equal(prepared, 2, 'je eine vorbereitete Abfrage fuer Pruefung und Schreiben, nicht eine je Eintrag');
+    assert.equal(log.indexOf('rivale'), 2, `Luft nach dem ersten Happen der Pruefung: ${log.join(' ')}`);
+  } finally {
+    db.prepare = original;
+    backfillBatch.size = saved;
+    cleanup();
+  }
+});
+
+test('default-assignee-backfill - ein veralteter Umzug im letzten Happen: 409, nichts geschrieben (#1440)', async () => {
+  const route = '/external-calendars/default-assignee-backfill';
+  const { backfillBatch } = await import('../server/services/sync-assignment.js');
+  const { ids, cleanup, HAND } = seedMovedFixture();
+  const saved = backfillBatch.size;
+  try {
+    const counted = (await call('GET', route)).body.data;
+    const moves = MOVED_KEYS.map((k) => pick(counted.moved.find((m) => m.event_id === ids[k])));
+    // Der letzte abgehakte Termin ist inzwischen von Hand zugewiesen.
+    db.prepare('UPDATE calendar_events SET assigned_to = ? WHERE id = ?').run(HAND, ids.movedApple);
+    db.prepare('UPDATE event_assignments SET user_id = ? WHERE event_id = ?').run(HAND, ids.movedApple);
+    backfillBatch.size = 2;
+    const refused = await call('POST', route, { body: {
+      expected_count: counted.count, expected_token: counted.token, moves,
+    } });
+    assert.equal(refused.status, 409);
+    for (const key of ['moved', 'movedSeries', 'movedGoogle']) {
+      assert.deepEqual(assignmentOf(ids[key]), { assignedTo: MARIA.id, users: [MARIA.id] }, `${key}: nichts geschrieben`);
+    }
+    assert.deepEqual(assignmentOf(ids.movedRows), { assignedTo: null, users: [MARIA.id] });
+  } finally {
+    backfillBatch.size = saved;
+    cleanup();
+  }
+});
+
 test('default-assignee-backfill - die Bestaetigung bindet jeden abgehakten Termin (#1307, #1171)', async () => {
   const route = '/external-calendars/default-assignee-backfill';
   const { ids, cleanup } = seedMovedFixture();
@@ -4171,8 +4242,9 @@ test('Anhang: auch an einem Serientermin loest ihn nur, wer ihn sieht (#1358)', 
 
 // ── Das Speichern eines Termins oeffnet kein fremdes Dokument (#1358) ─────────
 // Der Anhang folgt Sichtbarkeit und Zuweisung des Termins. Weiter oeffnen darf
-// das nur, wer Dokumente schreiben darf UND das Dokument sieht; sonst wird nur
-// verengt. Und ein Split oder Abloesen kopiert den Anhang nur fuer so jemanden.
+// das nur, wer Dokumente schreiben darf UND das Dokument sieht; sonst bleibt es
+// unangetastet (#1443). Und ein Split oder Abloesen kopiert den Anhang nur fuer
+// so jemanden.
 test('Anhang: Bearbeiten durch eine Nicht-Sehende oeffnet das Dokument nicht wieder - Einzeltermin und Serie (#1358)', async () => {
   const dataUrl = `data:text/plain;base64,${Buffer.from('privat').toString('base64')}`;
   const docRow = (id) => ({ ...db.prepare('SELECT visibility FROM family_documents WHERE id = ?').get(id) });
@@ -4204,16 +4276,196 @@ test('Anhang: Bearbeiten durch eine Nicht-Sehende oeffnet das Dokument nicht wie
     assert.equal(widen.status, 200);
     assert.deepEqual({ ...docRow(docId), access: access(docId) }, { visibility: 'restricted', access: [TOM.id] },
       `${label}: Maria bekommt keinen Zugriff`);
-    // Verengen bleibt: wer herausfaellt, verliert den Zugriff.
+    // Auch verengen darf sie nicht: Toms Freigabe hat die Besitzerin gesetzt (#1443).
     const narrow = await call('PUT', `/${eventId}`, { actor: MARIA, body: { visibility: 'assignees', assigned_to: [MARIA.id] } });
     assert.equal(narrow.status, 200);
-    assert.deepEqual(access(docId), [], `${label}: TOM faellt heraus, niemand kommt dazu`);
+    assert.deepEqual(access(docId), [TOM.id], `${label}: TOM behaelt die Freigabe, niemand kommt dazu`);
 
     // Wer das Dokument sieht und schreiben darf, oeffnet es wie bisher.
     const owner = await call('PUT', `/${eventId}`, { actor: ADMIN, body: { visibility: 'all' } });
     assert.equal(owner.status, 200);
     assert.deepEqual(docRow(docId), { visibility: 'family' }, `${label}: die Erstellerin darf es oeffnen`);
   }
+});
+
+// ── Ein fremdes Speichern nimmt der Besitzerin keine Freigabe weg (#1443) ─────
+// #1358/#1432 liessen Nicht-Verwaltende das Anhang-Dokument nur noch verengen.
+// Auch das aenderte aber, wer ein fremdes Dokument sieht: jedes Speichern (auch
+// nur des Titels) loeschte die Freigaben, die die Besitzerin im Dokumente-Modul
+// gesetzt hatte, und ein privater Termin machte das Dokument privat. Wer das
+// Dokument nicht verwalten darf, laesst seine Rechte jetzt ganz stehen.
+test('Anhang: ein Speichern ohne Verwaltungsrecht laesst Sichtbarkeit und Freigaben des Dokuments stehen (#1443)', async () => {
+  const dataUrl = `data:text/plain;base64,${Buffer.from('freigabe').toString('base64')}`;
+  const state = (id) => ({
+    visibility: db.prepare('SELECT visibility FROM family_documents WHERE id = ?').get(id).visibility,
+    access: db.prepare('SELECT user_id FROM family_document_access WHERE document_id = ? ORDER BY user_id')
+      .all(id).map((r) => r.user_id),
+  });
+  const actors = [
+    ['ohne Dokumentenrecht', { ...MARIA, moduleAccess: { documents: 'none' } }],
+    ['Token nur calendar:write', { ...MARIA, authScopes: ['calendar:write'] }],
+    ['sieht das Dokument, verwaltet es nicht', MARIA],
+  ];
+  for (const recurrence_rule of [null, 'FREQ=DAILY;COUNT=3']) {
+    for (const [who, actor] of actors) {
+      const label = `${recurrence_rule ? 'Serie' : 'Einzeltermin'}, ${who}`;
+      const created = await call('POST', '/', { actor: ADMIN, body: {
+        title: 'Freigabe-Probe', start_datetime: '2044-01-01T09:00', recurrence_rule,
+        visibility: 'assignees', assigned_to: [MARIA.id],
+        attachment_data: dataUrl, attachment_name: 'f.txt',
+      } });
+      assert.equal(created.status, 201, `${label}: ${JSON.stringify(created.body)}`);
+      const eventId = created.body.data.id;
+      const docId = created.body.data.attachment_document_id;
+      assert.deepEqual(state(docId), { visibility: 'restricted', access: [MARIA.id] });
+      // Die Besitzerin gibt das Dokument im Dokumente-Modul zusaetzlich Tom frei,
+      // der nicht am Termin steht.
+      db.prepare('INSERT INTO family_document_access (document_id, user_id) VALUES (?, ?)').run(docId, TOM.id);
+      const owned = { visibility: 'restricted', access: [MARIA.id, TOM.id] };
+
+      const title = await call('PUT', `/${eventId}`, { actor, body: { title: 'Nur der Titel' } });
+      assert.equal(title.status, 200, `${label}: Titel speichern`);
+      assert.deepEqual(state(docId), owned, `${label}: ein Titel-Speichern nimmt Tom die Freigabe nicht`);
+
+      const assignees = await call('PUT', `/${eventId}`, { actor, body: { visibility: 'assignees', assigned_to: [MARIA.id] } });
+      assert.equal(assignees.status, 200, `${label}: Zugewiesene speichern`);
+      assert.deepEqual(state(docId), owned, `${label}: Zugewiesene speichern nimmt Tom die Freigabe nicht`);
+
+      const hidden = await call('PUT', `/${eventId}`, { actor, body: { visibility: 'private' } });
+      assert.equal(hidden.status, 200, `${label}: privat stellen`);
+      assert.deepEqual(state(docId), owned, `${label}: ein privater Termin macht das fremde Dokument nicht privat`);
+
+      // Ein Familien-Dokument an einem Termin fuer Zugewiesene bleibt family.
+      db.prepare("UPDATE calendar_events SET visibility = 'all' WHERE id = ?").run(eventId);
+      db.prepare("UPDATE family_documents SET visibility = 'family' WHERE id = ?").run(docId);
+      db.prepare('DELETE FROM family_document_access WHERE document_id = ?').run(docId);
+      const narrow = await call('PUT', `/${eventId}`, { actor, body: { visibility: 'assignees', assigned_to: [MARIA.id] } });
+      assert.equal(narrow.status, 200, `${label}: auf Zugewiesene stellen`);
+      assert.deepEqual(state(docId), { visibility: 'family', access: [] },
+        `${label}: das Familien-Dokument bleibt, wie die Besitzerin es gesetzt hat`);
+
+      // Die Besitzerin selbst gleicht ab, sobald sich die Zugewiesenen aendern.
+      const owner = await call('PUT', `/${eventId}`, { actor: ADMIN, body: { assigned_to: [MARIA.id, TOM.id] } });
+      assert.equal(owner.status, 200);
+      assert.deepEqual(state(docId), { visibility: 'restricted', access: [MARIA.id, TOM.id] },
+        `${label}: die Besitzerin verengt ihr eigenes Dokument auf die Zugewiesenen`);
+    }
+  }
+});
+
+test('Anhang: die Besitzerin gleicht nur ab, wenn sich Sichtbarkeit oder Zugewiesene aendern (#1443)', async () => {
+  // Auch ein Speichern der Besitzerin lief bisher jedes Mal ueber das Dokument:
+  // ein reines Titel- oder Zeit-Speichern loeschte die Freigaben, die sie im
+  // Dokumente-Modul an Personen ausserhalb des Termins vergeben hatte.
+  const dataUrl = `data:text/plain;base64,${Buffer.from('besitz').toString('base64')}`;
+  const state = (id) => ({
+    visibility: db.prepare('SELECT visibility FROM family_documents WHERE id = ?').get(id).visibility,
+    access: db.prepare('SELECT user_id FROM family_document_access WHERE document_id = ? ORDER BY user_id')
+      .all(id).map((r) => r.user_id),
+  });
+  const shareWithTom = (id) => db.prepare('INSERT OR IGNORE INTO family_document_access (document_id, user_id) VALUES (?, ?)')
+    .run(id, TOM.id);
+  for (const recurrence_rule of [null, 'FREQ=DAILY;COUNT=3']) {
+    const label = recurrence_rule ? 'Serie' : 'Einzeltermin';
+    const created = await call('POST', '/', { actor: ADMIN, body: {
+      title: 'Besitz-Probe', start_datetime: '2046-01-01T09:00', recurrence_rule,
+      visibility: 'assignees', assigned_to: [MARIA.id],
+      attachment_data: dataUrl, attachment_name: 'b.txt',
+    } });
+    assert.equal(created.status, 201);
+    const eventId = created.body.data.id;
+    const docId = created.body.data.attachment_document_id;
+    shareWithTom(docId);
+    const owned = { visibility: 'restricted', access: [MARIA.id, TOM.id] };
+
+    for (const body of [
+      { title: 'Nur der Titel' },
+      { start_datetime: '2046-01-01T10:00' },
+      { title: 'Alles gleich', visibility: 'assignees', assigned_to: [MARIA.id] },
+    ]) {
+      const save = await call('PUT', `/${eventId}`, { actor: ADMIN, body });
+      assert.equal(save.status, 200, `${label} ${JSON.stringify(body)}: ${JSON.stringify(save.body)}`);
+      assert.deepEqual(state(docId), owned, `${label} ${JSON.stringify(body)}: Toms Freigabe bleibt`);
+    }
+
+    // Aendert sich, wer den Termin sieht, gleicht sie weiter ab.
+    const assignees = await call('PUT', `/${eventId}`, { actor: ADMIN, body: { assigned_to: [MARIA.id, ADMIN.id] } });
+    assert.equal(assignees.status, 200);
+    assert.deepEqual(state(docId), { visibility: 'restricted', access: [ADMIN.id, MARIA.id] },
+      `${label}: neue Zugewiesene - das Dokument folgt dem Termin`);
+    const all = await call('PUT', `/${eventId}`, { actor: ADMIN, body: { visibility: 'all' } });
+    assert.equal(all.status, 200);
+    assert.deepEqual(state(docId), { visibility: 'family', access: [] }, `${label}: fuer alle - das Dokument auch`);
+    const hidden = await call('PUT', `/${eventId}`, { actor: ADMIN, body: { visibility: 'private' } });
+    assert.equal(hidden.status, 200);
+    assert.deepEqual(state(docId), { visibility: 'private', access: [] }, `${label}: privat - das Dokument auch`);
+  }
+
+  // Dieselbe Regel an einer Einzelausnahme mit eigenem Anhang.
+  const series = await call('POST', '/', { actor: ADMIN, body: {
+    title: 'Besitz-Ausnahme', start_datetime: '2046-02-01T09:00:00', recurrence_rule: 'FREQ=DAILY;COUNT=3',
+    visibility: 'assignees', assigned_to: [MARIA.id],
+  } });
+  assert.equal(series.status, 201);
+  const route = `/${series.body.data.id}/occurrences/2046-02-02`;
+  const upload = await call('PUT', route, { actor: ADMIN, body: { attachment_data: dataUrl, attachment_name: 'a.txt' } });
+  assert.equal(upload.status, 200, JSON.stringify(upload.body));
+  const childId = upload.body.data.id;
+  const docId = db.prepare('SELECT attachment_document_id FROM calendar_events WHERE id = ?').get(childId).attachment_document_id;
+  assert.deepEqual(state(docId), { visibility: 'restricted', access: [MARIA.id] }, 'Einzelausnahme: der neue Anhang folgt ihr');
+  shareWithTom(docId);
+  const title = await call('PUT', route, { actor: ADMIN, body: { title: 'Nur der Titel' } });
+  assert.equal(title.status, 200, JSON.stringify(title.body));
+  assert.deepEqual(state(docId), { visibility: 'restricted', access: [MARIA.id, TOM.id] },
+    'Einzelausnahme: ein Titel-Speichern laesst Toms Freigabe stehen');
+  const hidden = await call('PUT', route, { actor: ADMIN, body: { visibility: 'private' } });
+  assert.equal(hidden.status, 200, JSON.stringify(hidden.body));
+  assert.deepEqual(state(docId), { visibility: 'private', access: [] }, 'Einzelausnahme: privat - das Dokument auch');
+});
+
+test('Anhang: ein neu hochgeladener Anhang folgt dem Termin, auch wenn er der Terminerstellerin gehoert (#1443)', async () => {
+  // Ein neues Anhang-Dokument entsteht als `family` und bekommt die Rechte des
+  // Termins erst beim Abgleich. Laedt eine Zugewiesene es an einen fremden
+  // Termin, gehoert es der Terminerstellerin - der Abgleich muss trotzdem greifen,
+  // sonst saehe die ganze Familie einen Anhang eines Termins fuer Zugewiesene.
+  const created = await call('POST', '/', { actor: ADMIN, body: {
+    title: 'Upload-Probe', start_datetime: '2045-01-01T09:00',
+    visibility: 'assignees', assigned_to: [MARIA.id],
+  } });
+  assert.equal(created.status, 201);
+  const upload = await call('PUT', `/${created.body.data.id}`, { actor: MARIA, body: {
+    attachment_data: `data:text/plain;base64,${Buffer.from('neu').toString('base64')}`, attachment_name: 'neu.txt',
+  } });
+  assert.equal(upload.status, 200, JSON.stringify(upload.body));
+  const docId = db.prepare('SELECT attachment_document_id FROM calendar_events WHERE id = ?')
+    .get(created.body.data.id).attachment_document_id;
+  assert.ok(docId, 'der Anhang ist gespeichert');
+  assert.equal(db.prepare('SELECT created_by FROM family_documents WHERE id = ?').get(docId).created_by, ADMIN.id,
+    'er gehoert der Terminerstellerin');
+  assert.deepEqual({
+    visibility: db.prepare('SELECT visibility FROM family_documents WHERE id = ?').get(docId).visibility,
+    access: db.prepare('SELECT user_id FROM family_document_access WHERE document_id = ? ORDER BY user_id')
+      .all(docId).map((r) => r.user_id),
+  }, { visibility: 'restricted', access: [MARIA.id] }, 'und ist nur fuer die Zugewiesenen sichtbar');
+
+  // Derselbe Weg ueber eine Einzelausnahme einer fremden Serie.
+  const series = await call('POST', '/', { actor: ADMIN, body: {
+    title: 'Upload-Serie', start_datetime: '2045-02-01T09:00:00', recurrence_rule: 'FREQ=DAILY;COUNT=3',
+    visibility: 'assignees', assigned_to: [MARIA.id],
+  } });
+  assert.equal(series.status, 201);
+  const occurrence = await call('PUT', `/${series.body.data.id}/occurrences/2045-02-02`, { actor: MARIA, body: {
+    attachment_data: `data:text/plain;base64,${Buffer.from('neu').toString('base64')}`, attachment_name: 'neu.txt',
+  } });
+  assert.equal(occurrence.status, 200, JSON.stringify(occurrence.body));
+  const occurrenceDoc = db.prepare('SELECT attachment_document_id FROM calendar_events WHERE id = ?')
+    .get(occurrence.body.data.id).attachment_document_id;
+  assert.ok(occurrenceDoc && occurrenceDoc !== docId, 'die Ausnahme hat ihren eigenen Anhang');
+  assert.deepEqual({
+    visibility: db.prepare('SELECT visibility FROM family_documents WHERE id = ?').get(occurrenceDoc).visibility,
+    access: db.prepare('SELECT user_id FROM family_document_access WHERE document_id = ? ORDER BY user_id')
+      .all(occurrenceDoc).map((r) => r.user_id),
+  }, { visibility: 'restricted', access: [MARIA.id] }, 'Einzelausnahme: nur fuer die Zugewiesenen sichtbar');
 });
 
 test('Anhang: Split und Abloesen kopieren kein Dokument ohne Sicht oder Schreibrecht (#1358)', async () => {
@@ -4302,6 +4554,9 @@ test('Anhang: weiter oeffnen darf nur, wer das Dokument verwalten darf - Sehen r
   assert.equal(widen.status, 200);
   assert.equal(visibility(), 'restricted', 'Maria macht das Dokument nicht family');
 
+  // Abgeglichen wird nur, wenn das Speichern die Sichtbarkeit aendert (#1443):
+  // der Termin steht nach Marias Speichern schon auf `all`.
+  db.prepare("UPDATE calendar_events SET visibility = 'assignees' WHERE id = ?").run(eventId);
   const owner = await call('PUT', `/${eventId}`, { actor: ADMIN, body: { visibility: 'all' } });
   assert.equal(owner.status, 200);
   assert.equal(visibility(), 'family', 'die Erstellerin darf es');
@@ -4358,8 +4613,8 @@ test('Anhang: die Kopie gehoert der Besitzerin des Quelldokuments, nicht der Ter
 });
 
 test('Anhang: teilt eine Nicht-Besitzerin die Serie und weist neu zu, meldet der Nachfolger den Anhang als gesperrt (#1358)', async () => {
-  // Folge von "Nicht-Besitzer verengen nur": die Kopie gehoert der Besitzerin
-  // der Quelle, ihre Freigaben werden auf die neuen Zugewiesenen verengt. Wer
+  // Die Kopie gehoert der Besitzerin der Quelle und traegt deren Freigaben;
+  // eine Nicht-Besitzerin gleicht sie nicht auf die neuen Zugewiesenen ab (#1443). Wer
   // Dokumente lesen darf, bekommt `attachment_locked` - der Dialog zeigt dann
   // "Anhang vorhanden (privat)"; freigeben kann die Besitzerin oder ein Admin.
   const created = await call('POST', '/', { actor: ADMIN, body: {
@@ -4606,6 +4861,62 @@ test('Farb-Heilung: eine Bearbeitung ohne Farbwechsel laesst den Schnappschuss s
     assert.equal((await call('PUT', `/${id}`, { body: { title: 'Nur Titel neu', color: '#4a90e2' } })).status, 200);
     assert.deepEqual(JSON.parse(db.prepare("SELECT value FROM sync_config WHERE key = 'caldav_legacy_color_heal_snapshot_71'").get().value),
       { [id]: '#4a90e2' });
+  } finally {
+    db.prepare('DELETE FROM calendar_events WHERE id = ?').run(id);
+    db.prepare("DELETE FROM sync_config WHERE key LIKE 'caldav_legacy_color_heal_%'").run();
+  }
+});
+
+test('Farb-Heilung: die Vormerkliste nimmt nur Termine von vor dem Fix auf (#1442)', async () => {
+  // Ein Schnappschuss nimmt ohnehin nur Zeilen von vor Migration 166 auf. Eine
+  // juengere Zeile auf der Vormerkliste liesse sie nur wachsen, und jede
+  // Umfaerbung laese und schriebe die ganze Liste neu.
+  const cutoff = db.prepare('SELECT applied_at FROM schema_migrations WHERE version = 166').get().applied_at;
+  const fresh = insertEvent({ title: 'Neu', external_source: 'caldav', color: '#4A90E2', user_modified: 1 });
+  const old = insertEvent({ title: 'Alt', external_source: 'caldav', color: '#4A90E2', user_modified: 1 });
+  db.prepare("UPDATE calendar_events SET created_at = datetime(?, '+1 day') WHERE id = ?").run(cutoff, fresh);
+  db.prepare("UPDATE calendar_events SET created_at = '2020-01-01 00:00:00' WHERE id = ?").run(old);
+  const chosen = () => db.prepare("SELECT value FROM sync_config WHERE key = 'caldav_legacy_color_heal_chosen'").get()?.value;
+  try {
+    db.prepare("DELETE FROM sync_config WHERE key LIKE 'caldav_legacy_color_heal_%'").run();
+    assert.equal((await call('PUT', `/${fresh}`, { body: { color: '#3CA368' } })).status, 200);
+    assert.equal(chosen(), undefined, 'eine Zeile nach dem Fix kommt nicht auf die Liste');
+
+    assert.equal((await call('PUT', `/${old}`, { body: { color: '#3CA368' } })).status, 200);
+    assert.deepEqual(JSON.parse(chosen()), [old], 'eine Altzeile schon');
+
+    // Stand von vor #1442: die Liste traegt auch juengere Zeilen. Die naechste
+    // Wahl an einer Altzeile raeumt sie mit ab.
+    db.prepare("UPDATE sync_config SET value = ? WHERE key = 'caldav_legacy_color_heal_chosen'")
+      .run(JSON.stringify([old, fresh]));
+    assert.equal((await call('PUT', `/${old}`, { body: { color: '#E24A4A' } })).status, 200);
+    assert.deepEqual(JSON.parse(chosen()), [old]);
+  } finally {
+    db.prepare('DELETE FROM calendar_events WHERE id IN (?, ?)').run(fresh, old);
+    db.prepare("DELETE FROM sync_config WHERE key LIKE 'caldav_legacy_color_heal_%'").run();
+  }
+});
+
+test('Farb-Heilung: der Schnappschuss eines Kontos faellt mit dem Ende seiner Frist, der Fristbeginn bleibt (#1442)', async () => {
+  const id = insertEvent({ title: 'Frist vorbei', external_source: 'caldav', color: '#4A90E2', user_modified: 1 });
+  const ended = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
+  const running = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
+  const value = (key) => db.prepare('SELECT value FROM sync_config WHERE key = ?').get(key)?.value;
+  db.prepare(`INSERT INTO sync_config (key, value) VALUES
+      ('caldav_legacy_color_heal_since_72', ?), ('caldav_legacy_color_heal_snapshot_72', ?),
+      ('caldav_legacy_color_heal_since_73', 'never'), ('caldav_legacy_color_heal_snapshot_73', ?),
+      ('caldav_legacy_color_heal_since_74', ?), ('caldav_legacy_color_heal_snapshot_74', ?)`)
+    .run(ended, JSON.stringify({ [id]: '#4a90e2', 1: '#4a90e2' }), JSON.stringify({ 1: '#4a90e2' }),
+      running, JSON.stringify({ [id]: '#4a90e2', 1: '#4a90e2' }));
+  try {
+    assert.equal((await call('PUT', `/${id}`, { body: { color: '#3CA368' } })).status, 200);
+    assert.equal(value('caldav_legacy_color_heal_snapshot_72'), undefined, 'Frist abgelaufen');
+    assert.equal(value('caldav_legacy_color_heal_snapshot_73'), undefined, 'Heilung aus');
+    assert.deepEqual(JSON.parse(value('caldav_legacy_color_heal_snapshot_74')), { 1: '#4a90e2' }, 'laufende Frist');
+    // Ohne den Fristbeginn finge die Frist mit dem naechsten Lauf neu an.
+    assert.equal(value('caldav_legacy_color_heal_since_72'), ended);
+    assert.equal(value('caldav_legacy_color_heal_since_73'), 'never');
+    assert.equal(value('caldav_legacy_color_heal_since_74'), running);
   } finally {
     db.prepare('DELETE FROM calendar_events WHERE id = ?').run(id);
     db.prepare("DELETE FROM sync_config WHERE key LIKE 'caldav_legacy_color_heal_%'").run();
