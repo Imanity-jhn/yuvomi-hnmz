@@ -731,6 +731,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Counts read correctly in Czech, Polish, Russian, Ukrainian and Arabic** (#1473). These
+  languages need more than a singular and a plural: Czech, Polish, Russian and Ukrainian have their
+  own form for 2 to 4 (and 22 to 24), Arabic has a dual for 2 and a separate form from 11 to 99.
+  For about 110 counters across the overview, tasks, settings, documents and other modules only the
+  singular and the form for 5 and more existed, so "za 2 dní" appeared instead of "za 2 dny" and
+  "خلال 2 أيام" instead of "خلال يومين". Every counter now carries every form its language uses, only
+  in that language, and a test fails for any new counter that misses one.
+
+- **Counts no longer show "1" for 21, 0 or 5 in some languages** (#1549). In Russian and Ukrainian
+  the singular form also serves 21, 31, 101 and so on, in French, Portuguese, Hindi and Persian it
+  also serves 0, and in Filipino most numbers. About 90 of these forms had a fixed "1" or a word
+  like "every month" instead of the number, so a day with 21 events read "1 событие" in Russian and
+  a day with 5 events read "1 kaganapan" in Filipino. They now show the actual number; a fixed
+  wording stays only where the screen can never show another number, and a test checks that.
+- **"Change all future occurrences" no longer ends a recurring payment** (#1546). Editing a later
+  month of a series and choosing "Change all future occurrences" sent the recurrence settings of
+  that single month along, and a generated month carries none: the series was switched off, every
+  occurrence from today on was deleted, and a weekly, yearly or virtual series was reset to monthly,
+  while the message said the change was saved. The dialog now sends only what you changed, and the
+  recurrence of a series is edited on its first entry; a generated month no longer shows the
+  "Recurring" switch. Changing the amount of a virtual series from one of its months now counts as
+  that month's share. **Series ended this way do not come back by themselves:** open the first entry
+  of the series (the search finds it by its title), switch "Recurring" on again and choose its
+  rhythm again. The missing months reappear when you open them; receipts and one-off changes that
+  were attached to the deleted months are gone. For API users: `PUT /api/v1/budget/:id/series` now
+  answers `is_recurring: false` with 400 instead of ending the series; end a series with
+  `PUT /api/v1/budget/:id` and `is_recurring: false` on its first entry, or delete it with
+  `DELETE /api/v1/budget/:id/series`.
+
+- **The API documentation page answers "restore in progress" during a restore** (#1531). Outside
+  production, `/docs` checks the API token or session, and while a restore had the database closed
+  a request with a token ended in an internal error instead of the "restore in progress" answer
+  every other page that needs the database gives. The same happened to `/openapi.json/` with a
+  trailing slash, which reaches the same route. A new test now reads every top-level route from
+  the running app and fails when one is neither covered by the restore gate nor listed with a reason.
+
 - **The family card no longer misses an evening appointment on a busy day** (#1449). The card took
   its appointments from the calendar tile, which stops at five coming ones and follows its "Only
   mine" option: a child's evening appointment could be cut off, and with "Only mine" every other
@@ -750,6 +786,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in Berlin a visit on the 1st at 00:30 counted in the previous month, west of UTC a visit on the
   evening of the last day in the next one. The overview now uses the same month boundaries as the
   Housekeeping module, so both show the same number.
+
+- **Editing a housekeeping visit keeps its day** (#1540). The edit dialog showed the UTC day of
+  the visit: in Berlin a visit on the 1st at 00:30 appeared on the day before, and saving it, even
+  just to correct the amount, moved its calendar entry and payment task there. Correcting the date
+  moved the visit itself a day later. The dialog now shows the household's day, and a new day
+  keeps the visit's time on the household's clock.
+
+- **Housekeeping check-in and "today" follow the household's clock** (#1556). The page took the
+  day and time zone from the device: on a phone set to another time zone, a check-in at 00:30 in
+  Berlin put the calendar entry and payment task on the day before, and the staff card showed
+  yesterday evening's visit as today's. Even in the household's zone, the day ended an hour early
+  or late on the days the clocks change. With a household time zone set, the server now decides the
+  day in that zone, also for a page still open from before the update. For API users:
+  `/api/v1/housekeeping/workers`, `/worker`, `/dashboard` and the check-in take an optional
+  `timezone`; `local_date` and `timezone_offset_minutes` count only without a household time zone.
 
 - **The wall display stays dark after a reload at night** (#1453). Reloading the wall between 22:00
   and 06:00 with the theme set to Automatic or Light left the dimmed night surface in the light
@@ -772,6 +823,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   zone, a reminder "1 hour before" was saved hours off, and opening it again showed a different
   lead or "after the start". Both dialogs now read the time in the household zone, including on
   the days the clocks change, the same way the server does.
+
+- **"Due today until" shows the time you entered on a device in another time zone** (#1534).
+  The today sheet on the overview read a task's due time in the zone of the device and then
+  converted it into the household's, so with a household time zone set and a device elsewhere a
+  task due at 18:00 could read "until 00:00". It now shows the due time as entered, like the task
+  list does.
+
+- **Medication reminders come at the household's time** (#1539). The scheduler read the day and
+  the time on the server's clock. With a household time zone set and the server running in
+  another zone, such as UTC in a container, a dose planned for 08:00 in Berlin was due at 10:00,
+  and near midnight a dose could land on the wrong day. Doses are now due on the household's day
+  and clock, also on the days the clocks change. The intake log in Health also shows the times
+  as recorded on a device in another time zone.
 
 - **The note category hints no longer suggest that notes are private** (#1514). A personal
   category is only visible to you, but a note filed under it is still visible to every household
@@ -798,6 +862,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the new one from the guide or from Settings, Administration, Backup and restore. A restore on
   Node running natively on Windows no longer stops with `EPERM` while writing the restored copy to
   disk; Docker installs were not affected. (#1441)
+
+- **A restore waits for work that continues after an answer.** A few actions keep working after
+  they have answered: the push to someone mentioned in a task comment, the password reset mail,
+  and the immediate push of a changed or deleted appointment to Google, CalDAV or iCloud. A restore
+  did not see this work, so a mention push or a second reset request could write into the restored
+  database afterwards. The restore now waits for it, and while a restore runs this work does not
+  start. The automatic calendar sync no longer stops the server when its timer fires in the moment
+  a restore has the database closed. (#1532)
 - **Confirming a long list of moved events no longer holds up the server** (#1440). When an admin
   confirmed a page of moved events under Settings > Sync, every picked entry was checked with a
   query prepared anew for it, and a full page of up to 5,000 ran without a pause, so other requests
@@ -1162,6 +1234,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first (409 `FOLDER_CONTENT_CHANGED`) and answers 403 `FOLDER_DOCUMENTS_NOT_MANAGEABLE` only
   for a visible document the caller may not manage; `deleted_documents` and `failed_documents`
   cover only visible documents.
+- **The WebDAV backup target moved to another server or username needs its password again.**
+  The connection test in Settings -> Household -> Backup and restore, and the API behind it, took
+  a new server address with the password field left as it was and tested it with the stored
+  password, so the password went to that server; saving the change kept the stored password for
+  the next backup. Both are admin-only. They now follow the rule of CalDAV and CardDAV accounts:
+  the stored password is kept only while the server (scheme, host and port) and the username stay
+  the same. Otherwise the test and the save are refused with `400` and the error code
+  `password_required`, no connection is made and nothing is saved, and the form asks for the
+  password again. A different path on the same server keeps working without it. The mask `****`
+  the API shows in place of the password now counts as "unchanged" when it is sent back; until
+  then saving it through the API replaced the stored password with the mask itself.
+
+- **A CalDAV account moved to another server or username needs its password again.** Editing an
+  account through the API with a new server address but without a password tested the connection
+  with the stored password, so the household's CalDAV credentials went to that server before
+  anything was saved. The route is admin-only. It now follows the rule CardDAV accounts got in
+  2.69.1: an empty password keeps the stored one only while the server (scheme, host and port) and
+  the username stay the same; otherwise the change is refused with `400` and the error code
+  `password_required`, no connection is made and nothing is saved. A different path on the same
+  server keeps working without the password.
 
 - **Documents and images are no longer kept in the browser's cache.** A document opened in the
   viewer stayed there for five minutes, and document thumbnails, Paperless thumbnails, recipe
