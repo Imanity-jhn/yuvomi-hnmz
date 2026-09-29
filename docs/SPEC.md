@@ -5114,6 +5114,7 @@ On a fresh install with no users, the first admin can be created directly in the
 - The router reads this flag at boot. When `setup_required` is true and nobody is signed in, every route is redirected to `/setup`; once setup is complete, `/setup` is no longer reachable and redirects to `/login`.
 - The `/setup` page reuses the login layout and collects username, display name, password, and a password confirmation (client validation mirrors the server rules). On submit it calls `POST /api/v1/auth/setup`, then signs in automatically and lands on the dashboard.
 - `POST /api/v1/auth/setup` creates the first admin only while no user exists; the user-count re-check and the `INSERT` run inside a single transaction, so concurrent first-run requests cannot create two admins. Returns `403` once any user exists.
+- `POST /api/v1/auth/setup` also accepts two optional fields. `language` (a supported app locale such as `de` or `fil`) sets the household data language unless the automatic choice already yields it, so an English setup leaves the data language on automatic. `timezone` (an IANA zone, checked like the preference) sets the household time zone. Region, currency and date format are not derived from the language. Invalid values return `400`; omitted, `null` or empty values keep the previous behaviour, and unknown body fields are ignored. The `/setup` page sends the language it is currently shown in.
 - **CLI fallback:** `node setup.js` still creates the admin from the container console for headless deployments and recovery; both paths share the same database.
 
 ### Login (`/login`)
@@ -5376,7 +5377,7 @@ The full contract for every optional block lives in [`MODULES.md`](../MODULES.md
 
 ## API Documentation
 
-An OpenAPI 3.0 specification is served at `/api/v1/openapi.json` and `/openapi.json` to **signed-in admins** (both endpoints require an admin session or API token). Append `?download=1` to download as a file. The spec covers all authenticated endpoints and can be imported into any OpenAPI-compatible client (Insomnia, Postman, etc.). The interactive `/docs` page follows the same admin gate and is hidden entirely in production unless `ENABLE_API_DOCS=true`.
+An OpenAPI 3.1 specification is served at `/api/v1/openapi.json` and `/openapi.json` to **signed-in admins** (both endpoints require an admin session or API token). Append `?download=1` to download as a file. The spec covers all authenticated endpoints and can be imported into any OpenAPI-compatible client (Insomnia, Postman, etc.). The interactive `/docs` page follows the same admin gate and is hidden entirely in production unless `ENABLE_API_DOCS=true`.
 
 **"Covers all endpoints" is now a checked claim (v2.52.0).** It had not been one: 40 of 297 routes
 were missing, among them four entire modules that had never had a line of specification — quick

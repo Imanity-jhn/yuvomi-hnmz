@@ -49,23 +49,19 @@ independent, so you use what fits and switch off what doesn't.
 | Instead of juggling… | Yuvomi gives you |
 |---|---|
 | a to-do &amp; task app | **Tasks** - Kanban, deadlines, recurring, multi-assignment |
-| a shared calendar subscription | **Calendar** - sync, subscriptions, per-event visibility |
-| a cost-splitting app | **Shared expenses** - shared costs with debt simplification |
-| a budgeting app | **Budget** - income, expenses, accounts, savings goals |
+| a family calendar app | **Calendar** - sync, subscriptions, per-event visibility |
 | a meal planner &amp; recipe app | **Meals &amp; Recipes** - weekly planner with shopping export |
 | a grocery-list app | **Shopping** - shared, aisle-organized lists |
-| a pantry &amp; expiry tracker | **Pantry** - stock, storage location, best-before dates |
-| a document manager | **Documents** - tagged, searchable family files |
-| a home-inventory app | **Inventory** - owned belongings, purchase price, warranty, linked receipts |
-| a notes app &amp; contacts sync | **Notes &amp; Contacts** - Markdown notes, CardDAV sync |
+| a budgeting &amp; cost-splitting app | **Budget** - income, expenses, accounts, savings goals, shared costs with debt simplification |
+| a document manager | **Documents** - searchable family files in folders |
 
 ## The modules talk to each other
 
 This is the part a folder full of separate apps cannot do:
 
 - **The week's meal plan writes the shopping list.** Plan Thursday, and the ingredients are on the list before anyone walks to the shop.
-- **The last jar out of the pantry is already on the list.** Tick items off after a shop and they book back into the pantry with their quantity.
-- **A ticked-off chore pays out.** Points on a task land on the assigned member's account, and the reward catalog spends them.
+- **The last jar out of the pantry goes on the list with one tap.** Tick items off after a shop and they book back into the pantry with their quantity.
+- **A ticked-off chore pays out.** Points on a task go to whoever did it - the assignee, or the person picked when it is ticked off - and the reward catalog spends them.
 - **A filed receipt hangs on the booking.** Upload it once and it belongs to the transaction, the shared expense and the inventory item at the same time.
 
 ## The twenty modules
@@ -80,7 +76,7 @@ Turn on what your household needs; the rest stays out of the way.
 | **Recipes** | Create and scale recipes, fill meal slots, or mirror a Mealie or Tandoor instance read-only. |
 | **Pantry** | Amounts, storage locations and best-before dates, with a reminder before something expires. |
 | **Calendar** | Two-way Google and CalDAV sync, Outlook push, subscriptions, holidays and per-event visibility. |
-| **Documents** | Tagged, searchable family files in folders, stored locally, on WebDAV or in Google Drive. |
+| **Documents** | Searchable family files in folders, stored locally, on WebDAV or in Google Drive. |
 | **Inventory** | What you own, with purchase price, warranty, linked receipts, a service log and recurring deadline reminders. Off by default. |
 | **Budget** | Income, expenses, accounts, loans, subscriptions and shared expenses with debt simplification. |
 | **Housekeeping** | Household staff: schedules, check-in/out, billing, chores and supply requests. |
@@ -92,7 +88,7 @@ Turn on what your household needs; the rest stays out of the way.
 | **Birthdays** | Birthdays and optional name days, with calendar entries, ages and reminders. |
 | **Family** | Member profiles with roles, and invite links where new members pick their own password. |
 | **Reminders** | For tasks, events, warranties, best-before dates and pickups - in-app, push, Gotify, ntfy, webhook or email. |
-| **API Tokens** | Bearer tokens with an OpenAPI 3.0 spec and a built-in MCP endpoint for AI agents. |
+| **API Tokens** | Bearer tokens with an OpenAPI 3.1 spec and a built-in MCP endpoint for AI agents. |
 | **Backup** | Manual and scheduled backups with pre-restore rollback and optional cloud upload. |
 
 Two more things you only get on your own server: **wall mode** turns the kitchen tablet into a
