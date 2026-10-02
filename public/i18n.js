@@ -10,8 +10,16 @@
 // Im Browser loest './utils/timezone.js' von '/i18n.js' aus auf dasselbe auf.
 import { zonedFields } from './utils/timezone.js';
 
-const SUPPORTED_LOCALES = ['de', 'en', 'es', 'fr', 'it', 'sv', 'el', 'ru', 'tr', 'zh', 'ja', 'ar', 'hi', 'pt', 'uk', 'pl', 'nl', 'cs', 'vi', 'hu', 'ko', 'id', 'fa', 'fil'];
+const SUPPORTED_LOCALES = ['de', 'en', 'es', 'fr', 'it', 'sv', 'el', 'ru', 'tr', 'zh', 'ja', 'ar', 'hi', 'pt-BR', 'pt', 'uk', 'pl', 'nl', 'cs', 'vi', 'hu', 'ko', 'id', 'fa', 'fil', 'nb'];
 const RTL_LOCALES = new Set(['ar', 'fa']);
+// Form eines Regions-Tags: Sprache, optional Schrift, dann die Region -
+// `de-DE`, `fil-PH`, `zh-Hant-TW`. Eigene Konstante und kein Import aus
+// server/: die Schichtgrenze aus test/test-layer-boundary.js laesst keinen
+// Modulweg zwischen public/ und server/ zu. Das Gegenstueck heisst dort
+// `REGION_RE` (server/utils/i18n.js), und test:region-presets haelt beide auf
+// derselben Form - eine Region, die nur eine der beiden Seiten kennt, wuerde
+// entweder beim Speichern abgewiesen oder gespeichert und nie gelesen.
+export const REGION_TAG = /^[a-z]{2,3}(?:-[A-Z][a-z]{3})?-[A-Z]{2}$/;
 const DEFAULT_LOCALE = 'de';
 const STORAGE_KEY = 'yuvomi-locale';
 const DATE_FORMAT_KEY = 'yuvomi-date-format';
@@ -37,17 +45,70 @@ function applyDocumentLocale(locale) {
   document.documentElement.dir = RTL_LOCALES.has(locale) ? 'rtl' : 'ltr';
 }
 
-/** Resolve locale: manual override > navigator.language > English > default */
+// Regionen, die eine Schrift implizieren. Ein Browser meldet `zh-TW`, nie
+// `zh-Hant-TW`: ohne diese Zuordnung fände ein taiwanisches System eine
+// traditionelle Locale niemals von selbst, sie wäre nur über den manuellen
+// Wähler erreichbar. `CN` und `SG` stehen bewusst NICHT hier - unser `zh` ist
+// Vereinfacht, und genau darauf soll `zh-CN` fallen.
+const REGION_SCRIPT = { TW: 'Hant', HK: 'Hant', MO: 'Hant' };
+
+/**
+ * Kanonische BCP-47-Schreibweise: Sprache klein, Schrift (vier Zeichen)
+ * Titlecase, Region (zwei Zeichen) groß. Ein Browser darf `ZH-hant-tw` melden,
+ * verglichen wird aber gegen Locale-Codes in kanonischer Form - ein Vergleich
+ * über zwei Schreibweisen findet nie etwas.
+ */
+function canonicalTag(tag) {
+  return String(tag).split('-').map((teil, i) => {
+    if (i === 0) return teil.toLowerCase();
+    if (teil.length === 4) return teil[0].toUpperCase() + teil.slice(1).toLowerCase();
+    if (teil.length === 2) return teil.toUpperCase();
+    return teil.toLowerCase();
+  }).join('-');
+}
+
+/**
+ * Wählt aus Browser-Tags die SPEZIFISCHSTE unterstützte Locale: exakter Treffer,
+ * sonst die von der Region implizierte Schrift, sonst der Tag ohne seinen
+ * letzten Subtag - `zh-Hant-TW` > `zh-Hant` > `zh`.
+ *
+ * Reine Funktion mit der Liste als Argument, weil sie sonst nicht messbar wäre:
+ * der Bestand trägt 24 reine Sprachcodes, über die die alte und die neue
+ * Auflösung dasselbe liefern. Erst eine Liste, die es hier noch nicht gibt,
+ * beantwortet die Frage - `zh-TW` muss auf `zh-Hant` fallen, sobald diese Locale
+ * existiert (#1320), und auf `zh`, solange sie es nicht tut.
+ */
+export function pickLocale(tags, supported) {
+  for (const roh of tags || []) {
+    if (!roh) continue;
+    const teile = canonicalTag(roh).split('-');
+    // Eine Schrift, die im Tag STEHT, schlaegt jede, die eine Region nur nahelegt.
+    // `zh-Hans-HK` meint Vereinfacht in Hongkong, und macOS, iOS und Android melden
+    // genau das. Ohne diese Sperre antwortet die Regionszuordnung darauf mit
+    // Traditionell - also mit dem Gegenteil dessen, was ausdruecklich dasteht.
+    const traegtSchrift = teile.slice(1).some((teil) => teil.length === 4);
+    while (teile.length) {
+      const tag = teile.join('-');
+      if (supported.includes(tag)) return tag;
+      if (!traegtSchrift) {
+        const letzter = teile[teile.length - 1];
+        // hasOwnProperty.call statt Object.hasOwn: das kennt Chrome erst ab 93, und
+        // diese Zeile laeuft beim Start vor dem ersten Bild (#1276).
+        const schrift = Object.prototype.hasOwnProperty.call(REGION_SCRIPT, letzter) ? REGION_SCRIPT[letzter] : null;
+        if (schrift && supported.includes(`${teile[0]}-${schrift}`)) return `${teile[0]}-${schrift}`;
+      }
+      teile.pop();
+    }
+  }
+  return 'en';
+}
+
+/** Resolve locale: manual override > navigator.languages > English */
 function resolveLocale() {
   const stored = localStorage.getItem(STORAGE_KEY);
   if (stored && SUPPORTED_LOCALES.includes(stored)) return stored;
 
-  const browserLocales = navigator.languages || [navigator.language];
-  for (const tag of browserLocales) {
-    const base = tag.split('-')[0].toLowerCase();
-    if (SUPPORTED_LOCALES.includes(base)) return base;
-  }
-  return 'en';
+  return pickLocale(navigator.languages || [navigator.language], SUPPORTED_LOCALES);
 }
 
 /** Lade eine Locale-JSON-Datei */
@@ -88,6 +149,7 @@ export async function setLocale(locale) {
   localStorage.setItem(STORAGE_KEY, locale);
   currentLocale = locale;
   _numberFormatCache.clear();
+  _unitFormatCache.clear();
   const loaded = locale === DEFAULT_LOCALE
     ? fallbackTranslations
     : await loadLocale(locale);
@@ -325,7 +387,7 @@ export function getFormatLocale() {
   } catch {
     stored = null;
   }
-  return stored && /^[a-z]{2,3}-[A-Z]{2}$/.test(stored) ? stored : currentLocale;
+  return stored && REGION_TAG.test(stored) ? stored : currentLocale;
 }
 
 // Gecachte Intl.NumberFormat-Instanzen je (Format-Locale × Options). Die
@@ -350,6 +412,72 @@ export function getNumberFormat(options = {}) {
     _numberFormatCache.set(key, fmt);
   }
   return fmt;
+}
+
+// Die Zahlteile eines formatToParts-Ergebnisses. Was dazwischen oder daneben
+// steht (Einheitswort, Leerzeichen, Richtungsmarken), gehört der Sprache.
+const NUMBER_PARTS = new Set(['minusSign', 'plusSign', 'integer', 'group', 'decimal', 'fraction']);
+// Eine Richtungsmarke direkt vor dem Vorzeichen gehört zur Zahl: `ar-SA` setzt
+// ein ALM vor das Minus, `fa-IR` ein LRM. Sie wandert mit der Zahl aus.
+const BIDI_MARK = /^[\u061c\u200e\u200f]+$/;
+
+// Gecachte Formatter-Paare je (UI-Sprache × Format-Locale × Einheit × Options),
+// aus demselben Grund wie _numberFormatCache. Beide Locales stehen im Schlüssel:
+// ein Sprachwechsel ändert das Wort, ein Regionswechsel die Ziffern, und die
+// Region wechselt ohne setLocale() (Einstellungen, Abgleich der
+// Haushaltseinstellungen im Router). setLocale() leert den Cache zusätzlich,
+// bevor es 'locale-changed' meldet.
+const _unitFormatCache = new Map();
+
+/**
+ * Formatiert einen Wert mit Einheit („3 weeks", „1 Tg. 1 Std."): die Zahl gehört
+ * dem Haushalt, das Wort der Person (#1365).
+ *
+ * Wort, Pluralform und Wortstellung kommen aus der UI-Sprache (CLDR über
+ * `style: 'unit'`), die Zahlteile - Ziffern, Dezimal- und Tausendertrenner,
+ * Vorzeichen - aus der Region (`getFormatLocale()`), wie jede andere Zahl und
+ * jeder Betrag daneben (#521). Eine zusammengesetzte Locale aus Sprache und
+ * Regions-Land (`en-DE`) kennt ICU nur für wenige Paare und fällt still zurück;
+ * deshalb zwei Formatter und ein Tausch der Zahl über formatToParts.
+ *
+ * Die Zahl der Sprache ist der Abschnitt vom ersten bis zum letzten Zahlteil,
+ * samt einer Richtungsmarke direkt davor. An ihre Stelle tritt die Zahl der
+ * Region vollständig. Hat das Ergebnis der Sprache gar keinen Zahlteil
+ * (Arabisch 1 und 2: „أسبوع", „أسبوعان"), bleibt es unverändert.
+ *
+ * `style: 'unit'` steht nur hier; test:region-presets hält das fest.
+ *
+ * @param {number} value
+ * @param {string} unit  Intl-Einheit, z. B. 'day', 'hour', 'week'
+ * @param {Intl.NumberFormatOptions} [options]  `unitDisplay` und Zifferoptionen
+ * @returns {string}
+ */
+export function formatUnit(value, unit, options = {}) {
+  const language = currentLocale;
+  const region = getFormatLocale();
+  const key = `${language}\u0000${region}\u0000${unit}\u0000${JSON.stringify(options)}`;
+  let pair = _unitFormatCache.get(key);
+  if (!pair) {
+    const { unitDisplay, ...digits } = options;
+    pair = {
+      word: new Intl.NumberFormat(language, { ...digits, style: 'unit', unit, unitDisplay }),
+      number: new Intl.NumberFormat(region, digits),
+    };
+    _unitFormatCache.set(key, pair);
+  }
+  const parts = pair.word.formatToParts(value);
+  let first = parts.findIndex((part) => NUMBER_PARTS.has(part.type));
+  if (first === -1) return parts.map((part) => part.value).join('');
+  // Rueckwaerts gezaehlt statt findLastIndex: das kennt Chrome erst ab 97, die
+  // Mindestversion ist 87 (docs/installation.md, test:old-browser-fallbacks).
+  let last = parts.length - 1;
+  while (!NUMBER_PARTS.has(parts[last].type)) last--;
+  while (first > 0 && parts[first - 1].type === 'literal' && BIDI_MARK.test(parts[first - 1].value)) first--;
+  return [
+    ...parts.slice(0, first).map((part) => part.value),
+    pair.number.format(value),
+    ...parts.slice(last + 1).map((part) => part.value),
+  ].join('');
 }
 
 /** Liste der unterstützten Locales */
@@ -386,16 +514,26 @@ export function formatDayMonth(date) {
   }
 }
 
+/**
+ * Platzhalter eines getippten Datumsfelds. REIHENFOLGE und Trenner folgen der
+ * Datumsformat-Einstellung (Region), die BUCHSTABEN der UI-Sprache - im
+ * deutschen UI stand vorher "DD.MM.YYYY" (Re-Critique 2026-09-28, A2 P3);
+ * Apples Systemfelder sagen "TT.MM.JJJJ". Fehlt ein Wort in einer Locale,
+ * greift wie ueberall die Referenz-Locale.
+ */
 export function dateInputPlaceholder() {
+  const d = t('common.datePlaceholderDay');
+  const m = t('common.datePlaceholderMonth');
+  const y = t('common.datePlaceholderYear');
   switch (getDateFormatPreference()) {
-    case 'dmy': return 'DD.MM.YYYY';
-    case 'mdy_dot': return 'MM.DD.YYYY';
-    case 'dmy_dot': return 'DD.MM.YYYY';
-    case 'dmy_slash': return 'DD/MM/YYYY';
-    case 'ymd': return 'YYYY-MM-DD';
-    case 'ymd_dot': return 'YYYY.MM.DD';
-    case 'ymd_slash': return 'YYYY/MM/DD';
-    default: return 'MM/DD/YYYY';
+    case 'dmy': return `${d}.${m}.${y}`;
+    case 'mdy_dot': return `${m}.${d}.${y}`;
+    case 'dmy_dot': return `${d}.${m}.${y}`;
+    case 'dmy_slash': return `${d}/${m}/${y}`;
+    case 'ymd': return `${y}-${m}-${d}`;
+    case 'ymd_dot': return `${y}.${m}.${d}`;
+    case 'ymd_slash': return `${y}/${m}/${d}`;
+    default: return `${m}/${d}/${y}`;
   }
 }
 

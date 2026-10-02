@@ -12,10 +12,14 @@ import { esc } from '/utils/html.js';
 import { getReadableTextColor, AVATAR_FALLBACK_COLOR } from '/utils/color.js';
 import { openModal, closeModal, confirmModal, confirmOverModal, refocusAfterRender } from '/components/modal.js';
 import { createPageFab, setPageFabAction } from '/utils/fab.js';
+import { rowActionHtml } from '/utils/row-action.js';
 import { wireTablist } from '/utils/tablist.js';
+import { attachSegmentIndicator } from '/utils/segment-indicator.js';
 import { wireScrollFade } from '/utils/ux.js';
 import { renderSkeletonList } from '/utils/skeleton.js';
 import { emptyStateHTML, mountLoadError } from '/utils/empty-state.js';
+import { isNavModuleReadOnly } from '/permissions.js';
+import { isRedeemable, nextRewardGoal } from '/utils/reward-goal.js';
 
 const TABS = ['overview', 'catalog', 'ledger'];
 
@@ -99,6 +103,36 @@ function actingAsDisplay() {
  */
 function displayMayRedeemFor(memberId) {
   return (state.displayPeople ?? []).some((p) => p.id === memberId && p.can_redeem);
+}
+
+/**
+ * Darf dieser Nutzer in Belohnungen schreiben? (#467)
+ *
+ * Nicht dasselbe wie `isAdmin()`: das trennt Eltern von Kindern (wer darf
+ * freigeben, wer darf nur anfragen), dies trennt Schreiben von Lesen. Beide
+ * gelten nebeneinander - ein Elternteil mit `rewards: read` sieht die offenen
+ * Anfragen, entscheidet sie aber nicht.
+ *
+ * EIN DISPLAY FAELLT HIER EBENFALLS AUF `true`, und das ist richtig: seine
+ * Scope-Liste ist `rewards:read` (server/display-scopes.js), und alles auf
+ * dieser Seite ausser dem Einloesen ist ihm verwehrt. Die EINE Ausnahme traegt
+ * der Server als benannte Schreibroute (`DISPLAY_WRITE_ROUTES`), und in der
+ * Oberflaeche traegt sie `displayMayRedeemFor()` - deshalb fragt jede
+ * Einloese-Stelle ZUERST `actingAsDisplay()` und erst im anderen Zweig hier.
+ * Eine Ausnahme ohne diese Reihenfolge haette dem Tablett genau die zwei
+ * Handlungen genommen, fuer die es aufgehaengt wurde.
+ *
+ * DAS EINLOESEN DER EIGENEN PUNKTE FAELLT FUER EINEN MENSCHEN MIT. Es liegt
+ * nahe, es wie die eigene Erinnerungsvorlaufzeit im Schichtplan zu behandeln
+ * (S-12) und stehen zu lassen - aber dort senkt der Server das noetige Niveau
+ * ausdruecklich (sessionModuleAccessRequirement), und fuer
+ * `/rewards/redemptions` tut er das nur fuer ein gekoppeltes Geraet. Ein
+ * Knopf, der das nicht weiss, ist die teurere Auskunft.
+ *
+ * Selbes Muster wie readOnly() in public/pages/waste.js und schedule.js.
+ */
+function readOnly() {
+  return isNavModuleReadOnly('rewards');
 }
 
 function fmtPoints(n) {
@@ -210,12 +244,16 @@ let fab = null;
 // FAB-Aktion je Tab setzen (nur Admins erstellen; sonst ausgeblendet).
 function updateRewardsFab() {
   if (!fab) return;
+  // Ausgeblendet behaelt der Knopf sein Nomen: der Router dockt ihn am Desktop
+  // nur beim Seitenaufbau und nur mit `data-dock-label` an (siehe health.js).
+  const keepNoun = () => fab.dataset?.dockLabel || t('newLabel.rewards');
+  if (readOnly()) { setPageFabAction(fab, { hidden: true, dockLabel: keepNoun() }); return; }
   if (state.tab === 'catalog' && isAdmin()) {
-    setPageFabAction(fab, { label: t('rewards.addReward'), onClick: () => openRewardModal(null) });
+    setPageFabAction(fab, { label: t('rewards.addReward'), dockLabel: t('newLabel.rewards'), onClick: () => openRewardModal(null) });
   } else if (state.tab === 'ledger' && isAdmin()) {
-    setPageFabAction(fab, { label: t('rewards.grantBonus'), onClick: () => openBonusModal() });
+    setPageFabAction(fab, { label: t('rewards.grantBonus'), dockLabel: t('newLabel.rewardsBonus'), onClick: () => openBonusModal() });
   } else {
-    setPageFabAction(fab, { hidden: true });
+    setPageFabAction(fab, { hidden: true, dockLabel: keepNoun() });
   }
 }
 
@@ -225,6 +263,7 @@ function renderShell(container) {
     <div class="rewards-page app-page app-page--reading page-measure--narrow" data-composition="reading">
       <header class="page-toolbar page-toolbar--narrow rewards-toolbar">
         <h1 class="page-toolbar__title" id="rewards-title">${esc(t('rewards.title'))}</h1>
+        <div class="page-toolbar__actions"></div>
         <nav class="rewards-tabs page-toolbar__bar" role="tablist" aria-label="${esc(t('rewards.title'))}">
           ${tabButton('overview', 'trophy', t('rewards.tabOverview'))}
           ${tabButton('catalog', 'gift', t('rewards.tabCatalog'))}
@@ -238,9 +277,12 @@ function renderShell(container) {
     activeId: state.tab,
     onChange: (id) => { state.tab = id; renderCurrentTab(container); },
   });
+  // Geteilte gleitende Kapsel (Re-Critique 2026-09-27, D8); `key`, weil die
+  // Seite den Kopf bei jedem Aufruf neu baut.
+  attachSegmentIndicator(container.querySelector('.rewards-tabs'), { key: 'rewards-tabs' });
   // Scroll-Affordanz der Bar-Zeile (geteilter Peek-Fade, .page-toolbar__bar).
   wireScrollFade(container.querySelector('.rewards-tabs'));
-  fab = createPageFab({ id: 'rewards-fab' });
+  fab = createPageFab({ id: 'rewards-fab', dockLabel: t('newLabel.rewards') });
   container.querySelector('.rewards-page').appendChild(fab);
   updateRewardsFab();
   icons(container);
@@ -250,9 +292,28 @@ function content() {
   return document.getElementById('rewards-content');
 }
 
+/**
+ * DIE KOPFAKTION ENDET AN DER KANTE IHRES INHALTS (Re-Critique 2026-09-27,
+ * A3 P2-5 / R10 L7). Uebersicht und Verlauf sind Zeilenlisten auf dem
+ * Lesemass, der Katalog ist ein Raster ueber die volle Breite. Mit einem
+ * festen `--narrow` stand die angedockte Pille im Katalog bei 972, das Raster
+ * endete bei 1408 (1440er Fenster). Der Kopf folgt jetzt dem Reiter: gedeckelt,
+ * wo der Inhalt es ist, voll, wo das Raster es ist.
+ *
+ * EIN MODIFIER, NICHT DAS `--narrow` WEGNEHMEN: ohne `--narrow` passte die auf
+ * 720px gekappte Reiterleiste neben Titel und Pille in die erste Zeile, und der
+ * ganze Inhalt sprang 52px hoch (gemessen). `--wide` (rewards.css) gibt nur der
+ * Aktionszeile die volle Kante zurueck.
+ */
+function syncToolbarMeasure(container) {
+  container.querySelector('.rewards-toolbar')
+    ?.classList.toggle('rewards-toolbar--wide', state.tab === 'catalog');
+}
+
 async function renderCurrentTab(container) {
   const el = content();
   if (!el) return;
+  syncToolbarMeasure(container);
   el.replaceChildren();
   el.insertAdjacentHTML('beforeend', renderSkeletonList({ rows: 3 }));
   try {
@@ -278,25 +339,15 @@ async function renderCurrentTab(container) {
 // Tab: Übersicht
 // --------------------------------------------------------
 
+// Vergriffen-Regel und Zielwahl stehen in /utils/reward-goal.js - das
+// Dashboard-Widget zeichnet denselben Balken und darf kein anderes Ziel nennen.
 function nextRewardHint(balance) {
-  // Günstigste noch nicht erreichbare aktive Prämie → Fortschritt dorthin.
-  const active = (state.catalog || []).filter((c) => c.is_active !== 0);
-  const reachableCheapestUnaffordable = active
-    .filter((c) => c.cost > balance)
-    .sort((a, b) => a.cost - b.cost)[0];
-  if (!reachableCheapestUnaffordable) {
-    const anyAffordable = active.some((c) => c.cost <= balance);
-    if (anyAffordable && active.length) {
-      return { pct: 100, label: t('rewards.canRedeemNow') };
-    }
-    return null;
-  }
-  const target = reachableCheapestUnaffordable;
-  const pct = Math.max(0, Math.min(100, Math.round((balance / target.cost) * 100)));
-  const remaining = target.cost - balance;
+  const goal = nextRewardGoal(balance, state.catalog);
+  if (!goal) return null;
+  if (goal.reached) return { pct: 100, label: t('rewards.canRedeemNow') };
   return {
-    pct,
-    label: t('rewards.remainingToReward', { points: fmtPoints(remaining), reward: target.name }),
+    pct: goal.pct,
+    label: t('rewards.remainingToReward', { points: fmtPoints(goal.missing), reward: goal.target.name }),
   };
 }
 
@@ -313,14 +364,14 @@ function redeemVerb() {
 // Einloese-Knopf in der Punktestandzeile beantworten muss - `affordabilityFor`
 // beantwortet sie fuer eine EINZELNE Praemie im Katalog.
 function canAffordAny(balance) {
-  return (state.catalog || []).some((c) => c.is_active !== 0 && c.cost <= balance);
+  return (state.catalog || []).some((c) => isRedeemable(c) && c.cost <= balance);
 }
 
 function renderStandingRow(member) {
   const hint = nextRewardHint(member.balance);
   const canRedeem = actingAsDisplay()
     ? displayMayRedeemFor(member.id)
-    : (isAdmin() || member.id === state.overview.me);
+    : (!readOnly() && (isAdmin() || member.id === state.overview.me));
   /* DIE DECKUNG WAR NIE GEPRUEFT. `canRedeem` oben ist ein IDENTITAETS-Gate
    * (bin ich das, oder bin ich Elternteil), kein Kontostand. Emma sah mit 30
    * Punkten einen aktiven "Einloesen"-Knopf, waehrend die billigste Praemie 40
@@ -370,7 +421,9 @@ function renderStandingRow(member) {
 
 // Eltern-Ersteinrichtung: drei Schritte an einem Ort, bis alle erledigt sind.
 function renderSetupHints() {
-  if (!isAdmin()) return '';
+  // Drei Schritte, die alle etwas ANLEGEN. Eine Aufforderung einzurichten,
+  // ohne einrichten zu duerfen, ist die leere Zusage aus #700.
+  if (!isAdmin() || readOnly()) return '';
   const s = state.overview?.setup;
   if (!s) return '';
   const steps = [
@@ -402,14 +455,20 @@ function renderPendingPanel() {
         <p class="rw-pending__title">${esc(r.reward_icon ? `${r.reward_icon} ` : '')}${esc(r.reward_name)}</p>
         <p class="rw-pending__meta">${esc(isAdmin() ? r.user_name : '')}${isAdmin() ? ' · ' : ''}${esc(pointsLabel(r.cost))}${r.note ? ` · „${esc(r.note)}“` : ''}</p>
       </div>
+      ${/* DIE LISTE BLEIBT, DIE KNOEPFE GEHEN. Dass eine Anfrage offen ist, ist
+            eine Auskunft und gehoert auch dem, der sie nicht entscheiden darf -
+            "Genehmigen"/"Ablehnen"/"Abbrechen" sind reine Handlungen. Der
+            Behaelter geht MIT: `.rw-pending__actions` ist eine Flex-Box mit
+            `gap`, und eine leere waere eine Spalte fuer nichts. */ ''}
+      ${readOnly() ? '' : `
       <div class="rw-pending__actions">
         ${isAdmin() ? `
           <button class="btn btn--primary btn--sm" type="button" data-decide="fulfill" data-id="${r.id}">${esc(t('rewards.approve'))}</button>
           <button class="btn btn--ghost btn--sm" type="button" data-decide="reject" data-id="${r.id}">${esc(t('rewards.reject'))}</button>
         ` : `
-          <button class="btn btn--ghost btn--sm" type="button" data-decide="cancel" data-id="${r.id}">${esc(t('common.cancel'))}</button>
+          <button class="btn btn--secondary btn--sm" type="button" data-decide="cancel" data-id="${r.id}">${esc(t('common.cancel'))}</button>
         `}
-      </div>
+      </div>`}
     </li>`).join('');
   /* DER KOPF STEHT AUF DEM GRUND, NICHT IM TRAEGER (Zeilenlisten-Regel), und
    * die Dringlichkeit steht als ZAHL daneben statt als Farbfeld darunter.
@@ -428,7 +487,7 @@ function renderOverview(el) {
   el.replaceChildren();
   const list = balances();
   if (!list.length) {
-    const action = isAdmin()
+    const action = isAdmin() && !readOnly()
       ? { label: t('rewards.manageParticipants'), icon: 'user-plus', className: 'rw-manage-participants' }
       : null;
     el.insertAdjacentHTML('beforeend',
@@ -437,7 +496,7 @@ function renderOverview(el) {
     icons(el);
     return;
   }
-  const adminBar = isAdmin() ? `
+  const adminBar = isAdmin() && !readOnly() ? `
     <button class="btn btn--ghost btn--sm rw-manage-participants" type="button"><i data-lucide="users-round" aria-hidden="true"></i>${esc(t('rewards.manageParticipants'))}</button>` : '';
   el.insertAdjacentHTML('beforeend', `
     <div class="rewards-content__inner">
@@ -475,7 +534,9 @@ function wireOverview(el) {
 function handleSetupStep(action) {
   if (action === 'participants') openParticipantsModal();
   else if (action === 'tasks') location.href = '/tasks';
-  else if (action === 'catalog') document.querySelector('[data-rw-tab="catalog"]')?.click();
+  // `data-tab-id` ist das Attribut der Reiter (tabButton); hier stand
+  // `data-rw-tab`, das es nie gab - der Schritt „Praemien anlegen" tat nichts.
+  else if (action === 'catalog') document.querySelector('.rewards-tabs [data-tab-id="catalog"]')?.click();
 }
 
 // --------------------------------------------------------
@@ -499,24 +560,32 @@ function renderRewardCard(item) {
   // Antwort ist. Am Display ist es niemand, und ein Knopf, der erst nach einer
   // Person fragen muesste, waere ein zweiter Weg zu derselben Handlung. Der
   // eine Weg steht in der Personenliste, wo die Person schon feststeht.
-  const canRedeemBtn = !actingAsDisplay()
-    && !inactive && (isAdmin() || aff.canRedeem !== false) && (isAdmin() || balances().some((b) => b.id === state.overview?.me));
+  //
+  // `readOnly()` daneben schliesst denselben Knopf aus einem anderen Grund aus:
+  // ein MENSCH mit `rewards: read` darf gar nicht einloesen. Zwei Gruende, eine
+  // Wirkung - deshalb stehen sie als getrennte Bedingungen und nicht als eine.
+  // Vergriffen schliesst den Knopf aus demselben Grund aus wie „inaktiv": es
+  // gibt nichts mehr herzugeben. Der Zustand bleibt als Etikett stehen.
+  const soldOut = item.remaining === 0;
+  const canRedeemBtn = !actingAsDisplay() && !readOnly()
+    && !inactive && !soldOut && (isAdmin() || aff.canRedeem !== false) && (isAdmin() || balances().some((b) => b.id === state.overview?.me));
   const shortHint = !isAdmin() && aff.short != null && aff.short > 0
     ? `<span class="rw-reward-card__short">${esc(t('rewards.pointsShort', { points: fmtPoints(aff.short) }))}</span>` : '';
+  const unitsLine = item.remaining > 0
+    ? `<p class="rw-reward-card__units">${esc(t('rewards.unitsLeft', { n: fmtPoints(item.remaining) }))}</p>` : '';
   return `
     <article class="rw-reward-card${inactive ? ' rw-reward-card--inactive' : ''}">
       <div class="rw-reward-card__icon" aria-hidden="true">${item.icon ? esc(item.icon) : '<i data-lucide=\"gift\"></i>'}</div>
       <div class="rw-reward-card__body">
-        <p class="rw-reward-card__name">${esc(item.name)}${inactive ? ` <span class="rw-tag">${esc(t('rewards.inactive'))}</span>` : ''}</p>
+        <p class="rw-reward-card__name">${esc(item.name)}${inactive ? ` <span class="rw-tag">${esc(t('rewards.inactive'))}</span>` : ''}${soldOut ? ` <span class="rw-tag">${esc(t('rewards.soldOut'))}</span>` : ''}</p>
         ${item.description ? `<p class="rw-reward-card__desc">${esc(item.description)}</p>` : ''}
+        ${unitsLine}
       </div>
       <div class="rw-reward-card__foot">
-        <span class="rw-cost"><i data-lucide="coins" aria-hidden="true"></i>${esc(pointsLabel(item.cost))}</span>
+        <span class="rw-cost"><i data-lucide="coins" class="icon-md" aria-hidden="true"></i>${esc(pointsLabel(item.cost))}</span>
         <div class="rw-reward-card__actions">
-          ${isAdmin() ? `
-            <button class="btn btn--icon btn--sm" type="button" data-edit="${item.id}" aria-label="${esc(t('common.edit'))}"><i data-lucide="pencil" aria-hidden="true"></i></button>
-          ` : ''}
-          ${canRedeemBtn ? `<button class="btn btn--secondary btn--sm" type="button" data-redeem-item="${item.id}"><i data-lucide="gift" aria-hidden="true"></i>${esc(redeemVerb())}</button>` : shortHint}
+          ${isAdmin() && !readOnly() ? rowActionHtml({ icon: 'pencil', label: t('common.editNamed', { name: item.name }), attrs: { 'data-edit': item.id } }) : ''}
+          ${canRedeemBtn ? `<button class="btn btn--secondary btn--sm" type="button" data-redeem-item="${item.id}"><i data-lucide="gift" class="icon-md" aria-hidden="true"></i>${esc(redeemVerb())}</button>` : shortHint}
         </div>
       </div>
     </article>`;
@@ -530,7 +599,7 @@ function renderCatalog(el) {
       <h2 class="rw-section__title u-section-title"><i data-lucide="gift" aria-hidden="true"></i>${esc(t('rewards.tabCatalog'))}</h2>
     </div>` : '';
   if (!items.length) {
-    const action = isAdmin()
+    const action = isAdmin() && !readOnly()
       ? { label: t('rewards.addReward'), icon: 'plus', className: 'rw-add-reward' }
       : null;
     el.insertAdjacentHTML('beforeend',
@@ -538,7 +607,7 @@ function renderCatalog(el) {
   } else {
     el.insertAdjacentHTML('beforeend', `
       <div class="rewards-content__inner">
-        <section class="rw-section">
+        <section class="rw-section rw-section--wide">
           ${header}
           <div class="rw-reward-grid">${items.map(renderRewardCard).join('')}</div>
         </section>
@@ -571,7 +640,12 @@ function renderLedger(el) {
   el.replaceChildren();
   const filterChips = [{ id: null, label: t('rewards.all') }]
     .concat(balances().map((b) => ({ id: b.id, label: b.display_name })))
-    .map((c) => `<button class="rw-chip${(state.ledgerFilter ?? null) === c.id ? ' rw-chip--active' : ''}" type="button" data-filter="${c.id ?? ''}">${esc(c.label)}</button>`)
+    // Kanon-Filterchip (Re-Critique 2026-09-28 P2-6): vorher `.rw-chip`, 31px
+    // hoch und ohne aria-pressed - der Screenreader hoerte nicht, wer gefiltert ist.
+    .map((c) => {
+      const on = (state.ledgerFilter ?? null) === c.id;
+      return `<button class="filter-chip filter-chip--sm${on ? ' filter-chip--active' : ''}" type="button" data-filter="${c.id ?? ''}" aria-pressed="${on}">${esc(c.label)}</button>`;
+    })
     .join('');
   // Bonus vergeben läuft über den Kontext-FAB (Ledger-Tab, Admin); kein Inline-Button.
   const adminBar = '';
@@ -620,10 +694,14 @@ function enrolledMembers() {
 }
 
 async function openRedeemModal(memberId, presetItemId = null) {
+  // AM TABLETT NICHT: dort ist dies der eine erlaubte Schreibweg, und ob er
+  // fuer DIESE Person offen steht, hat `displayMayRedeemFor()` am Knopf schon
+  // beantwortet - mit der Antwort des Servers, nicht mit einer zweiten Regel.
+  if (!actingAsDisplay() && readOnly()) return;
   const members = enrolledMembers();
   const me = state.overview?.me;
   const defaultMember = memberId ?? (members.some((m) => m.id === me) ? me : members[0]?.id) ?? null;
-  const affordable = (state.overview?.catalog || []).filter((c) => c.is_active !== 0);
+  const affordable = (state.overview?.catalog || []).filter(isRedeemable);
   if (!affordable.length) { await confirmModal(t('rewards.emptyCatalogMember'), { confirmLabel: t('rewards.gotIt') }); return; }
 
   const memberSelect = (isAdmin() && members.length > 1)
@@ -638,7 +716,7 @@ async function openRedeemModal(memberId, presetItemId = null) {
     <div class="form-group">
       <label class="label" for="rw-redeem-item">${esc(t('rewards.reward'))}</label>
       <select class="input" id="rw-redeem-item">
-        ${affordable.map((c) => `<option value="${c.id}" data-cost="${c.cost}" ${c.id === presetItemId ? 'selected' : ''}>${esc(c.icon ? `${c.icon} ` : '')}${esc(c.name)} — ${esc(pointsLabel(c.cost))}</option>`).join('')}
+        ${affordable.map((c) => `<option value="${c.id}" data-cost="${c.cost}" ${c.id === presetItemId ? 'selected' : ''}>${esc(c.icon ? `${c.icon} ` : '')}${esc(c.name)} - ${esc(pointsLabel(c.cost))}</option>`).join('')}
       </select>
     </div>`;
 
@@ -705,7 +783,12 @@ async function openRedeemModal(memberId, presetItemId = null) {
           await refreshActiveTab();
           refocusAfterRender();
         } catch (err) {
-          errEl.textContent = err?.message || t('rewards.redeemError');
+          // Zwischen Dialog-Aufbau und Absenden kann die letzte Einheit weg
+          // sein - ein anderes Kind war schneller. Der Server sagt das mit
+          // einem Code, nicht mit einem uebersetzten Satz.
+          errEl.textContent = err?.data?.reason === 'out_of_stock'
+            ? t('rewards.soldOutHint')
+            : (err?.message || t('rewards.redeemError'));
           errEl.hidden = false;
           submit.disabled = false;
         }
@@ -715,6 +798,7 @@ async function openRedeemModal(memberId, presetItemId = null) {
 }
 
 async function decideRedemption(id, action, btn) {
+  if (readOnly()) return;
   const gefragt = action === 'reject' || action === 'cancel';
   if (gefragt) {
     // Kein `danger`: der Server bucht die reservierten Punkte per `reversal`
@@ -743,11 +827,23 @@ async function decideRedemption(id, action, btn) {
     if (gefragt) refocusAfterRender();
   } catch (err) {
     if (btn) btn.disabled = false;
-    await confirmModal(err?.message || t('common.error'), { confirmLabel: t('rewards.gotIt') });
+    // VERGRIFFEN IST KEIN FEHLSCHLAG, SONDERN EINE ENTSCHIEDENE ANFRAGE (#1310).
+    // Der Server hat sie abgelehnt und die Punkte zurueckgebucht; die Antwort
+    // traegt den Grund als Code, weil sie die Sprache dieses Browsers nicht
+    // kennt. Die Liste muss danach neu geladen werden - sonst stuende die
+    // Anfrage hier weiter als offen, obwohl sie es nicht mehr ist.
+    const vergriffen = err?.data?.reason === 'out_of_stock';
+    await confirmModal(vergriffen ? t('rewards.outOfStock') : (err?.message || t('common.error')),
+      { confirmLabel: t('rewards.gotIt') });
+    if (vergriffen) {
+      await refreshActiveTab();
+      refocusAfterRender();
+    }
   }
 }
 
 function openBonusModal() {
+  if (readOnly()) return;
   const members = enrolledMembers();
   if (!members.length) { confirmModal(t('rewards.emptyOverviewAdmin'), { confirmLabel: t('rewards.gotIt') }); return; }
   openModal({
@@ -803,6 +899,7 @@ function openBonusModal() {
 }
 
 function openRewardModal(item) {
+  if (readOnly()) return;
   const isEdit = !!item;
   openModal({
     title: isEdit ? t('rewards.editReward') : t('rewards.addReward'),
@@ -821,6 +918,11 @@ function openRewardModal(item) {
         <div class="form-group">
           <label class="label" for="rw-reward-cost">${esc(t('rewards.costLabel'))}<span class="required-marker" aria-hidden="true"> *</span></label>
           <input class="input" id="rw-reward-cost" type="number" inputmode="numeric" min="1" step="1" required value="${esc(item?.cost ?? '')}" placeholder="100">
+        </div>
+        <div class="form-group">
+          <label class="label" for="rw-reward-quantity">${esc(t('rewards.quantityLabel'))}</label>
+          <input class="input" id="rw-reward-quantity" type="number" inputmode="numeric" min="1" step="1" value="${esc(item?.quantity ?? '')}">
+          <p class="rw-hint">${esc(t('rewards.quantityHint'))}</p>
         </div>
         <div class="form-group">
           <label class="label" for="rw-reward-desc">${esc(t('rewards.descLabel'))}</label>
@@ -857,9 +959,18 @@ function openRewardModal(item) {
         const cost = Math.trunc(Number(panel.querySelector('#rw-reward-cost').value));
         if (!name) { errEl.textContent = t('rewards.nameRequired'); errEl.hidden = false; return; }
         if (!Number.isFinite(cost) || cost < 1) { errEl.textContent = t('rewards.costRequired'); errEl.hidden = false; return; }
+        // Leeres Feld heisst „unbegrenzt" und geht als `null` hinaus - dieselbe
+        // Lesart, die der Server fuer Icon und Beschreibung fuehrt: das
+        // Formular schickt immer alle Felder, und `null` ist dort das Leeren.
+        const quantityRaw = panel.querySelector('#rw-reward-quantity').value.trim();
+        const quantity = quantityRaw === '' ? null : Math.trunc(Number(quantityRaw));
+        if (quantity !== null && (!Number.isFinite(quantity) || quantity < 1)) {
+          errEl.textContent = t('rewards.quantityInvalid'); errEl.hidden = false; return;
+        }
         const body = {
           name,
           cost,
+          quantity,
           icon: panel.querySelector('#rw-reward-icon').value.trim() || null,
           description: panel.querySelector('#rw-reward-desc').value.trim() || null,
         };
@@ -881,6 +992,7 @@ function openRewardModal(item) {
 }
 
 async function openParticipantsModal() {
+  if (readOnly()) return;
   let members = [];
   try {
     const res = await api.get('/rewards/participants');
@@ -951,7 +1063,7 @@ async function openMemberDetail(memberId) {
   }).join('') : `<li class="rw-ledger-row rw-ledger-row--compact"><p class="rw-ledger-row__meta">${esc(t('rewards.emptyLedgerBody'))}</p></li>`;
   const canRedeem = actingAsDisplay()
     ? displayMayRedeemFor(member.id)
-    : (isAdmin() || member.id === state.overview?.me);
+    : (!readOnly() && (isAdmin() || member.id === state.overview?.me));
   openModal({
     title: member.display_name,
     content: `
@@ -984,6 +1096,18 @@ async function refreshActiveTab() {
   const container = document.querySelector('.rewards-page')?.parentElement;
   await renderCurrentTab(container || document.body);
 }
+
+/**
+ * Reine Markup-Funktionen fuer die Tests. Sie brauchen `state`, also steht er
+ * mit darin: eine Punktestandzeile ohne Katalog und ohne `overview.me` liesse
+ * sich sonst nicht stellen.
+ */
+export const __test = {
+  renderStandingRow, renderRewardCard, renderPendingPanel, renderSetupHints,
+  readOnly, state,
+  // R10 L7: Kopf und Inhalt teilen je Reiter eine Kante (test-dashboard-rewards.js).
+  syncToolbarMeasure, renderCatalog, renderLedger, renderOverview, handleSetupStep,
+};
 
 export async function render(container, { user } = {}) {
   state.user = user || null;

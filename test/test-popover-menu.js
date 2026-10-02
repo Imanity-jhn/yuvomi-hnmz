@@ -24,7 +24,7 @@ import assert from 'node:assert/strict';
 // `panel instanceof HTMLElement` steht als Typwaechter in onToggle.
 global.HTMLElement = class HTMLElement {};
 
-const { installPopoverMenus } = await import('../public/utils/popover-menu.js');
+const { installPopoverMenus, pageToolsMenuHtml } = await import('../public/utils/popover-menu.js');
 
 /** Kleinstes Element, das die Selektorwege des Moduls bedient. */
 function el(selector, attrs = {}) {
@@ -177,6 +177,39 @@ test('ein deaktivierter Eintrag ist kein Ziel der Pfeiltasten', () => {
   assert.equal(focusedIndex(panel), 2, 'der deaktivierte Eintrag wurde uebersprungen');
 });
 
+test('ein per CSS verborgener Eintrag ist kein Ziel der Pfeiltasten (Review zu #1475)', () => {
+  // Mahlzeiten blendet den Rezeptspalten-Schalter unter 1024px per
+  // `display: none` aus (meals.css) - im DOM steht er weiter. Als Ziel von
+  // End/ArrowUp bekam er den Fokus, den ein nicht gerendertes Element nicht
+  // annimmt: der Fokus blieb stehen, und die Tastatur hing am Menueende.
+  const root = makeRoot();
+  const panel = makeMenu({ count: 3 });
+  panel.children[2].checkVisibility = () => false;
+  panel.children[0].checkVisibility = () => true;
+  open(root, panel);
+
+  clearFocus(panel);
+  keydown(root, panel.children[0], 'End');
+  assert.equal(focusedIndex(panel), 1, 'End landet auf dem letzten SICHTBAREN Eintrag');
+
+  clearFocus(panel);
+  keydown(root, panel.children[1], 'ArrowDown');
+  assert.equal(focusedIndex(panel), 0, 'hinter dem letzten sichtbaren laeuft es auf den Anfang um');
+
+  clearFocus(panel);
+  keydown(root, panel.children[0], 'ArrowUp');
+  assert.equal(focusedIndex(panel), 1, 'rueckwaerts ueber den Anfang auf den letzten sichtbaren');
+});
+
+test('ohne Rendering-Auskunft (kein checkVisibility, keine Rects) zaehlt ein Eintrag als sichtbar', () => {
+  const root = makeRoot();
+  const panel = makeMenu({ count: 2 });
+  open(root, panel);
+  clearFocus(panel);
+  keydown(root, panel.children[0], 'End');
+  assert.equal(focusedIndex(panel), 1);
+});
+
 test('aria-expanded am Trigger folgt dem Zustand des Panels', () => {
   // Die Popover-API kennt nur `popovertarget`, kein ARIA - ohne diese
   // Verdrahtung meldet der Screenreader ein Menue, das nie aufgeht.
@@ -192,4 +225,101 @@ test('ein keydown ausserhalb eines Panels laeuft ins Leere', () => {
   const root = makeRoot();
   const outside = el('.something-else');
   assert.equal(keydown(root, outside, 'ArrowDown'), false);
+});
+
+test('ein Schalter-Eintrag (menuitemcheckbox) zieht den Fokus beim Oeffnen NICHT an sich', () => {
+  // Kopfregel mobil: Ansichts-Schalter wie „Verlauf zeigen" stehen als
+  // menuitemcheckbox im Werkzeugmenue. Der erste angehakte waere eine
+  // zufaellige Stelle mitten im Menue - der Fokus beginnt oben. Rot, solange
+  // onToggle jedes aria-checked wie eine Einfachauswahl behandelt.
+  const root = makeRoot();
+  const panel = makeMenu({ checkedIndex: 2 });
+  panel.children[2].setAttribute('role', 'menuitemcheckbox');
+  open(root, panel);
+  assert.equal(focusedIndex(panel), 0);
+});
+
+test('das Werkzeugmenue eines Modulkopfs: ein „..."-Knopf, Eintraege mit Text, Trenner, Schalter', () => {
+  const html = pageToolsMenuHtml({
+    id: 'tasks-tools-menu',
+    label: 'Weitere Aktionen',
+    items: [
+      { action: 'toggle-history', label: 'Verlauf', icon: 'history', checked: false },
+      { separator: true },
+      { action: 'manage-tags', label: 'Tags <b>', icon: 'tag' },
+    ],
+  });
+  assert.match(html, /class="btn btn--secondary btn--icon page-tools-btn popover-menu__trigger"/);
+  assert.match(html, /data-lucide="ellipsis"/, 'der Trigger ist das Ueberlaufzeichen');
+  assert.match(html, /popovertarget="tasks-tools-menu"/);
+  assert.match(html, /role="menuitemcheckbox" aria-checked="false"[\s\S]*data-action="toggle-history"/);
+  assert.match(html, /popover-menu__item-check--hidden/, 'ein aus-Schalter zeigt keinen Haken');
+  assert.match(html, /<div class="popover-menu__separator" role="separator"><\/div>/);
+  assert.match(html, /role="menuitem"\s[\s\S]*data-action="manage-tags"/);
+  assert.match(html, /<span>Tags &lt;b&gt;<\/span>/, 'Labels laufen durch esc()');
+});
+
+
+test('top-start: ein Menue am Fuss einer linken Leiste oeffnet ueber dem Ausloeser, an seiner linken Kante', () => {
+  // Konto-Menue der Seitenleiste (Critique 2026-09-26, P1-2). Rechtsbuendig
+  // am Ausloeser hinge es halb ueber dem Inhalt neben der Leiste, und nach
+  // unten ist am Fuss nie Platz. Der Trigger-Stub steht bei left 200, top 100,
+  // bottom 140; das Panel ist 200 x 48 gross.
+  const root = makeRoot();
+  const panel = makeMenu();
+  panel.dataset = { placement: 'top-start' };
+  open(root, panel);
+  assert.equal(panel.style.left, '200px', 'linke Kante am Ausloeser, nicht rechte');
+  assert.equal(panel.style.top, '48px', 'ueber dem Ausloeser: 100 - 48 - 4');
+
+  // Ohne Angabe bleibt es beim bisherigen Verhalten: rechtsbuendig darunter.
+  const plain = makeMenu();
+  open(root, plain);
+  assert.equal(plain.style.left, '100px');
+  assert.equal(plain.style.top, '144px');
+});
+
+// R14 P11 (Re-Critique 2026-09-28, A1 P3-4): Menues erschienen nur als Blende.
+// Sie wachsen jetzt vom Ausloeser aus - der Ursprung der Skalierung ist die
+// Ecke am Ausloeser, und die kennt nur die Rechnung, die das Panel setzt.
+test('R14: das Menue waechst von der Ecke am Ausloeser aus', () => {
+  const root = makeRoot();
+  const below = makeMenu();
+  open(root, below);
+  assert.equal(below.style.transformOrigin, 'top right', 'rechtsbuendig darunter: von oben rechts');
+  assert.equal(below.style.transform, 'none', 'offen steht es in voller Groesse');
+
+  const up = makeMenu();
+  up.dataset = { placement: 'top-start' };
+  open(root, up);
+  assert.equal(up.style.transformOrigin, 'bottom left', 'ueber dem Ausloeser an seiner linken Kante: von unten links');
+
+  const prevHeight = global.window.innerHeight;
+  global.window.innerHeight = 150;
+  try {
+    const flipped = makeMenu();
+    open(root, flipped);
+    assert.equal(flipped.style.transformOrigin, 'bottom right', 'unten kein Platz, nach oben gekippt: von unten rechts');
+  } finally {
+    global.window.innerHeight = prevHeight;
+  }
+
+  root.fire('toggle', { target: below, newState: 'closed' });
+  assert.equal(below.style.transform, '', 'geschlossen faellt es in die Startgroesse zurueck');
+});
+
+test('R14: Wachsen mit Token-Kurve, bei reduzierter Bewegung nur die Blende', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const { eachRule } = await import('./css-rules.js');
+  const css = await readFile(new URL('../public/styles/layout.css', import.meta.url), 'utf8');
+  const rules = [...eachRule(css)];
+  const reduce = (r) => r.at.some((a) => /prefers-reduced-motion:\s*reduce/.test(a));
+  const body = (pred) => rules.filter((r) => pred(r) && r.selector.split(',').some((s) => s.trim() === '.popover-menu')).map((r) => r.body).join(';');
+  const base = body((r) => !r.at.length);
+  assert.match(base, /transform:\s*scale\(0?\.96\)/, 'die Startgroesse');
+  assert.match(base, /transition:[^;]*transform var\(--duration-md\) var\(--ease-out\)/, 'Dauer und Kurve aus den Tokens');
+  assert.match(base, /transition:[^;]*opacity var\(--duration-md\) var\(--ease-out\)/);
+  const still = body(reduce);
+  assert.match(still, /transform:\s*none/, 'reduzierte Bewegung: kein Wachsen');
+  assert.match(still, /transition:\s*opacity/, 'aber die Blende bleibt');
 });

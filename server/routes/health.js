@@ -16,10 +16,16 @@
  *   cycle-feed.js   Zyklus: Token-Verwaltung fuer den vorhergesagten ICS-Feed
  *   caregivers.js   Betreuung: wer darf fuer wen eintragen (#584)
  *   visibility-defaults.js  persoenliche Standard-Sichtbarkeit je Bereich (#958)
+ *   prevention.js   Vorsorge & Impfungen: Typ-Register + Protokoll + Faelligkeit
+ *   nutrition.js    Naehrwerte: Tagesziel je Person + Tagebuch + Tagesbilanz (#1326)
  *
  * Scoping/Visibility-Modell (siehe ./health/helpers.js):
  *   - Jede Zeile gehört einem Nutzer (`user_id`, "Eigentümer").
- *   - Lesen: erlaubt für den Eigentümer ODER wenn `visibility = 'family'`.
+ *   - Lesen: erlaubt für den Eigentümer ODER wenn die Zeile offen steht. Der
+ *     offene Wert ist `family`, ausser bei den Naehrwerten (#1326): die tragen
+ *     den kanonischen Satz aus docs/DECISIONS.md Abschnitt 5 und schreiben
+ *     `all`. Welcher es ist, sagt `openVisibilityFor()` in
+ *     ./health/visibility-defaults.js; die Klausel nimmt ihn als Parameter.
  *   - Schreiben/Ändern/Löschen: der Eigentümer - oder eine betreuende Person
  *     (health_care_grants, #584), die die betreute Person dann auch vollständig
  *     sieht. Der Zyklus-Tab ist davon bewusst ausgenommen.
@@ -39,6 +45,8 @@ import cycleFeedRouter from './health/cycle-feed.js';
 import caregiversRouter from './health/caregivers.js';
 import visibilityDefaultsRouter from './health/visibility-defaults.js';
 import fastingRouter from './health/fasting.js';
+import preventionRouter from './health/prevention.js';
+import nutritionRouter from './health/nutrition.js';
 
 const router = express.Router();
 
@@ -55,5 +63,7 @@ router.use(cycleFeedRouter);
 router.use(caregiversRouter);
 router.use(visibilityDefaultsRouter);
 router.use(fastingRouter);
+router.use(preventionRouter);
+router.use(nutritionRouter);
 
 export default router;

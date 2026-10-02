@@ -13,11 +13,15 @@ import { fanOutEventReminders, eventAuthorId } from '../services/event-reminder-
 import { fanOutTaskReminders, taskAuthorId, syncTaskAutoReminders } from '../services/task-reminders.js';
 import { deniedModules } from '../permissions.js';
 import { tokenAllows } from '../scopes.js';
+import { ORIGIN_MODULE, withoutSwitchedOffModules } from '../services/reminder-origins.js';
+import { remindAtCompareKey, remindAtUtcSql } from '../utils/reminder-schedule.js';
 
 const log    = createLogger('Reminders');
 const router = express.Router();
 
-const VALID_ENTITY_TYPES = ['task', 'event', 'subscription', 'inventory_item', 'inventory_tracked_date', 'pantry_item', 'cycle_period', 'cycle_log_nudge', 'schedule_entry', 'schedule_extra_entry', 'waste_pickup'];
+// Exportiert fuer den Guard in test/test-disabled-module-reminders.js: jeder
+// Wert muss in ORIGIN_MODULE stehen, sonst faellt er still aus `/pending`.
+export const VALID_ENTITY_TYPES = ['task', 'event', 'subscription', 'inventory_item', 'inventory_tracked_date', 'pantry_item', 'cycle_period', 'cycle_log_nudge', 'schedule_entry', 'schedule_extra_entry', 'waste_pickup', 'document_expiry', 'health_prevention_due', 'fasting_goal', 'fasting_next_start'];
 
 /**
  * Nach jedem Schreibvorgang an den Erinnerungen eines Termins: die Zugewiesenen
@@ -100,10 +104,26 @@ const MANUAL_REMINDER_SQL = `AND NOT (assigned_from IS NOT NULL AND assigned_fro
  * sind beide keine gespeicherte Zeile, an die man von Hand eine Erinnerung
  * hängen könnte.
  *
+ * `document_expiry` gehört dazu, obwohl `subscription`/`inventory_item`/
+ * `inventory_tracked_date` es nicht tun: dort haelt ein handgesetzter Termin
+ * bis zur naechsten Aenderung des Objekts, hier nicht.
+ * documents.js#syncDocumentExpiryReminder loescht bei JEDEM Speichern ALLE
+ * Zeilen der Entitaet, nicht nur die eigenen - ein Schreibweg, der das
+ * respektiert, haette also nie eine Halbwertszeit, mit der man arbeiten kann.
+ * Zusaetzlich haette ein settable `document_expiry` keine Sichtbarkeitspruefung
+ * auf das einzelne Dokument (nur `mayTouchOrigin()` auf das Modul): ein
+ * Mitglied koennte `entity_id`s fremder, privater Dokumente erraten und ihre
+ * Namen ueber `GET /reminders/pending` zurücklesen.
+ *
+ * `health_prevention_due` gehört ebenfalls dazu: server/services/prevention-reminders.js
+ * stellt sie bei jedem periodischen Lauf, nach jedem Schreiben eines Eintrags
+ * und nach jeder Betreuungs-Änderung neu her - ein von Hand gesetzter Termin
+ * wäre binnen einer Minute weg, wie bei `pantry_item`.
+ *
  * Die LESEWEGE (GET) kennen alle Typen weiter: der Erinnerungs-Toast muss eine
  * abgeleitete Meldung anzeigen und wegwischen können.
  */
-const DERIVED_ENTITY_TYPES = ['pantry_item', 'cycle_period', 'cycle_log_nudge', 'schedule_entry', 'schedule_extra_entry', 'waste_pickup'];
+const DERIVED_ENTITY_TYPES = ['pantry_item', 'cycle_period', 'cycle_log_nudge', 'schedule_entry', 'schedule_extra_entry', 'waste_pickup', 'document_expiry', 'health_prevention_due', 'fasting_goal', 'fasting_next_start'];
 
 /* DIESER ROUTER IST EINE MISCHSTELLE, UND SEIN PFAD SAGT DAS NICHT.
  *
@@ -125,22 +145,10 @@ const DERIVED_ENTITY_TYPES = ['pantry_item', 'cycle_period', 'cycle_log_nudge', 
  * Middleware wohnen.
  *
  * Der Befund kam aus der PR-Review zu #811 und ist älter als dieses Feature -
- * er betraf fünf Herkünfte, bevor die sechste dazukam. Deshalb steht hier eine
- * Karte über alle und keine Ausnahme für die neue.
+ * er betraf fünf Herkünfte, bevor die sechste dazukam. Deshalb gibt es eine
+ * Karte über alle und keine Ausnahme für die neue. Sie steht seit #1279 in
+ * server/services/reminder-origins.js, weil auch die Zustellung sie braucht.
  */
-const ORIGIN_MODULE = Object.freeze({
-  task:                   'tasks',
-  event:                  'calendar',
-  subscription:           'budget',
-  inventory_item:         'inventory',
-  inventory_tracked_date: 'inventory',
-  pantry_item:            'pantry',
-  cycle_period:           'health',
-  cycle_log_nudge:        'health',
-  schedule_entry:         'schedule',
-  schedule_extra_entry:   'schedule',
-  waste_pickup:           'waste',
-});
 
 /**
  * Darf dieser Aufrufer eine Erinnerung dieser Herkunft sehen bzw. anfassen?
@@ -189,7 +197,7 @@ const MAX_REMINDERS_PER_ENTITY = 5;
 // --------------------------------------------------------
 // GET /api/v1/reminders/pending
 // Gibt alle fälligen, nicht-verworfenen Erinnerungen des aktuellen Nutzers zurück.
-// "Fällig" = remind_at <= jetzt
+// "Fällig" = remind_at <= jetzt, als Zeitpunkt verglichen (#1364)
 // Response: { data: Reminder[] }
 // --------------------------------------------------------
 router.get('/pending', (req, res) => {
@@ -203,7 +211,7 @@ router.get('/pending', (req, res) => {
     const origins = readableOrigins(req);
     if (!origins.length) return res.json({ data: [] });
 
-    const rows = db.get().prepare(`
+    const dueRows = db.get().prepare(`
       SELECT
         r.*,
         CASE r.entity_type
@@ -231,6 +239,12 @@ router.get('/pending', (req, res) => {
             SELECT t.name FROM waste_reminder_entries e JOIN waste_types t ON t.id = e.type_id
             WHERE e.id = r.entity_id
           )
+          WHEN 'document_expiry' THEN (SELECT name FROM family_documents WHERE id = r.entity_id)
+          WHEN 'health_prevention_due' THEN (
+            SELECT COALESCE(t.name, pr.name) FROM health_prevention_records pr
+            LEFT JOIN health_prevention_types t ON t.id = pr.type_id
+            WHERE pr.id = r.entity_id
+          )
         END AS entity_title,
         -- Unterscheidet die eigene Perioden-Erinnerung von einer an eine
         -- Partnerperson weitergereichten (gleicher entity_type 'cycle_period',
@@ -245,7 +259,7 @@ router.get('/pending', (req, res) => {
       FROM reminders r
       WHERE r.created_by  = ?
         AND r.dismissed   = 0
-        AND r.remind_at  <= ?
+        AND ${remindAtUtcSql('r.remind_at')} <= ?
         AND r.entity_type IN (${origins.map(() => '?').join(', ')})
         -- Eine 'cycle_period'/'cycle_log_nudge'-Zeile, deren Anker bereits
         -- geloescht wurde (Eigentuemer geloescht, Einstellung geaendert, o.ae.),
@@ -258,8 +272,33 @@ router.get('/pending', (req, res) => {
           r.entity_type NOT IN ('cycle_period', 'cycle_log_nudge')
           OR EXISTS (SELECT 1 FROM cycle_reminder_anchors WHERE id = r.entity_id)
         )
+        -- Dasselbe fuer Aufgaben und Termine, aus einem anderen Grund: seit
+        -- Migration v217 raeumen zwei AFTER-DELETE-Trigger die Erinnerungen
+        -- einer geloeschten Aufgabe/eines geloeschten Termins mit ab, es sollte
+        -- hier also gar keine verwaiste Zeile mehr geben. Der Verweis bleibt
+        -- aber ein WEICHER (kein Fremdschluessel auf tasks/calendar_events),
+        -- und was ohne Fremdschluessel haelt, haelt nur, solange niemand einen
+        -- Weg daran vorbei baut - ein Tabellen-Rebuild, der den Trigger nicht
+        -- wieder anlegt, reicht schon. Was hier durchkaeme, waere eine Zeile
+        -- ohne entity_title: im Toast eine leere Zeile, in der
+        -- Push-Benachrichtigung ein leerer Text (services/notifications.js
+        -- traegt denselben Riegel). Nichts zu zeigen ist besser.
+        AND (
+          r.entity_type != 'task'
+          OR EXISTS (SELECT 1 FROM tasks WHERE id = r.entity_id)
+        )
+        AND (
+          r.entity_type != 'event'
+          OR EXISTS (SELECT 1 FROM calendar_events WHERE id = r.entity_id)
+        )
       ORDER BY r.remind_at ASC
-    `).all(userId, now, ...origins);
+    `).all(userId, remindAtCompareKey(now), ...origins);
+
+    // Die dritte Achse neben Token-Scopes und Mitgliedsrechten: ein Modul, das
+    // der Haushalt abgeschaltet hat, gibt es hier nicht - auch nicht als
+    // Toast (#1279). Übersprungen, nicht gelöscht: siehe
+    // withoutSwitchedOffModules() für den Grund.
+    const rows = withoutSwitchedOffModules(db.get(), dueRows);
 
     // Nur für die tatsächlichen Partner-Zeilen geholt (rar) - siehe Kommentar
     // an cycle_anchor_kind oben. Bleibt bei jeder anderen Zeile `undefined`
@@ -267,6 +306,18 @@ router.get('/pending', (req, res) => {
     for (const row of rows) {
       if (row.cycle_anchor_kind === 'partner_period') {
         row.cycle_owner_name = cycleOwnerName(row.entity_id);
+      }
+      // Gleiche Lage wie oben, fuer D6: nur die geerbte Zeile (assigned_from
+      // gesetzt) nennt die betreute Person - server/services/notifications.js
+      // #preventionDueBody haelt denselben Riegel fuer die Push-Benachrichtigung,
+      // hier fuer den In-App-Toast (Review #1256: die eine Stelle folgte der
+      // anderen nicht).
+      if (row.entity_type === 'health_prevention_due' && row.assigned_from != null) {
+        row.prevention_subject_name = db.get().prepare(`
+          SELECT u.display_name FROM health_prevention_records pr
+          JOIN users u ON u.id = pr.user_id
+          WHERE pr.id = ?
+        `).get(row.entity_id)?.display_name;
       }
     }
 
@@ -353,10 +404,15 @@ router.post('/', (req, res) => {
   try {
     const userId = req.authUserId || req.session.userId;
     const { entity_type, entity_id, remind_at } = req.body;
+    // `remind_at` ist naiv-UTC. Ein `Z` oder Offset wird dorthin umgerechnet
+    // und der GEPRUEFTE Wert gespeichert (#1364): roh gespeichert verglich der
+    // Scheduler `18:00:00+02:00` als Text gegen die UTC-Zeit und meldete sich
+    // zwei Stunden zu spaet.
+    const vRemindAt = v.datetime(remind_at, 'remind_at', true, { to: 'utc' });
 
     const errors = v.collectErrors([
       v.id(entity_id,          'entity_id'),
-      v.datetime(remind_at,    'remind_at', true),
+      vRemindAt,
     ]);
 
     // Der `v.oneOf` gegen VALID_ENTITY_TYPES stand hier zusätzlich und sagte
@@ -388,7 +444,7 @@ router.post('/', (req, res) => {
     const result = db.get().prepare(`
       INSERT INTO reminders (entity_type, entity_id, remind_at, created_by)
       VALUES (?, ?, ?, ?)
-    `).run(entity_type, entityId, remind_at, userId);
+    `).run(entity_type, entityId, vRemindAt.value, userId);
 
     syncEntityFanout(entity_type, entityId, userId);
 
@@ -431,12 +487,16 @@ router.put('/', (req, res) => {
       return res.status(400).json({ error: 'remind_ats muss ein Array sein.', code: 400 });
     }
 
-    // Duplikate entfernen, jeden Eintrag als Datetime validieren, Cap anwenden.
-    const unique = [...new Set(remindAts)];
-    const errors = v.collectErrors(unique.map((value, i) => v.datetime(value, `remind_ats[${i}]`, true)));
+    // Jeden Eintrag validieren und nach naiv-UTC bringen (#1364), DANACH
+    // Duplikate entfernen und den Cap anwenden: `16:00:00` und
+    // `18:00:00+02:00` sind derselbe Zeitpunkt und damit eine Erinnerung.
+    const checked = [...new Set(remindAts)]
+      .map((value, i) => v.datetime(value, `remind_ats[${i}]`, true, { to: 'utc' }));
+    const errors = v.collectErrors(checked);
     if (errors.length) {
       return res.status(400).json({ error: errors.join(' '), code: 400 });
     }
+    const unique = [...new Set(checked.map((result) => result.value))];
     if (unique.length > MAX_REMINDERS_PER_ENTITY) {
       return res.status(400).json({ error: `Maximal ${MAX_REMINDERS_PER_ENTITY} Erinnerungen je Eintrag.`, code: 400 });
     }

@@ -1340,6 +1340,101 @@ const MIGRATIONS_SQL = {
       created_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     );
   `,
+  220: `
+    DROP TRIGGER IF EXISTS trg_reminders_tasks_ad;
+    DROP TRIGGER IF EXISTS trg_reminders_events_ad;
+    CREATE TABLE reminders_new (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      entity_type TEXT NOT NULL CHECK(entity_type IN ('task', 'event', 'subscription', 'inventory_item', 'inventory_tracked_date', 'pantry_item', 'cycle_period', 'cycle_log_nudge', 'schedule_entry', 'schedule_extra_entry', 'waste_pickup', 'document_expiry', 'health_prevention_due', 'fasting_goal', 'fasting_next_start')),
+      entity_id INTEGER NOT NULL,
+      remind_at TEXT NOT NULL,
+      dismissed INTEGER NOT NULL DEFAULT 0,
+      created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+      pushed_at TEXT,
+      assigned_from INTEGER REFERENCES users(id) ON DELETE SET NULL
+    );
+    INSERT INTO reminders_new (id, entity_type, entity_id, remind_at, dismissed, created_by, created_at, pushed_at, assigned_from)
+      SELECT id, entity_type, entity_id, remind_at, dismissed, created_by, created_at, pushed_at, assigned_from FROM reminders;
+    DROP TABLE reminders;
+    ALTER TABLE reminders_new RENAME TO reminders;
+    CREATE INDEX idx_reminders_entity ON reminders(entity_type, entity_id);
+    CREATE INDEX idx_reminders_remind ON reminders(remind_at);
+    CREATE INDEX idx_reminders_user ON reminders(created_by);
+    CREATE INDEX idx_reminders_assigned_from ON reminders(assigned_from);
+    CREATE TRIGGER trg_reminders_tasks_ad
+    AFTER DELETE ON tasks BEGIN
+      DELETE FROM reminders WHERE entity_type = 'task' AND entity_id = OLD.id;
+    END;
+    CREATE TRIGGER trg_reminders_events_ad
+    AFTER DELETE ON calendar_events BEGIN
+      DELETE FROM reminders WHERE entity_type = 'event' AND entity_id = OLD.id;
+    END;
+    ALTER TABLE health_fasting_settings ADD COLUMN remind_goal INTEGER NOT NULL DEFAULT 0 CHECK(remind_goal IN (0, 1));
+    ALTER TABLE health_fasting_settings ADD COLUMN remind_next_start INTEGER NOT NULL DEFAULT 0 CHECK(remind_next_start IN (0, 1));
+  `,
+
+  // Bestaetigte Zuordnung Rezeptzutat -> Vorratszeile (#1314). Der Anker ist
+  // (recipe_id, ingredient_key), NICHT recipe_ingredients.id: die Zutatenzeilen
+  // werden beim Speichern eines Rezepts komplett neu geschrieben. Begruendung
+  // samt Loeschverhalten steht bei Migration 222 in server/db.js.
+  222: `
+    CREATE TABLE IF NOT EXISTS recipe_ingredient_pantry_matches (
+      recipe_id      INTEGER NOT NULL REFERENCES recipes(id) ON DELETE CASCADE,
+      ingredient_key TEXT    NOT NULL,
+      pantry_item_id INTEGER NOT NULL REFERENCES pantry_items(id) ON DELETE CASCADE,
+      confirmed_by   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at     TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+      updated_at     TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+      PRIMARY KEY (recipe_id, ingredient_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_ripm_pantry_item
+      ON recipe_ingredient_pantry_matches(pantry_item_id);
+  `,
+
+  // Tagesziel je Person und erfasster Eintrag (#1326). Die acht Naehrwerte
+  // sind fest und heissen ueberall gleich; NULL heisst "nicht gesetzt" und 0
+  // ist ein ausdrueckliches Ziel - die Begruendung dazu, samt der Wahl des
+  // kanonischen Sichtbarkeits-Vokabulars, steht bei Migration 223 in
+  // server/db.js. Die Trigger bleiben hier weg: eine Testdatenbank braucht
+  // kein updated_at, das sich selbst nachzieht.
+  223: `
+    CREATE TABLE health_nutrition_targets (
+      user_id          INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      energy_kcal      REAL CHECK (energy_kcal      IS NULL OR energy_kcal      >= 0),
+      fat_g            REAL CHECK (fat_g            IS NULL OR fat_g            >= 0),
+      saturated_fat_g  REAL CHECK (saturated_fat_g  IS NULL OR saturated_fat_g  >= 0),
+      carbs_g          REAL CHECK (carbs_g          IS NULL OR carbs_g          >= 0),
+      sugar_g          REAL CHECK (sugar_g          IS NULL OR sugar_g          >= 0),
+      protein_g        REAL CHECK (protein_g        IS NULL OR protein_g        >= 0),
+      salt_g           REAL CHECK (salt_g           IS NULL OR salt_g           >= 0),
+      fiber_g          REAL CHECK (fiber_g          IS NULL OR fiber_g          >= 0),
+      created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+      updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    );
+    CREATE TABLE health_nutrition_entries (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      consumed_at     TEXT    NOT NULL,
+      meal_type       TEXT    CHECK (meal_type IS NULL OR meal_type IN ('breakfast', 'lunch', 'dinner', 'snack')),
+      title           TEXT    NOT NULL,
+      energy_kcal     REAL CHECK (energy_kcal     IS NULL OR energy_kcal     >= 0),
+      fat_g           REAL CHECK (fat_g           IS NULL OR fat_g           >= 0),
+      saturated_fat_g REAL CHECK (saturated_fat_g IS NULL OR saturated_fat_g >= 0),
+      carbs_g         REAL CHECK (carbs_g         IS NULL OR carbs_g         >= 0),
+      sugar_g         REAL CHECK (sugar_g         IS NULL OR sugar_g         >= 0),
+      protein_g       REAL CHECK (protein_g       IS NULL OR protein_g       >= 0),
+      salt_g          REAL CHECK (salt_g          IS NULL OR salt_g          >= 0),
+      fiber_g         REAL CHECK (fiber_g         IS NULL OR fiber_g         >= 0),
+      note            TEXT,
+      visibility      TEXT    NOT NULL DEFAULT 'private' CHECK (visibility IN ('private', 'all')),
+      created_by      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+      updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    );
+    CREATE INDEX idx_health_nutrition_entries_user_date
+      ON health_nutrition_entries(user_id, consumed_at);
+  `,
 };
 
 export { MIGRATIONS_SQL };

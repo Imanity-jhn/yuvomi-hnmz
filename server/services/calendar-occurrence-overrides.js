@@ -12,8 +12,11 @@ import {
 import {
   dropInheritedEventReminders, eventAuthorId, fanOutEventReminders,
 } from './event-reminder-fanout.js';
-import { utcToWall, shiftDateKey } from '../utils/timezone.js';
+import {
+  hasExplicitZone, householdTimeZone, shiftDateKey, storedToInstantMsPrecise, utcToWall,
+} from '../utils/timezone.js';
 import { createLogger } from '../logger.js';
+import { applyDocumentAccess, attachmentAccessMode, eventAudienceChanged } from './document-access.js';
 
 const log = createLogger('CalendarOccurrenceOverrides');
 
@@ -769,6 +772,10 @@ function detachedAttachmentCloneRequests(database, children, master) {
 }
 
 function independentAttachmentValues(database, cloned, sourceDocumentId, claimedDocumentIds) {
+  // `null`: der Aufrufer verweigert die Kopie (#1358 - ohne Sicht auf das
+  // Quelldokument oder ohne Dokumente-Schreibrecht). Der Nachfolger bekommt
+  // dann keinen Anhang, das Original bleibt an der urspruenglichen Serie.
+  if (cloned === null) return attachmentValues(null);
   const values = attachmentValues(cloned);
   const documentId = Number(values.attachment_document_id);
   if (!Number.isInteger(documentId)
@@ -782,7 +789,23 @@ function independentAttachmentValues(database, cloned, sourceDocumentId, claimed
   return values;
 }
 
-function syncOwnedAttachmentAccess(database, documentId, visibility, userIds) {
+/**
+ * Das Anhang-Dokument folgt dem Termin, soweit `mayWiden(documentId)` das
+ * zugesteht - der Aufrufer reicht es als `mayWidenAttachment` herein: `true`
+ * (Dokumente schreiben, das Dokument sehen UND verwalten, #1358) gleicht voll
+ * ab, `ATTACHMENT_NARROW_ONLY` (in diesem Schreiben neu hochgeladen) verengt
+ * nur. Ohne Urteil bleibt das Dokument unangetastet (#1443): `applyDocumentAccess()`.
+ *
+ * Und nur, wenn sich das Publikum aendert (#1443): `before` ist, wer den Termin
+ * vor diesem Speichern sah (`{ visibility, userIds }`, `null` ohne Vorzustand).
+ * Bleibt es gleich, bleibt das Dokument - ausser der Anhang ist in diesem
+ * Speichern neu gesetzt (`attachmentSet`). Eine Kopie (Split, Abloesen) zaehlt
+ * nicht als neu gesetzt: sie traegt schon die Rechte ihrer Quelle.
+ */
+function syncOwnedAttachmentAccess(database, documentId, visibility, userIds, mayWiden = () => false, {
+  before = null, attachmentSet = false,
+} = {}) {
+  if (!attachmentSet && !eventAudienceChanged(before, { visibility, userIds })) return;
   if (!documentId
       || !hasColumn(database, 'family_documents', 'visibility')
       || !hasColumn(database, 'family_document_access', 'document_id')
@@ -792,21 +815,79 @@ function syncOwnedAttachmentAccess(database, documentId, visibility, userIds) {
     : visibility === 'assignees'
       ? 'restricted'
       : 'family';
-  database.prepare('UPDATE family_documents SET visibility = ? WHERE id = ?')
-    .run(documentVisibility, documentId);
-  database.prepare('DELETE FROM family_document_access WHERE document_id = ?').run(documentId);
-  if (documentVisibility !== 'restricted') return;
-  const insert = database.prepare(`
-    INSERT OR IGNORE INTO family_document_access (document_id, user_id) VALUES (?, ?)
-  `);
-  for (const userId of userIds) insert.run(documentId, userId);
+  applyDocumentAccess(database, documentId, {
+    visibility: documentVisibility,
+    userIds,
+    ...attachmentAccessMode(mayWiden(documentId)),
+  });
 }
 
+/**
+ * Ein Termin-Zeitwert auf der WANDUHR-Achse: die zonenlose Ortszeit wird als
+ * UTC gelesen, damit sich zwei Wanduhrzeiten voneinander abziehen lassen, ohne
+ * dass eine DST-Grenze dazwischen die Rechnung verbiegt.
+ *
+ * Das ist genau das Richtige fuer start_datetime/end_datetime (Reihenfolge
+ * pruefen, eine Serie um ganze Tage verschieben) und genau das FALSCHE fuer
+ * alles, was einen Zeitpunkt meint. Der Erinnerungs-Vergleich laeuft deshalb
+ * auf der anderen Achse: der Anker durch `reminderAnchorInstantMs()`, die
+ * Zeile durch `remindAtInstantMs()` (#1291), und ihre Verschiebung beim
+ * Verschieben des Termins durch `reminderShiftMs()` (#1300).
+ */
 function wallTimeMs(value) {
   const raw = String(value ?? '');
   const normalized = raw.includes('T') ? raw : `${raw}T09:00:00`;
   const zoned = /(?:Z|[+-]\d{2}:?\d{2})$/.test(normalized);
   return Date.parse(zoned ? normalized : `${normalized}Z`);
+}
+
+/**
+ * Derselbe Terminbeginn auf der ZEITPUNKT-Achse: die Wanduhrzeit des Haushalts
+ * in echte Millisekunden seit Epoch, DST des jeweiligen Tages eingerechnet.
+ *
+ * Ein reines Datum (ganztaegig) zaehlt als 09:00 Ortszeit - dieselbe Annahme,
+ * die `reminderStartValue()` in public/pages/calendar.js trifft, damit Server
+ * und Dialog denselben Anker haben.
+ *
+ * GELESEN WIRD MIT `storedToInstantMsPrecise()`, NICHT `storedToInstantMs()`
+ * (#1300). Die einfache Fassung rechnet ueber `localToUTC()`, und das bildet
+ * rund um eine DST-Grenze ein ganzes Wanduhr-Band auf denselben Zeitpunkt ab:
+ * 00:30 und 01:30 am 29.03.2026 ergeben in Europe/Berlin beide 23:30Z. Hier
+ * wird die Differenz zweier solcher Anker auf `remind_at` addiert - aus einer
+ * echten Verschiebung um eine Stunde wuerde damit eine Verschiebung um null,
+ * und der Vorlauf waechse still mit.
+ *
+ * @param {string} anchorStart  start_datetime des Vorkommens (Wanduhrzeit)
+ * @param {string} tz           IANA-Zone aus householdTimeZone()
+ * @returns {number} ms seit Epoch, oder NaN bei unlesbarem Wert
+ */
+function reminderAnchorInstantMs(anchorStart, tz) {
+  const raw = String(anchorStart ?? '');
+  const normalized = raw.includes('T') ? raw : `${raw}T09:00:00`;
+  return storedToInstantMsPrecise(normalized, tz) ?? NaN;
+}
+
+/**
+ * Die andere Seite desselben Vergleichs: `reminders.remind_at` als Zeitpunkt.
+ *
+ * Die Spalte ist naiv-UTC - ein zonenloser Wert IST die UTC-Zeit, ein Wert mit
+ * eigener Zone (ueber `PUT /api/v1/reminders` moeglich, der Validator laesst
+ * `Z` und Offset durch) ist der Zeitpunkt, der er ist. Dieselbe Regel wie
+ * `parseRemindAtAsUtc()` in public/utils/reminder-offset.js.
+ *
+ * Die Rechnung ist dieselbe wie in `wallTimeMs()`, die Bedeutung nicht: dort
+ * ist das angehaengte "Z" eine Notluege, damit sich zwei Wanduhrzeiten abziehen
+ * lassen, hier benennt es die Zone, in der die Zeile wirklich steht. Genau
+ * diese zwei Bedeutungen unter einem Namen waren #1291 - darum bekommt die
+ * Erinnerungs-Seite einen eigenen.
+ *
+ * @param {string} value  Wert aus reminders.remind_at
+ * @returns {number} ms seit Epoch, oder NaN bei unlesbarem Wert
+ */
+function remindAtInstantMs(value) {
+  const raw = String(value ?? '');
+  const normalized = raw.includes('T') ? raw : `${raw}T09:00:00`;
+  return Date.parse(hasExplicitZone(normalized) ? normalized : `${normalized}Z`);
 }
 
 function shiftedDateTimeLike(value, shiftMs) {
@@ -815,6 +896,41 @@ function shiftedDateTimeLike(value, shiftMs) {
   if (DATE_ONLY_RE.test(source)) return shifted.slice(0, 10);
   const local = shifted.slice(0, /T\d{2}:\d{2}:\d{2}/.test(source) ? 19 : 16);
   return /Z$/.test(source) ? `${local}Z` : local;
+}
+
+/**
+ * Der Abstand zweier Terminanker auf der ZEITPUNKT-Achse: das Mass, um das eine
+ * Erinnerung mitwandert, wenn ihr Termin verschoben wird.
+ *
+ * NICHT `wallTimeMs()`, obwohl beide Anker Wanduhrzeiten sind (#1300). Der
+ * Wanduhr-Abstand zaehlt Kalendertage, der echte zaehlt Sekunden, und ueber
+ * einer DST-Grenze gehen beide um den Zonenversatz auseinander: zwischen dem
+ * 20.03. und dem 20.07. liegen in Europe/Berlin 122 Wanduhr-Tage, aber nur 121
+ * Tage und 23 Stunden. Auf `remind_at` addiert - eine Spalte, die einen
+ * Zeitpunkt meint - verschob diese Stunde den Vorlauf: aus 60 Minuten wurden 0,
+ * die Erinnerung lag auf dem Terminbeginn. Weil "zum Startzeitpunkt" ein
+ * gueltiges Preset ist, sah das gewollt aus und hat sich nie gemeldet.
+ *
+ * Fuer `start_datetime` bleibt `shiftedDateTimeLike()` oben richtig: eine Serie
+ * um ganze Tage zu schieben heisst, die Wanduhrzeit zu behalten.
+ *
+ * @param {string} sourceAnchor  alter start_datetime (Wanduhrzeit)
+ * @param {string} targetAnchor  neuer start_datetime (Wanduhrzeit)
+ * @param {string} tz  IANA-Zone; der Aufrufer loest sie EINMAL auf (siehe
+ *        `reminderState()`), statt sie hier je Aufruf zu holen
+ * @returns {number} ms, oder NaN wenn ein Anker unlesbar ist
+ */
+function reminderShiftMs(sourceAnchor, targetAnchor, tz) {
+  return reminderAnchorInstantMs(targetAnchor, tz) - reminderAnchorInstantMs(sourceAnchor, tz);
+}
+
+/**
+ * Eine verschobene Erinnerungszeile: `remind_at` als Zeitpunkt gelesen, um
+ * `shiftMs` bewegt und in der Form zurueckgeschrieben, in der sie ankam.
+ */
+function shiftedRemindAt(remindAt, shiftMs) {
+  const shifted = new Date(remindAtInstantMs(remindAt) + shiftMs).toISOString();
+  return /Z$/.test(String(remindAt)) ? shifted : shifted.slice(0, 19);
 }
 
 function firstSlotSeriesChanges(master, selected, changes) {
@@ -835,8 +951,36 @@ function firstSlotSeriesChanges(master, selected, changes) {
   return normalized;
 }
 
-function reminderState(database, eventId, anchorStart) {
-  const anchor = wallTimeMs(anchorStart);
+/**
+ * Der Erinnerungszustand eines Termins als Vorlaeufe - die Form, in der sich
+ * ein Vorkommen und seine Serie vergleichen lassen.
+ *
+ * BEIDE SEITEN LIEGEN AUF DER ZEITPUNKT-ACHSE (#1291). Der Anker ist eine
+ * Wanduhrzeit und muss dafuer umgerechnet werden, `remind_at` ist bereits ein
+ * Zeitpunkt. Lief der Anker durch `wallTimeMs()`, stand in `offsetMs` nicht der
+ * Vorlauf, sondern `Vorlauf + Zonenoffset`, und der Zonenoffset wechselt an der
+ * DST-Grenze: 60 Minuten Vorlauf in der Sommerzeit und 120 in der Winterzeit
+ * ergaben in Europe/Berlin beide 180. `sameReminderState()` meldete sie als
+ * gleich, und der Aufrufer loescht bei "gleich" die Erinnerungen des Kindes -
+ * die abweichende Erinnerung verschwand still.
+ *
+ * DIE ZONE KOMMT VON AUSSEN - DIE REGEL FUER DEN GANZEN ERINNERUNGSPFAD DIESER
+ * DATEI. `householdTimeZone()` ist ein `SELECT` auf `sync_config` plus eine
+ * `Intl`-Pruefung, und diese Helfer stehen in Schleifen: `refreshInheritedChild()`
+ * laeuft ueber JEDES Kind einer Serie, und `reminderState()` wird paarweise
+ * gerufen. Wer die Zone innen holt, bezahlt sie je Aufruf statt je Vorgang.
+ * Deshalb loest der aeusserste Aufrufer sie einmal auf und reicht sie durch -
+ * `reminderShiftMs()`, `shiftOwnedReminders()`, `copyReminderState()`,
+ * `copyResolvedReminderState()`, `replaceReminders()` und `remindAtForOffset()`
+ * halten sich alle daran.
+ *
+ * @param {object} database
+ * @param {number} eventId
+ * @param {string} anchorStart  start_datetime, Wanduhrzeit in der Haushaltszone
+ * @param {string} tz  IANA-Zone aus `householdTimeZone(database)`
+ */
+function reminderState(database, eventId, anchorStart, tz) {
+  const anchor = reminderAnchorInstantMs(anchorStart, tz);
   if (!Number.isFinite(anchor)) return [];
   return database.prepare(`
     SELECT remind_at, dismissed, created_by, assigned_from
@@ -844,7 +988,7 @@ function reminderState(database, eventId, anchorStart) {
     WHERE entity_type = 'event' AND entity_id = ?
     ORDER BY created_by, assigned_from, remind_at, dismissed
   `).all(eventId).map((row) => ({
-    offsetMs: anchor - wallTimeMs(row.remind_at),
+    offsetMs: anchor - remindAtInstantMs(row.remind_at),
     dismissed: Number(row.dismissed),
     createdBy: Number(row.created_by),
     assignedFrom: row.assigned_from === null ? null : Number(row.assigned_from),
@@ -861,8 +1005,21 @@ function sameReminderState(left, right) {
   });
 }
 
-function remindAtForOffset(anchorStart, offset) {
-  const anchor = wallTimeMs(anchorStart);
+/**
+ * Der Erinnerungszeitpunkt fuer einen Vorlauf, als naiv-UTC - dieselbe Form,
+ * die der Dialog fuer den ganzen Termin schreibt (`reminderTimesFromOffsets()`
+ * in public/pages/calendar.js) und die die Zustellung gegen die aktuelle
+ * UTC-Zeit haelt (`remind_at <= now`, server/services/notifications.js).
+ *
+ * DER ANKER IST EIN ZEITPUNKT, KEINE WANDUHRZEIT (#1291). Bis hierher lief der
+ * Beginn durch `wallTimeMs()`, das die zonenlose Ortszeit als UTC liest: in
+ * einem Haushalt auf UTC+2 wurde aus "09:00 minus 60 Minuten" die Zeile
+ * `08:00:00`, gelesen als 08:00 UTC und damit 10:00 Ortszeit - eine Stunde NACH
+ * dem Beginn. Westlich von UTC kam die Erinnerung um den Offset zu frueh, in
+ * einem UTC-Haushalt stimmte sie, weshalb es lange nicht aufgefallen ist.
+ */
+function remindAtForOffset(anchorStart, offset, tz) {
+  const anchor = reminderAnchorInstantMs(anchorStart, tz);
   const result = new Date(anchor - offset * 60000).toISOString();
   return /Z$/.test(String(anchorStart)) ? result : result.slice(0, 19);
 }
@@ -880,7 +1037,7 @@ function replaceAssignments(database, eventId, userIds) {
   if (authorId !== null) fanOutEventReminders(database, eventId, authorId, { dropDerivedWhenOwn: true });
 }
 
-function replaceReminders(database, eventId, actorId, anchorStart, offsets) {
+function replaceReminders(database, eventId, actorId, anchorStart, offsets, tz) {
   database.prepare(`
     DELETE FROM reminders
     WHERE entity_type = 'event' AND entity_id = ? AND created_by = ?
@@ -890,14 +1047,16 @@ function replaceReminders(database, eventId, actorId, anchorStart, offsets) {
     VALUES ('event', ?, ?, ?)
   `);
   for (const offset of offsets) {
-    insert.run(eventId, remindAtForOffset(anchorStart, offset), actorId);
+    insert.run(eventId, remindAtForOffset(anchorStart, offset, tz), actorId);
   }
 }
 
-function copyReminderState(database, sourceId, targetId, sourceAnchor, targetAnchor) {
-  const sourceStart = wallTimeMs(sourceAnchor);
-  const targetStart = wallTimeMs(targetAnchor);
-  const shift = targetStart - sourceStart;
+/**
+ * Die Erinnerungen einer Serie auf ein Vorkommen kopieren - um den Abstand der
+ * beiden Anker verschoben, damit jede Zeile ihren Vorlauf behaelt (#1300).
+ */
+function copyReminderState(database, sourceId, targetId, sourceAnchor, targetAnchor, tz) {
+  const shift = reminderShiftMs(sourceAnchor, targetAnchor, tz);
   if (!Number.isFinite(shift)) return;
   const insert = database.prepare(`
     INSERT INTO reminders
@@ -908,10 +1067,9 @@ function copyReminderState(database, sourceId, targetId, sourceAnchor, targetAnc
     SELECT remind_at, dismissed, created_by, assigned_from
     FROM reminders WHERE entity_type = 'event' AND entity_id = ?
   `).all(sourceId)) {
-    const shifted = new Date(wallTimeMs(row.remind_at) + shift).toISOString();
     insert.run(
       targetId,
-      /Z$/.test(String(row.remind_at)) ? shifted : shifted.slice(0, 19),
+      shiftedRemindAt(row.remind_at, shift),
       row.dismissed,
       row.created_by,
       row.assigned_from,
@@ -936,6 +1094,7 @@ function pruneInheritedRemindersToAssignments(database, eventId, userIds) {
  * existing replacement value or continue inheriting from the master.
  */
 export function upsertOccurrenceOverride(database, {
+  mayWidenAttachment = () => false,
   seriesId,
   recurrenceId,
   actorId,
@@ -1091,8 +1250,15 @@ export function upsertOccurrenceOverride(database, {
     }
 
     replaceAssignments(database, childId, effectiveAssignments);
+    const reminderZone = householdTimeZone(database);
     if (remindersWereOwned) {
-      shiftOwnedReminders(database, childId, current.start_datetime, materialized.start_datetime);
+      shiftOwnedReminders(
+        database,
+        childId,
+        current.start_datetime,
+        materialized.start_datetime,
+        reminderZone,
+      );
     } else if (remindersMayDiffer) {
       deleteEventReminders(database, [childId]);
       copyReminderState(
@@ -1101,6 +1267,7 @@ export function upsertOccurrenceOverride(database, {
         childId,
         master.start_datetime,
         materialized.start_datetime,
+        reminderZone,
       );
     }
     if (requestedReminderOffsets !== undefined) {
@@ -1110,6 +1277,7 @@ export function upsertOccurrenceOverride(database, {
         actorId,
         materialized.start_datetime,
         canonicalOffsets(requestedReminderOffsets),
+        reminderZone,
       );
     }
     if (remindersMayDiffer) {
@@ -1118,8 +1286,8 @@ export function upsertOccurrenceOverride(database, {
     if (remindersMayDiffer) fanOutEventReminders(database, childId, master.created_by, { dropDerivedWhenOwn: true });
 
     if (remindersMayDiffer && sameReminderState(
-      reminderState(database, childId, materialized.start_datetime),
-      reminderState(database, master.id, master.start_datetime),
+      reminderState(database, childId, materialized.start_datetime, reminderZone),
+      reminderState(database, master.id, master.start_datetime, reminderZone),
     )) {
       deleteEventReminders(database, [childId]);
       fields = fields.filter((field) => field !== 'reminders');
@@ -1148,6 +1316,12 @@ export function upsertOccurrenceOverride(database, {
         child.attachment_document_id,
         child.visibility,
         effectiveAssignments,
+        mayWidenAttachment,
+        {
+          before: { visibility: current.visibility, userIds: currentAssignments },
+          attachmentSet: createdAttachment !== undefined
+            && !sameAttachment(effectiveAttachment, currentAttachment),
+        },
       );
     }
     return { event: resolveOccurrence(database, child, master), restored: false };
@@ -1329,7 +1503,7 @@ function scalarDifferencesFromBase(values, base, limitedTo = SCALAR_OVERRIDE_FIE
   return limitedTo.filter((field) => !sameScalar(values[field], base[field]));
 }
 
-function refreshReparentedChild(database, child, oldResolved, successor, successorAssignments) {
+function refreshReparentedChild(database, child, oldResolved, successor, successorAssignments, tz, mayWidenAttachment = () => false) {
   let newBase;
   try {
     newBase = baseOccurrenceFor(successor, child.recurrence_id);
@@ -1360,11 +1534,17 @@ function refreshReparentedChild(database, child, oldResolved, successor, success
     : attachmentValues(successor);
   if (!sameAttachment(effectiveAttachment, attachmentValues(successor))) fields.push('attachment');
   if (oldFields.includes('reminders')) {
-    const childState = reminderState(database, child.id, oldResolved.start_datetime);
-    const seriesState = reminderState(database, successor.id, successor.start_datetime);
+    const childState = reminderState(database, child.id, oldResolved.start_datetime, tz);
+    const seriesState = reminderState(database, successor.id, successor.start_datetime, tz);
     if (!sameReminderState(childState, seriesState)) {
       fields.push('reminders');
-      shiftOwnedReminders(database, child.id, oldResolved.start_datetime, values.start_datetime);
+      shiftOwnedReminders(
+        database,
+        child.id,
+        oldResolved.start_datetime,
+        values.start_datetime,
+        tz,
+      );
     } else {
       deleteEventReminders(database, [child.id]);
     }
@@ -1410,6 +1590,7 @@ function refreshReparentedChild(database, child, oldResolved, successor, success
     JSON.stringify(orderedFields),
     child.id,
   );
+  const assignmentsBefore = canonicalIds(assignmentIds(database, child.id));
   replaceAssignments(database, child.id, effectiveAssignments);
   if (orderedFields.includes('attachment')) {
     syncOwnedAttachmentAccess(
@@ -1417,6 +1598,8 @@ function refreshReparentedChild(database, child, oldResolved, successor, success
       effectiveAttachment.attachment_document_id,
       values.visibility,
       effectiveAssignments,
+      mayWidenAttachment,
+      { before: { visibility: oldResolved.visibility, userIds: assignmentsBefore } },
     );
   }
   return true;
@@ -1424,6 +1607,7 @@ function refreshReparentedChild(database, child, oldResolved, successor, success
 
 /** Splits a series at one original slot and reparents all later override state. */
 export function splitSeries(database, {
+  mayWidenAttachment = () => false,
   seriesId,
   recurrenceId,
   actorId,
@@ -1453,6 +1637,7 @@ export function splitSeries(database, {
         attachment,
         createAttachment,
         cloneDetachedAttachment,
+        mayWidenAttachment,
         reminderOffsets: requestedReminderOffsets,
         confirmedOrphanCount,
       });
@@ -1492,10 +1677,11 @@ export function splitSeries(database, {
 
     const selectedFields = selectedChild ? parseOverrideFields(selectedChild.overridden_fields) : [];
     const requestedAssignments = assignments === undefined ? undefined : orderedIds(assignments);
+    const selectedAssignments = selectedFields.includes('assignments')
+      ? canonicalIds(assignmentIds(database, selectedChild.id))
+      : canonicalIds(assignmentIds(database, master.id));
     const successorAssignments = requestedAssignments === undefined
-      ? selectedFields.includes('assignments')
-        ? canonicalIds(assignmentIds(database, selectedChild.id))
-        : canonicalIds(assignmentIds(database, master.id))
+      ? selectedAssignments
       : requestedAssignments;
     successorValues.assigned_to = requestedAssignments === undefined
       ? selectedFields.includes('assignments')
@@ -1571,10 +1757,15 @@ export function splitSeries(database, {
       : attachmentValues(createdAttachment);
     Object.assign(successorValues, successorAttachment);
 
+    // Die Zone des Haushalts einmal je Vorgang, nicht je Kind: siehe die Regel
+    // am Docblock von `reminderState()`.
+    const reminderZone = householdTimeZone(database);
     for (const child of orphans) {
       materializeDetachedChild(database, child, master, {
         cloneDetachedAttachment,
         claimedDocumentIds,
+        tz: reminderZone,
+        mayWidenAttachment,
       });
     }
     database.prepare('UPDATE calendar_events SET recurrence_rule = ? WHERE id = ?')
@@ -1589,6 +1780,7 @@ export function splitSeries(database, {
         ? selectedResolved.start_datetime
         : master.start_datetime,
       targetAnchor: successorValues.start_datetime,
+      tz: reminderZone,
     });
     if (requestedReminderOffsets !== undefined) {
       replaceReminders(
@@ -1597,6 +1789,7 @@ export function splitSeries(database, {
         actorId,
         successorValues.start_datetime,
         canonicalOffsets(requestedReminderOffsets),
+        reminderZone,
       );
     }
     fanOutEventReminders(database, successorId, master.created_by, { dropDerivedWhenOwn: true });
@@ -1622,6 +1815,16 @@ export function splitSeries(database, {
       successor.attachment_document_id,
       successor.visibility,
       successorAssignments,
+      mayWidenAttachment,
+      {
+        // Verglichen wird mit dem Publikum, dem das Dokument bisher folgte: dem
+        // des Serientermins, wenn er den Anhang selbst trug, sonst dem des
+        // Serienkopfs - eine geerbte Kopie folgt einem engeren Termin (Review #1443).
+        before: selectedFields.includes('attachment')
+          ? { visibility: selectedResolved.visibility, userIds: selectedAssignments }
+          : { visibility: master.visibility, userIds: canonicalIds(assignmentIds(database, master.id)) },
+        attachmentSet: createdAttachment !== undefined,
+      },
     );
     for (const child of children) {
       if (orphanIds.has(Number(child.id))) continue;
@@ -1640,6 +1843,8 @@ export function splitSeries(database, {
         resolvedById.get(Number(child.id)),
         successor,
         successorAssignments,
+        reminderZone,
+        mayWidenAttachment,
       );
     }
     return {
@@ -1692,12 +1897,25 @@ function classifyOrphans(children, proposed, detachAll) {
   });
 }
 
+/**
+ * Wie `copyReminderState()`, nur fuer den aufgeloesten Zustand eines Kindes:
+ * die geerbten Zeilen des Ziels werden ersetzt, die eigenen bleiben.
+ *
+ * Der Riegel auf `shift` steht VOR dem Loeschen, nicht erst vor dem Einfuegen
+ * (#1300): ein unlesbarer Anker heisst "diese Kopie ueberspringen", und ein
+ * Loeschen ohne die nachfolgende Kopie liesse das Ziel schlechter zurueck, als
+ * es war. Bis #1300 fehlte er hier ganz, waehrend `copyReminderState()` ihn
+ * hatte - dieselbe Rechnung, zwei verschiedene Antworten auf denselben Fall.
+ */
 function copyResolvedReminderState(database, {
   sourceEventId,
   targetEventId,
   sourceAnchor,
   targetAnchor,
+  tz,
 }) {
+  const shift = reminderShiftMs(sourceAnchor, targetAnchor, tz);
+  if (!Number.isFinite(shift)) return;
   const rows = database.prepare(`
     SELECT remind_at, dismissed, created_by, assigned_from
     FROM reminders
@@ -1714,7 +1932,6 @@ function copyResolvedReminderState(database, {
     DELETE FROM reminders
     WHERE entity_type = 'event' AND entity_id = ? AND assigned_from IS NOT NULL
   `).run(targetEventId);
-  const shift = wallTimeMs(targetAnchor) - wallTimeMs(sourceAnchor);
   const insert = database.prepare(`
     INSERT INTO reminders
       (entity_type, entity_id, remind_at, dismissed, created_by, assigned_from)
@@ -1724,10 +1941,9 @@ function copyResolvedReminderState(database, {
     const createdBy = Number(row.created_by);
     if (targetOwn.has(createdBy)) continue;
     if (row.assigned_from !== null && !targetAssignees.has(createdBy)) continue;
-    const shifted = new Date(wallTimeMs(row.remind_at) + shift).toISOString();
     insert.run(
       targetEventId,
-      /Z$/.test(String(row.remind_at)) ? shifted : shifted.slice(0, 19),
+      shiftedRemindAt(row.remind_at, shift),
       row.dismissed,
       createdBy,
       row.assigned_from,
@@ -1738,6 +1954,8 @@ function copyResolvedReminderState(database, {
 function materializeDetachedChild(database, child, master, {
   cloneDetachedAttachment,
   claimedDocumentIds,
+  tz,
+  mayWidenAttachment = () => false,
 } = {}) {
   const fields = parseOverrideFields(child.overridden_fields);
   const resolved = resolveOccurrence(database, child, master);
@@ -1753,6 +1971,7 @@ function materializeDetachedChild(database, child, master, {
       targetEventId: child.id,
       sourceAnchor: master.start_datetime,
       targetAnchor: resolved.start_datetime,
+      tz,
     });
   }
   fanOutEventReminders(database, child.id, master.created_by, { dropDerivedWhenOwn: true });
@@ -1799,6 +2018,11 @@ function materializeDetachedChild(database, child, master, {
       detachedAttachment.attachment_document_id,
       resolved.visibility,
       effectiveAssignments,
+      mayWidenAttachment,
+      // Die Kopie traegt die Rechte der Quelle, und die folgte dem Serienkopf:
+      // abgeglichen wird, wenn der abgeloeste Termin ein anderes Publikum hat
+      // als der Serienkopf (Review #1443).
+      { before: { visibility: master.visibility, userIds: canonicalIds(assignmentIds(database, master.id)) } },
     );
   }
 }
@@ -1815,21 +2039,99 @@ function applySeriesChanges(database, seriesId, changes) {
   `).run(...entries.map(([, value]) => value), seriesId);
 }
 
-function shiftOwnedReminders(database, eventId, oldAnchor, newAnchor) {
-  const shift = wallTimeMs(newAnchor) - wallTimeMs(oldAnchor);
-  if (!Number.isFinite(shift) || shift === 0) return;
+/**
+ * Die eigenen Erinnerungen eines Termins mitnehmen, wenn er verschoben wird.
+ *
+ * Verschoben wird um den Abstand der beiden Anker auf der Zeitpunkt-Achse: der
+ * Vorlauf bleibt, die Uhrzeit darf sich aendern (#1300).
+ *
+ * DER RIEGEL FRAGT DEN ANKER, NICHT DAS ERGEBNIS. Gespart werden soll die
+ * Abfrage in dem Fall, der in der Kinderschleife von `updateSeriesWithOverrides()`
+ * der haeufige ist: der Termin hat sich gar nicht bewegt, weil nur Titel oder
+ * Farbe geaendert wurden. Dafuer taugt allein ein UNVERAENDERTER Anker als
+ * Merkmal. `shift === 0` war das falsche: die Umrechnung ist an einer
+ * DST-Grenze nicht eindeutig, und dann liefert eine echte Verschiebung
+ * ebenfalls 0 - der Termin bewegte sich, die Erinnerung nicht, und ihr Vorlauf
+ * wuchs still um eine Stunde. Bleibt `shift` heute 0, obwohl der Anker sich
+ * geaendert hat, schreibt die Schleife dieselben Zeitpunkte zurueck; das kostet
+ * eine Abfrage und behauptet nichts Falsches.
+ */
+function shiftOwnedReminders(database, eventId, oldAnchor, newAnchor, tz) {
+  if (String(oldAnchor ?? '') === String(newAnchor ?? '')) return;
+  const shift = reminderShiftMs(oldAnchor, newAnchor, tz);
+  if (!Number.isFinite(shift)) return;
   const rows = database.prepare(`
     SELECT id, remind_at FROM reminders
     WHERE entity_type = 'event' AND entity_id = ?
   `).all(eventId);
   const update = database.prepare('UPDATE reminders SET remind_at = ? WHERE id = ?');
   for (const row of rows) {
-    const shifted = new Date(wallTimeMs(row.remind_at) + shift).toISOString();
-    update.run(/Z$/.test(String(row.remind_at)) ? shifted : shifted.slice(0, 19), row.id);
+    update.run(shiftedRemindAt(row.remind_at, shift), row.id);
   }
 }
 
-function refreshInheritedChild(database, child, oldResolved, updatedMaster) {
+/**
+ * Die Erinnerungen eines Termins mitnehmen, den ein Anbieter verschoben hat
+ * (#1377) - die EINE Stelle fuer jeden Inbound (Google, CalDAV, Apple, ICS-Abo).
+ *
+ * Bis hierher schrieben die Inbounds `start_datetime` neu und liessen
+ * `reminders.remind_at` stehen. Die Zustellung haelt den absoluten Zeitpunkt
+ * gegen die Uhr, also kam "1 Stunde vorher" nach einer Verschiebung in Google
+ * zur alten Zeit - bei einem nach vorn gezogenen Termin erst nach seinem Beginn.
+ *
+ * DIE VERSCHIEBUNG IST DIESELBE WIE IN YUVOMI: `shiftOwnedReminders()`, also der
+ * Abstand der beiden Anker auf der Zeitpunkt-Achse (#1300), fuer jede Zeile des
+ * Termins - eigene und geerbte (#921). Ganztag rechnet ueber denselben Anker
+ * (09:00 der Haushaltszone), eine Serie haengt ihre Erinnerungen am Master, und
+ * ein eingelesenes Einzelvorkommen ist eine eigene Zeile mit eigener ID.
+ *
+ * DER ZUSTELLSTAND FOLGT DEM DIALOG, NICHT DER SERIEN-ROUTE. Ein eingelesener
+ * Termin wird in Yuvomi ueber den Einzeltermin-Weg verschoben, und dort schreibt
+ * der Dialog die Erinnerungen frisch (`PUT /reminders`), `fanOutEventReminders()`
+ * behandelt eine andere Uhrzeit ebenso als neue Auskunft. Deshalb meldet sich
+ * eine schon zugestellte oder weggeklickte Erinnerung wieder, wenn sie in die
+ * Zukunft wandert. Landet sie in der Vergangenheit, bleibt ihr Stand: eine
+ * zweite Meldung zu einem Zeitpunkt, der vorbei ist, waere keine Auskunft mehr.
+ *
+ * WIEDER SCHARF WIRD NUR, WAS SICH BEWEGT HAT - gemessen am Zeitpunkt der Zeile
+ * vor und nach dem Verschieben, nicht am Start-String. Ein Anbieter darf
+ * denselben Beginn anders schreiben (`10:00Z` als `12:00+02:00`, mit oder ohne
+ * Sekunden); der Riegel oben laesst das durch, und ohne diesen Vergleich kam
+ * eine schon zugestellte Erinnerung ein zweites Mal, obwohl nichts verschoben
+ * wurde (Review-Befund nach #1386).
+ *
+ * Synchron und ohne eigene Transaktion: die Inbounds rufen es direkt nach ihrem
+ * UPDATE, ohne Yield-Punkt dazwischen.
+ *
+ * @param {object} database
+ * @param {number} eventId
+ * @param {string} oldStart  start_datetime vor dem Inbound
+ * @param {string} newStart  start_datetime, wie der Inbound ihn geschrieben hat
+ * @param {{ tz?: string, nowMs?: number }} [options]
+ */
+export function followInboundStartChange(database, eventId, oldStart, newStart, {
+  tz,
+  nowMs = Date.now(),
+} = {}) {
+  if (String(oldStart ?? '') === String(newStart ?? '')) return;
+  const settledRows = database.prepare(`
+    SELECT id, remind_at FROM reminders
+    WHERE entity_type = 'event' AND entity_id = ?
+      AND (pushed_at IS NOT NULL OR dismissed = 1)
+  `);
+  const before = new Map(settledRows.all(eventId)
+    .map((row) => [row.id, remindAtInstantMs(row.remind_at)]));
+  shiftOwnedReminders(database, eventId, oldStart, newStart, tz ?? householdTimeZone(database));
+  const rearm = database.prepare(
+    'UPDATE reminders SET pushed_at = NULL, dismissed = 0 WHERE id = ?'
+  );
+  for (const row of settledRows.all(eventId)) {
+    const instant = remindAtInstantMs(row.remind_at);
+    if (instant !== before.get(row.id) && instant > nowMs) rearm.run(row.id);
+  }
+}
+
+function refreshInheritedChild(database, child, oldResolved, updatedMaster, tz, mayWidenAttachment = () => false) {
   const fields = parseOverrideFields(child.overridden_fields);
   const newBase = baseOccurrenceFor(updatedMaster, child.recurrence_id);
   const values = { ...newBase };
@@ -1838,14 +2140,21 @@ function refreshInheritedChild(database, child, oldResolved, updatedMaster) {
   }
   const ownsAssignments = fields.includes('assignments');
   const ownsAttachment = fields.includes('attachment');
+  const assignmentsBefore = canonicalIds(assignmentIds(database, child.id));
   const effectiveAssignments = ownsAssignments
-    ? canonicalIds(assignmentIds(database, child.id))
+    ? assignmentsBefore
     : canonicalIds(assignmentIds(database, updatedMaster.id));
   if (!ownsAssignments) {
     replaceAssignments(database, child.id, effectiveAssignments);
   }
   if (fields.includes('reminders')) {
-    shiftOwnedReminders(database, child.id, oldResolved.start_datetime, values.start_datetime);
+    shiftOwnedReminders(
+      database,
+      child.id,
+      oldResolved.start_datetime,
+      values.start_datetime,
+      tz,
+    );
   }
   const effectiveAttachment = ownsAttachment
     ? attachmentValues(child)
@@ -1883,12 +2192,15 @@ function refreshInheritedChild(database, child, oldResolved, updatedMaster) {
       effectiveAttachment.attachment_document_id,
       values.visibility,
       effectiveAssignments,
+      mayWidenAttachment,
+      { before: { visibility: oldResolved.visibility, userIds: assignmentsBefore } },
     );
   }
 }
 
 /** Applies a whole-series update with exact-count orphan confirmation. */
 export function updateSeriesWithOverrides(database, {
+  mayWidenAttachment = () => false,
   seriesId,
   actorId,
   isAdmin = false,
@@ -1937,10 +2249,15 @@ export function updateSeriesWithOverrides(database, {
       ...children.map((child) => Number(child.attachment_document_id)),
     ].filter((documentId) => Number.isInteger(documentId) && documentId > 0));
 
+    // Die Zone des Haushalts einmal je Vorgang, nicht je Kind: die Schleife
+    // unten laeuft ueber jedes Kind der Serie (siehe `reminderState()`).
+    const reminderZone = householdTimeZone(database);
     for (const child of orphans) {
       materializeDetachedChild(database, child, current, {
         cloneDetachedAttachment,
         claimedDocumentIds,
+        tz: reminderZone,
+        mayWidenAttachment,
       });
     }
     if (typeof applyUpdate === 'function') applyUpdate(database, current);
@@ -1948,7 +2265,7 @@ export function updateSeriesWithOverrides(database, {
     const updatedAnchor = database.prepare(
       'SELECT start_datetime FROM calendar_events WHERE id = ?'
     ).get(master.id).start_datetime;
-    shiftOwnedReminders(database, master.id, current.start_datetime, updatedAnchor);
+    shiftOwnedReminders(database, master.id, current.start_datetime, updatedAnchor, reminderZone);
     if (assignments !== undefined) {
       const userIds = orderedIds(assignments);
       database.prepare('UPDATE calendar_events SET assigned_to = ? WHERE id = ?')
@@ -1983,6 +2300,7 @@ export function updateSeriesWithOverrides(database, {
         actorId,
         anchor,
         canonicalOffsets(requestedReminderOffsets),
+        reminderZone,
       );
       fanOutEventReminders(database, master.id, master.created_by, { dropDerivedWhenOwn: true });
     }
@@ -1993,12 +2311,21 @@ export function updateSeriesWithOverrides(database, {
         updated.attachment_document_id,
         updated.visibility,
         canonicalIds(assignmentIds(database, master.id)),
+        mayWidenAttachment,
+        { before: { visibility: current.visibility, userIds: currentAssignments }, attachmentSet: true },
       );
     }
     const orphanIds = new Set(orphans.map((child) => Number(child.id)));
     for (const child of children) {
       if (!orphanIds.has(Number(child.id))) {
-        refreshInheritedChild(database, child, resolvedById.get(Number(child.id)), updated);
+        refreshInheritedChild(
+          database,
+          child,
+          resolvedById.get(Number(child.id)),
+          updated,
+          reminderZone,
+          mayWidenAttachment,
+        );
       }
     }
 

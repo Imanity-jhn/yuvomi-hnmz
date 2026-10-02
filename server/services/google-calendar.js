@@ -26,11 +26,12 @@ import { nearestColorId } from '../utils/ical-color.js';
 // Fallback-Zone für den Outbound-Sync, wenn Google für den Zielkalender keine liefert.
 import { householdTimeZone } from '../utils/timezone.js';
 import { outboundEvent } from './outbound-dtstart.js';
-import { assignDefaultToEvent } from './sync-assignment.js';
+import { assignDefaultToEvent, reassignDefaultOnCalendarMove } from './sync-assignment.js';
 import { countSourceEvents, deleteSourceEvents } from './calendar-prune.js';
 import { readSyncOutcome, withSyncOutcome } from './sync-outcome.js';
 import { rruleValue } from './recurrence.js';
 import { runSerialized } from '../utils/sync-lock.js';
+import { followInboundStartChange } from './calendar-occurrence-overrides.js';
 
 const GOOGLE_COLOR = '#4285F4';
 
@@ -990,7 +991,7 @@ function upsertGoogleEvents(items, calRefId = null, calColor = GOOGLE_COLOR, col
     const evColor = (item.colorId && colorMap[item.colorId]) || null;
 
     const existing = db.get().prepare(
-      'SELECT id, outbound_dirty FROM calendar_events WHERE external_calendar_id = ? AND external_source = ?'
+      'SELECT id, outbound_dirty, calendar_ref_id, start_datetime FROM calendar_events WHERE external_calendar_id = ? AND external_source = ?'
     ).get(item.id, 'google');
 
     // Eine lokale Bearbeitung, die noch auf ihren Push wartet, darf der Inbound
@@ -1037,6 +1038,15 @@ function upsertGoogleEvents(items, calRefId = null, calColor = GOOGLE_COLOR, col
                OR calendar_ref_id IS NOT ?
               )
       `).run(...values, existing.id, ...values);
+      // In Google verschoben (#1377): die Erinnerungen ziehen mit.
+      followInboundStartChange(db.get(), existing.id, existing.start_datetime, startDt);
+      // Von einem Kalender in einen anderen verschoben (#1270): die unangetastete
+      // Standard-Zuweisung zieht mit um.
+      reassignDefaultOnCalendarMove(db.get(), existing.id, {
+        fromCalRefId: existing.calendar_ref_id,
+        toCalRefId: calRefId,
+        toDefaultUserId: defaultAssignee,
+      });
     } else {
       // Ohne Nutzer gibt es niemanden, dem der Termin gehören könnte. Die Zweige
       // darüber - Aktualisierung und Löschung - kommen ohne ihn aus und laufen

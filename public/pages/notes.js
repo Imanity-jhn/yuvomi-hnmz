@@ -10,11 +10,14 @@ import { wireCategoryScopeHelp } from '/components/category-manager.js';
 import { stagger, vibrate, scheduleUndoableDelete, wireScrollFade } from '/utils/ux.js';
 import { t } from '/i18n.js';
 import { esc, renderMarkdownLight } from '/utils/html.js';
+import { rowActionHtml } from '/utils/row-action.js';
 import { splitKeepingLineEndings } from '/utils/markdown-checklist.js';
 import { renderMarkdownToolbar, wireMarkdownToolbar } from '/utils/markdown-toolbar.js';
 import { renderSkeletonList } from '/utils/skeleton.js';
 import { renderPageSearch, wirePageSearch } from '/utils/page-search.js';
+import { pageToolsMenuHtml, installPopoverMenus } from '/utils/popover-menu.js';
 import { findPageFab } from '/utils/fab.js';
+import { attachSegmentIndicator } from '/utils/segment-indicator.js';
 import { emptyStateHTML } from '/utils/empty-state.js';
 import { AVATAR_FALLBACK_COLOR } from '/utils/color.js';
 import {
@@ -31,6 +34,7 @@ import {
   moveCategoryPickerOption,
 } from '/utils/note-category-picker.js';
 import { NOTE_CATEGORY_NAME_MAX_LENGTH } from '/utils/note-category-name.js';
+import { isNavModuleReadOnly } from '/permissions.js';
 
 // --------------------------------------------------------
 // Konstanten
@@ -75,6 +79,58 @@ let state = {
 let _container = null;
 
 // --------------------------------------------------------
+// Nur-lesen (#467, #1265 P1)
+// --------------------------------------------------------
+
+/**
+ * Darf dieser Nutzer in der Pinnwand schreiben?
+ *
+ * Die VERBINDLICHE Sperre liegt am Server - das Gate an /api/v1 beantwortet
+ * jedes POST/PUT/PATCH/DELETE unter /notes mit 403, sobald das Modul auf
+ * „Nur lesen" steht. Diese Abfrage ist die ehrliche UI-Entsprechung dazu:
+ * ohne sie trug die Seite sechs Schreibwege voll bedienbar (Haken, Anpinnen,
+ * Loeschen, Anlegen, Speichern, Kategorie anlegen), und jeder endete erst im
+ * fertig ausgefuellten Zustand am 403. Die CSS-Regel ueber
+ * `html[data-module-readonly]` deckte bis hierher NUR die drei Anlegewege
+ * (`.page-fab`, `.toolbar-new-btn`, `.notes-manage-categories`) - `notes.js`
+ * selbst fragte nirgends nach dem Recht.
+ *
+ * Als Funktion und nicht als Konstante: ein Rechtewechsel kommt ohne Reload
+ * an, und jedes Re-Render soll neu fragen. Vorbild: `waste.js`.
+ */
+function readOnly() {
+  return isNavModuleReadOnly('notes');
+}
+
+/**
+ * Die Stecknadel einer Karte - Bedienelement, Zeichen oder nichts.
+ *
+ * DIE ANTWORT FOLGT DEM DATENSATZ, nicht dem Zugriff (#1252): eine angepinnte
+ * Notiz BEHAELT ihre Nadel als Zustandszeichen - das Lesen ist erlaubt, und
+ * ohne sie verloere ein Nur-lesen-Nutzer die Auskunft, die die Karte gerade
+ * traegt. Eine nicht angepinnte Notiz verliert sie ganz: ein leerer Schalter
+ * ist kein Zustand, den man anzeigen koennte.
+ *
+ * Und das Zeichen ist ein `span role="img"`, dessen Beschriftung den ZUSTAND
+ * nennt - kein `disabled`-Knopf. Der truege Trefferflaeche und Hover weiter
+ * und verspraeche „Anpinnen aufheben" fuer eine Beruehrung, die nichts tut
+ * (dieselbe Begruendung wie am Statushaken der Aufgaben, #1209).
+ */
+function pinMarkup(note) {
+  if (!readOnly()) {
+    return `<button class="note-card__pin" data-action="pin" data-id="${note.id}"
+              aria-label="${note.pinned ? t('notes.unpinAction') : t('notes.pinAction')}">
+        <i data-lucide="${note.pinned ? 'pin-off' : 'pin'}" class="icon-sm" aria-hidden="true"></i>
+      </button>`;
+  }
+  if (!note.pinned) return '';
+  return `<span class="note-card__pin note-card__pin--static" role="img"
+              aria-label="${esc(t('notes.pinnedState'))}">
+        <i data-lucide="pin" class="icon-sm" aria-hidden="true"></i>
+      </span>`;
+}
+
+// --------------------------------------------------------
 // Antippbare Checklisten (#704)
 // --------------------------------------------------------
 
@@ -82,9 +138,14 @@ let _container = null;
 // sie zeigen den vollstaendigen Text und kennen die Notiz-ID. Das Dashboard
 // bekommt diese Optionen deshalb ausdruecklich nicht - dort steht ein gekuerzter
 // Auszug, dessen Zeilennummern nicht die der Notiz sind.
-const CHECKLIST_OPTS = () => ({
-  checklist: { interactive: true, toggleLabel: t('notes.checklistToggle') },
-});
+// BEI `notes: read` WIRD DAS KAESTCHEN ZUM ZEICHEN, nicht zum toten Knopf.
+// `renderMarkdownLight` fuehrt dafuer die dritte Form (`stateLabels`, #467):
+// ein `span role="img"`, dessen Beschriftung den Zustand nennt. Die
+// dekorative Form waere hier zu wenig - sie ist `aria-hidden` und nimmt einem
+// Nur-lesen-Nutzer genau die Auskunft, die die Zeile traegt.
+const CHECKLIST_OPTS = () => (readOnly()
+  ? { checklist: { stateLabels: { checked: t('notes.checklistDone'), unchecked: t('notes.checklistOpen') } } }
+  : { checklist: { interactive: true, toggleLabel: t('notes.checklistToggle') } });
 
 /**
  * Zeichnet einen umgeschalteten Haken in jede Ansicht, die ihn gerade zeigt.
@@ -118,6 +179,9 @@ function paintCheck(noteId, line, checked) {
  * geladen, statt einen Haken zu behaupten, den der Server nicht kennt.
  */
 async function toggleCheck(noteId, box) {
+  // Der zweite Riegel hinter dem Markup: ein Kaestchen aus einem aelteren
+  // Render oder aus den Devtools findet ihn trotzdem.
+  if (readOnly()) return;
   const note = state.notes.find((n) => n.id === noteId);
   if (!note) return;
 
@@ -175,18 +239,34 @@ export async function render(container, { user, signal }) {
     <div class="notes-page app-page app-page--full" data-composition="full">
       <div class="page-toolbar notes-toolbar">
         <h1 class="page-toolbar__title">${t('notes.title')}</h1>
-        ${renderPageSearch({ id: 'notes-search', label: t('notes.searchPlaceholder'), placeholder: t('notes.searchPlaceholder'), value: state.filterQuery, clearLabel: t('common.searchClear'), className: 'notes-toolbar__search' })}
-        <button class="btn btn--secondary notes-manage-categories" id="notes-manage-categories" aria-label="${t('category.manageTitle')}">
-          <i data-lucide="tags" class="icon-md" aria-hidden="true"></i>
-          <span>${t('noteCategories.categories')}</span>
-        </button>
-        <button class="btn btn--primary toolbar-new-btn" id="notes-add-btn" aria-label="${t('notes.addNoteLabel')}">
-          <i data-lucide="plus" class="icon-md" aria-hidden="true"></i>
-          <span class="toolbar-new-btn__label">${t('newLabel.notes')}</span>
-        </button>
+        ${renderPageSearch({ id: 'notes-search', label: t('notes.searchPlaceholder'), placeholder: t('notes.searchPlaceholder'), value: state.filterQuery, clearLabel: t('common.searchClear'), className: 'notes-toolbar__search page-toolbar__center' })}
+        ${/* KATEGORIEN VERWALTEN STEHT IM WERKZEUGMENUE (Kopfregel mobil,
+              2026-09-26): am Desktop war es ein 131px-Textknopf neben der
+              Suche, mobil ein loses Icon - Verwaltung, die im Kopf so laut
+              stand wie die Suche (A8). Der Traeger behaelt die Klasse
+              `notes-manage-categories`: an ihr blendet die Shell den
+              Verwaltungsweg bei Nur-lesen aus (layout.css), auch wenn sich das
+              Recht ohne Neuladen aendert. */ ''}
+        ${/* DER AKTIONS-SLOT DES KANONKOPFS (Re-Critique 2026-09-27, D3): in
+              ihn dockt die Shell am Zeigergeraet den FAB mit seinem Nomen an
+              (dockFabIntoToolbar) - ohne Slot schwebte er weiter. Er steht
+              auch bei Nur-lesen, dann leer; unter 1024px blendet die Shell
+              einen leeren Slot aus. */ ''}
+        <div class="page-toolbar__actions">
+          ${readOnly() ? '' : `
+          <div class="notes-manage-categories notes-toolbar__tools">
+            ${pageToolsMenuHtml({ id: 'notes-tools-menu', label: t('common.moreActions'), items: [
+              { action: 'manage-categories', label: t('category.manageTitle'), icon: 'tags' },
+            ] })}
+          </div>`}
+        </div>
       </div>
-      <div class="notes-filters" id="notes-filters" hidden></div>
       <div class="notes-scroll page-scrollport">
+        <!-- DIE CHIPREIHE IST DAS ERSTE KIND DES PORTS (Kopfregel mobil,
+             2026-09-26). Zwischen Kopf und Port kostete sie dauerhaft 65px
+             (Port ab y=179 statt 114), die auch der Kopf-Kollaps nicht
+             zurueckholte (A8); hier scrollt sie mit dem Raster weg. -->
+        <div class="notes-filters page-chip-row" id="notes-filters" hidden></div>
         <div id="notes-grid" class="notes-grid" aria-busy="true">${renderSkeletonList({ rows: 5, lines: 3 })}</div>
       </div>
       <button class="page-fab" id="fab-new-note" aria-label="${t('notes.addNoteLabel')}" data-dock-label="${t('newLabel.notes')}">
@@ -210,6 +290,14 @@ export async function render(container, { user, signal }) {
   }
   const grid = container.querySelector('#notes-grid');
   grid.addEventListener('click', async (e) => {
+    // EIN RIEGEL FUER ALLE SCHREIB-ZWEIGE dieses Handlers (anpinnen, loeschen,
+    // abhaken). Das Markup oben nimmt die Affordanz, das hier nimmt auch dem
+    // uebrig gebliebenen Knoten die Wirkung. Eine Positivliste braucht dieser
+    // Handler nicht: sein einziger lesender Zweig ist die Karte selbst, und die
+    // steht unter dem Riegel.
+    const schreibweg = e.target.closest('[data-action="pin"], [data-action="delete"], .note-md-box[data-md-line]');
+    if (schreibweg && readOnly()) { e.stopPropagation(); return; }
+
     const pinBtn = e.target.closest('[data-action="pin"]');
     if (pinBtn) { e.stopPropagation(); await togglePin(parseInt(pinBtn.dataset.id, 10)); return; }
 
@@ -241,11 +329,22 @@ export async function render(container, { user, signal }) {
   const filterFade = wireScrollFade(container.querySelector('#notes-filters'));
   signal?.addEventListener('abort', () => filterFade.destroy(), { once: true });
 
-  const addHandler = () => openNoteModal({ mode: 'create' });
-  // #notes-add-btn ist per .toolbar-new-btn global ausgeblendet (FAB übernimmt),
-  // bleibt aber als einheitliches Modul-Muster erhalten (frontend-audit 1.9).
-  _container.querySelector('#notes-add-btn').addEventListener('click', addHandler);
-  _container.querySelector('#notes-manage-categories').addEventListener('click', openNoteCategoryManager);
+  // Der Anlegeweg ist per CSS ausgeblendet (html[data-module-readonly]),
+  // der Handler bleibt trotzdem gesperrt: ausgeblendet ist nicht dasselbe wie
+  // unerreichbar (derselbe Satz wie am FAB in waste.js).
+  const addHandler = () => { if (!readOnly()) openNoteModal({ mode: 'create' }); };
+  // Das Werkzeugmenue: Positionierung, Light-Dismiss und Pfeiltasten aus der
+  // geteilten Popover-Mechanik, der Klick ueber `data-action` am Kopf.
+  installPopoverMenus(_container);
+  _container.querySelector('.notes-toolbar')?.addEventListener('click', (e) => {
+    if (e.target.closest('.popover-menu__item[data-action="manage-categories"]') && !readOnly()) {
+      // Der Fokus steht auf einem Eintrag, den das Menue gerade versteckt hat;
+      // der Dialog gaebe ihn beim Schliessen dorthin zurueck und er fiele aufs
+      // Dokument. Also vorher auf den Knopf, der das Menue geoeffnet hat.
+      _container.querySelector('.notes-toolbar .page-tools-btn')?.focus();
+      openNoteCategoryManager();
+    }
+  });
   findPageFab('fab-new-note').addEventListener('click', addHandler);
 
   wirePageSearch(_container, {
@@ -392,25 +491,7 @@ function renderGrid() {
   if (!visible.length) {
     const isFiltered = q.length > 0 || !!state.filterCreator || state.filterCategoryIds.length > 0;
     grid.replaceChildren();
-    // Gefiltert ohne Treffer ist ein anderer Zustand als „noch keine Notiz":
-    // er wird als `role="status"` angesagt und traegt keinen Anlegen-CTA.
-    grid.insertAdjacentHTML('beforeend', isFiltered
-      ? emptyStateHTML({
-        variant: 'no-results',
-        title: t('notes.noResultsTitle'),
-        description: q
-          ? t('notes.noResultsDescription', { query: state.filterQuery })
-          : state.filterCategoryIds.length
-            ? t('noteCategories.noResults')
-            : t('notes.noResultsCreatorDescription', { name: state.filterCreator }),
-      })
-      : emptyStateHTML({
-        icon: 'file-text',
-        title: t('notes.emptyTitle'),
-        description: t('notes.emptyDescription'),
-        hint: t('emptyHint.notes'),
-        action: { label: t('notes.emptyAction'), icon: 'plus', attrs: { id: 'empty-cta-notes' } },
-      }));
+    grid.insertAdjacentHTML('beforeend', notesEmptyStateHtml(isFiltered));
     if (window.lucide) lucide.createIcons({ el: grid });
     grid.querySelector('#empty-cta-notes')?.addEventListener('click', () => {
       document.querySelector('.page-fab')?.click();
@@ -426,18 +507,79 @@ function renderGrid() {
   const rest   = visible.filter((n) => !n.pinned);
   const heading = (label) => `<h2 class="notes-group__title u-section-title">${label}</h2>`;
 
-  const html = (pinned.length && rest.length)
-    ? heading(t('notes.groupPinned')) + pinned.map(renderNoteCard).join('')
-      + heading(t('notes.groupOthers')) + rest.map(renderNoteCard).join('')
-    : visible.map(renderNoteCard).join('');
+  // Der Notiztitel ist eine echte Ueberschrift (R8 H15), eine Ebene unter
+  // dem, was darueber steht: unter den Gruppenkoepfen (h2) ein h3, sonst
+  // direkt unter dem Seitentitel (h1) ein h2 - keine uebersprungene Ebene.
+  const grouped = Boolean(pinned.length && rest.length);
+  const card = (n) => renderNoteCard(n, { headingLevel: grouped ? 3 : 2 });
+  const html = grouped
+    ? heading(t('notes.groupPinned')) + pinned.map(card).join('')
+      + heading(t('notes.groupOthers')) + rest.map(card).join('')
+    : visible.map(card).join('');
 
   grid.replaceChildren();
   grid.insertAdjacentHTML('beforeend', html);
   if (window.lucide) lucide.createIcons({ el: grid });
-  stagger(grid.querySelectorAll('.note-card'));
+  stagger(grid.querySelectorAll('.note-card'), { host: grid });
 }
 
-function renderNoteCard(note) {
+/**
+ * Der Leerzustand des Rasters - als eigene Funktion, weil seine
+ * Anlegen-Aufforderung eine Rechtefrage traegt und `renderGrid()` sich nicht
+ * messen laesst (sie schreibt in den Seitencontainer).
+ *
+ * Gefiltert ohne Treffer ist ein anderer Zustand als „noch keine Notiz": er
+ * wird als `role="status"` angesagt und traegt ohnehin keinen Anlegen-CTA.
+ *
+ * DER CTA MUSS WIRKLICH WEG UND DARF NICHT NUR VERSTECKT SEIN: er klickt den
+ * FAB (`document.querySelector('.page-fab')?.click()`), und `.click()` erreicht
+ * auch ein Element mit `display: none`. Die CSS-Regel aus #467 haette ihn also
+ * nicht aufgehalten.
+ *
+ * MIT IHM GEHEN BESCHREIBUNG UND HINWEIS (#1348). Beide schicken zum +-Knopf
+ * („Neue Notiz über den + Button erstellen", „Tippe auf + für eine neue
+ * Notiz") - bei `read` gibt es ihn nicht. Der Titel bleibt als Auskunft ueber
+ * den Zustand (Regel fuer alle Pakete aus #1265).
+ */
+function notesEmptyStateHtml(isFiltered) {
+  const q = state.filterQuery.trim().toLowerCase();
+  if (isFiltered) {
+    return emptyStateHTML({
+      variant: 'no-results',
+      title: t('notes.noResultsTitle'),
+      description: q
+        ? t('notes.noResultsDescription', { query: state.filterQuery })
+        : state.filterCategoryIds.length
+          ? t('noteCategories.noResults')
+          : t('notes.noResultsCreatorDescription', { name: state.filterCreator }),
+    });
+  }
+  const ro = readOnly();
+  return emptyStateHTML({
+    icon: 'file-text',
+    title: t('notes.emptyTitle'),
+    description: ro ? '' : t('notes.emptyDescription'),
+    hint: ro ? '' : t('emptyHint.notes'),
+    action: ro ? null : { label: t('notes.emptyAction'), icon: 'plus', attrs: { id: 'empty-cta-notes' } },
+  });
+}
+
+/**
+ * Wie der Screenreader eine Notiz an ihren Kartenknoepfen nennt: der Titel,
+ * sonst die erste Textzeile ohne Markdown-Zeichen, sonst "Notiz". Zwanzig
+ * Knoepfe, die alle "Notiz loeschen" heissen, sind fuer ihn einer.
+ */
+export function noteName(note) {
+  const title = String(note?.title || '').trim();
+  if (title) return title;
+  const line = String(note?.content || '').split('\n')
+    .map((l) => l.replace(/^\s*(?:#{1,6}\s+|[-*+]\s+(?:\[[ xX]\]\s+)?|\d+[.)]\s+|>\s*)/, '').replace(/[*_`~]/g, '').trim())
+    .find(Boolean);
+  if (!line) return t('notes.viewNote');
+  return line.length > 40 ? `${line.slice(0, 40).trimEnd()}…` : line;
+}
+
+function renderNoteCard(note, { headingLevel = 2 } = {}) {
   // KEINE INITIALEN AUF EINER 16px-SCHEIBE (Initialen-Schwelle-Regel).
   //
   // Hier standen bis zuletzt zwei Buchstaben auf einer 16-%-Waschung - unter der
@@ -454,11 +596,22 @@ function renderNoteCard(note) {
     <div class="note-card ${note.pinned ? 'note-card--pinned' : ''}"
          data-id="${note.id}"
          style="--note-color:${esc(note.color)};">
-      <button class="note-card__pin" data-action="pin" data-id="${note.id}"
-              aria-label="${note.pinned ? t('notes.unpinAction') : t('notes.pinAction')}">
-        <i data-lucide="${note.pinned ? 'pin-off' : 'pin'}" class="icon-sm" aria-hidden="true"></i>
-      </button>
-      ${note.title ? `<div class="note-card__title">${esc(note.title)}</div>` : ''}
+      ${/* DIE KARTE OEFFNET SELBST (R9 M13, A6 P2-6). Der Oeffnen-Knopf sass
+          * als dritter 44px-Kreis in der Fusszeile, neben Nadel und Loeschen -
+          * mobil trug jede Karte damit drei Bedienkreise und war 248px hoch.
+          * Er bleibt der Tastatur- und Vorleseweg (die Karte selbst ist ein
+          * Div), liegt aber jetzt unsichtbar UEBER der ganzen Karte: der
+          * Fokusring umrahmt die Karte, ein Tipp irgendwo darauf trifft ihn,
+          * und Nadel, Loeschen und Checklisten-Haken liegen darueber
+          * (notes.css, z-index). */ ''}
+      <button type="button" class="note-card__open" data-action="open" data-id="${note.id}"
+              aria-label="${esc(t('notes.openNamed', { name: noteName(note) }))}"></button>
+      ${pinMarkup(note)}
+      ${/* ECHTE UEBERSCHRIFT STATT `div` (R8 H15): die Ueberschriften-
+          * Navigation eines Screenreaders fand bis dahin keine einzige Notiz.
+          * Die Optik traegt allein die Klasse (typography.css, notes.css);
+          * `reset.css` nimmt den UA-Rand, die Groesse setzt die Rolle. */ ''}
+      ${note.title ? `<h${headingLevel === 3 ? 3 : 2} class="note-card__title">${esc(note.title)}</h${headingLevel === 3 ? 3 : 2}>` : ''}
       <div class="note-card__content">${renderMarkdownLight(note.content, CHECKLIST_OPTS())}</div>
       ${(note.categories || []).length ? `<div class="note-card__categories" role="group" aria-label="${t('noteCategories.categories')}">
         ${note.categories.map(renderCategoryBadge).join('')}
@@ -474,17 +627,7 @@ function renderNoteCard(note) {
           <span>${esc(note.creator_name || '')}</span>
         </div>
         <div class="note-card__actions">
-          <!-- Die Karte selbst ist ein Div mit Klick-Handler und daher nicht
-               fokussierbar. Ohne diesen Button gäbe es für Tastatur- und
-               Screenreader-Nutzung keinen Weg, eine Notiz zu öffnen. Analog zur
-               Inline-Aktion auf der Aufgaben-Karte. -->
-          <button class="note-card__open" data-action="open" data-id="${note.id}"
-                  aria-label="${t('notes.openNote')}">
-            <i data-lucide="maximize-2" class="icon-sm" aria-hidden="true"></i>
-          </button>
-          <button class="note-card__delete" data-action="delete" data-id="${note.id}" aria-label="${t('notes.deleteLabel')}">
-            <i data-lucide="trash-2" class="icon-sm" aria-hidden="true"></i>
-          </button>
+          ${readOnly() ? '' : rowActionHtml({ icon: 'trash-2', tone: 'danger', action: 'delete', className: 'note-card__delete', label: t('common.deleteNamed', { name: noteName(note) }), attrs: { 'data-id': note.id } })}
         </div>
       </div>
     </div>
@@ -591,7 +734,44 @@ function renderCategoryEditor(selectedIds = []) {
     </div>`;
 }
 
+/**
+ * Der Zettel bei `notes: read`: Leseansicht, sonst nichts.
+ *
+ * Warum ein eigener Dialog und nicht der bestehende mit abgeschalteten Teilen:
+ * jedes Stueck des Editor-Dialogs SCHREIBT - der Umschalter fuehrt in den
+ * Editor, die Fusszeile speichert und loescht, das Kategorie-Feld legt
+ * Kategorien an. Uebrig blieben die Leseansicht und der Titel, und genau die
+ * baut dieser Dialog. Ein Reiter „Bearbeiten", der auf ein 403 fuehrt, ist ein
+ * Versprechen; ein `disabled`-Reiter waere dasselbe Versprechen mit Grauschleier.
+ *
+ * Die Kaestchen der Checkliste gehen durch CHECKLIST_OPTS() und sind damit hier
+ * ZEICHEN statt Bedienelemente (`stateLabels`) - deshalb steht `live` auch im
+ * Nur-lesen-Fall auf `true`: der Schalter entscheidet nur, OB die Optionen
+ * mitgehen, welche es sind, entscheidet das Recht.
+ */
+function openNoteReadModal(note) {
+  openSharedModal({
+    title: note.title && note.title.trim() ? note.title : t('notes.viewNote'),
+    size: 'lg',
+    content: `
+    <div class="note-modal" data-view="read" data-note-id="${note.id}" style="--note-color:${esc(note.color)};">
+      <div class="note-read-view" data-pane="read" tabindex="-1">
+        ${renderNoteReadHtml(note.content, { live: true, categories: note.categories || [] })}
+      </div>
+    </div>`,
+    onSave(panel) {
+      window.lucide?.createIcons({ el: panel });
+    },
+  });
+}
+
 function openNoteModal({ mode, note = null }) {
+  // Der Riegel steht VOR jeder Vorbereitung: der Anlegeweg entfaellt ganz, ein
+  // bestehender Zettel geht als Leseansicht auf.
+  if (readOnly()) {
+    if (mode === 'edit' && note) openNoteReadModal(note);
+    return;
+  }
   const isEdit      = mode === 'edit';
   const selColor    = (isEdit ? note.color : null) || NOTE_COLORS[0];
   // Bestehende Notizen können Farben außerhalb der Palette tragen (Alt-Daten,
@@ -666,9 +846,12 @@ function openNoteModal({ mode, note = null }) {
       </div>
 
       <div class="modal-panel__footer modal-panel__footer--plain note-modal__footer">
-        ${isEdit ? `<button type="button" class="btn btn--danger-outline" id="note-modal-delete" style="margin-right:auto">${t('common.delete')}</button>` : ''}
+        ${isEdit ? `<button type="button" class="btn btn--danger-outline" id="note-modal-delete" style="margin-inline-end:auto">
+          <i data-lucide="trash-2" class="icon-md" aria-hidden="true"></i>${t('common.delete')}
+        </button>` : ''}
         <button type="button" class="btn btn--secondary" id="note-modal-cancel" data-editor-only>${t('common.cancel')}</button>
         <button type="button" class="btn btn--primary" id="note-modal-save" data-editor-only>${isEdit ? t('common.save') : t('common.create')}</button>
+        ${isEdit ? `<button type="button" class="btn btn--primary" id="note-modal-edit" data-reader-only>${t('common.edit')}</button>` : ''}
       </div>
     </div>`;
 
@@ -696,11 +879,21 @@ function openNoteModal({ mode, note = null }) {
       const readPane    = panel.querySelector('[data-pane="read"]');
       const editPane    = panel.querySelector('[data-pane="edit"]');
       const editorOnly  = [...panel.querySelectorAll('[data-editor-only]')];
+      const readerOnly  = [...panel.querySelectorAll('[data-reader-only]')];
       const titleEl     = document.getElementById('shared-modal-title');
       const modeTabs    = [...panel.querySelectorAll('.note-mode-switch .sub-tab')];
+      // Lesen/Bearbeiten gleitet wie jede Segment-Leiste (D8); die Kapsel
+      // folgt `sub-tab--active` aus setView() von selbst.
+      const modeSwitch = panel.querySelector('.note-mode-switch');
+      if (modeSwitch) attachSegmentIndicator(modeSwitch);
       const viewTitle   = panel.querySelector('#note-title');
       const viewContent = panel.querySelector('#note-content');
       const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+      function syncFooter(view) {
+        editorOnly.forEach((el) => { el.style.display = view === 'read' ? 'none' : ''; });
+        readerOnly.forEach((el) => { el.style.display = view === 'read' ? '' : 'none'; });
+      }
 
       function animatePane(pane) {
         if (reduceMotion) return;
@@ -724,7 +917,10 @@ function openNoteModal({ mode, note = null }) {
         // beiden Modi stehen: zuvor verschwand die Fußzeile im Lese-Modus
         // komplett, wodurch die geöffnete Notiz keine einzige Objektaktion mehr
         // anbot — anders als das Aufgaben-Modal, das Löschen inline führt.
-        editorOnly.forEach((el) => { el.style.display = view === 'read' ? 'none' : ''; });
+        // Im Lese-Modus steht rechts "Bearbeiten" als Primaerknopf: sonst war
+        // "Loeschen" die einzige und damit lauteste Fussaktion (Critique
+        // 2026-09-26) - die zerstoerende Handlung als Hauptweg.
+        syncFooter(view);
         modeTabs.forEach((b) => {
           const on = b.dataset.view === view;
           b.classList.toggle('sub-tab--active', on);
@@ -773,7 +969,10 @@ function openNoteModal({ mode, note = null }) {
       });
 
       // Initialen Footer-Zustand an die Startansicht angleichen.
-      editorOnly.forEach((el) => { el.style.display = initialView === 'read' ? 'none' : ''; });
+      syncFooter(initialView);
+      panel.querySelector('#note-modal-edit')?.addEventListener('click', () => {
+        setView('edit', { focusField: true });
+      });
       viewTitle.addEventListener('input', syncHeaderTitle);
 
       panel.querySelector('#note-modal-delete')?.addEventListener('click', () => {
@@ -1128,6 +1327,11 @@ function openNoteModal({ mode, note = null }) {
 // --------------------------------------------------------
 
 function openNoteCategoryManager() {
+  // Der AUFRUFER haelt die Sperre, nicht die Komponente (Regel 7 im Kopf von
+  // utils/module-access.js): `basePath: '/notes/categories'` gehoert dem Modul
+  // dieser Seite, die Frage ist also dieselbe, die sie fuer ihre anderen
+  // Knoepfe stellt.
+  if (readOnly()) return;
   const refresh = async (change = {}) => {
     if (change.action === 'delete') {
       removeNoteCategoryFromState(state, change.key);
@@ -1189,6 +1393,7 @@ function openNoteCategoryManager() {
 // --------------------------------------------------------
 
 async function togglePin(id) {
+  if (readOnly()) return;
   try {
     const res  = await api.patch(`/notes/${id}/pin`, {});
     const note = state.notes.find((n) => n.id === id);
@@ -1218,6 +1423,7 @@ async function reloadNotes() {
 }
 
 async function deleteNote(id) {
+  if (readOnly()) return;
   closeModal({ force: true });
   const note = state.notes.find((n) => n.id === id);
   state.notes = state.notes.filter((n) => n.id !== id);
@@ -1236,3 +1442,19 @@ async function deleteNote(id) {
     },
   });
 }
+
+/**
+ * Messflaeche: nur reine Funktionen, deren Vertrag ausserhalb dieser Datei
+ * zaehlt. Die Nur-lesen-Regel (#1265 P1) ist eine Aussage ueber genau dieses
+ * Markup - was verschwindet, und was als Zeichen stehen bleibt, das den
+ * Zustand nennt. `state` steht mit darin, weil eine Karte ohne Notizen im
+ * Speicher sich nicht stellen liesse.
+ */
+export const __test = {
+  renderNoteCard, notesEmptyStateHtml, renderNoteReadHtml, pinMarkup,
+  CHECKLIST_OPTS, readOnly, state,
+  // Der Dialog kommt mit, weil seine Aussage KEIN Markup dieser Seite ist:
+  // welchen Inhalt der Zettel bekommt, sieht nur der, der `openModal` die
+  // Optionen abnimmt.
+  openNoteModal,
+};

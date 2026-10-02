@@ -176,9 +176,24 @@ test('PUT time_format: ungültig -> 400, gültig -> persist', async () => {
   assert.equal((await put({ time_format: '48h' })).status, 400);
   assert.equal((await put({ time_format: '12h' })).body.data.time_format, '12h');
 });
+// Die Formen stehen hier als ECHTE Requests, nicht als Musterprüfung: die
+// Formprüfung selbst liegt in utils/i18n.js und wird dort gemessen, aber ob die
+// Route sie auch anlegt, beantwortet nur ein Request. `fil-PH` ist der Fall, der
+// die Erweiterung auf dreibuchstabige Sprachcodes erzwang (#1322 kam aus
+// derselben Naht), `zh-Hant-TW` der mit Schrift-Subtag.
 test('PUT region: ungültig -> 400, gültig -> persist, null -> leer', async () => {
   assert.equal((await put({ region: 'x' })).status, 400);
+  // Nicht-Strings: die frühere Prüfung führte `typeof region !== 'string'` als
+  // eigenen Zweig, die heutige steckt ihn in isRegionTag(). Gleiches Ergebnis,
+  // und das gehört festgenagelt statt angenommen.
+  assert.equal((await put({ region: 42 })).status, 400);
+  assert.equal((await put({ region: {} })).status, 400);
+  assert.equal((await put({ region: 'de_DE' })).status, 400);
+  assert.equal((await put({ region: 'de-de' })).status, 400);
   assert.equal((await put({ region: 'de-DE' })).body.data.region, 'de-DE');
+  assert.equal((await put({ region: 'fil-PH' })).body.data.region, 'fil-PH');
+  assert.equal((await put({ region: 'zh-Hant-TW' })).body.data.region, 'zh-Hant-TW');
+  assert.equal((await put({ region: 'custom' })).body.data.region, 'custom');
   assert.equal((await put({ region: null })).body.data.region, null);
 });
 test('PUT timezone: Mitglied -> 403, ungültig -> 400, gültig -> persist, null -> Rückfall', async () => {
@@ -398,6 +413,47 @@ test('PUT disabled_modules: Mitglied -> 403, Admin validiert + persist', async (
   assert.equal((await put({ disabled_modules: 'tasks' }, { role: 'admin' })).status, 400);
   const ok = await put({ disabled_modules: ['tasks', 'budget', 'tasks', 'nonsense'] }, { role: 'admin' });
   assert.deepEqual(ok.body.data.disabled_modules.sort(), ['budget', 'tasks']);
+});
+test('PUT disabled_modules changes Health and fasting cleanup atomically', async () => {
+  cfgSet('disabled_modules', '[]');
+  const userId = db.prepare(`INSERT INTO users
+    (username, display_name, password_hash, role, family_role)
+    VALUES ('preferences-fasting', 'Preferences fasting', 'x', 'member', 'parent')`).run().lastInsertRowid;
+  db.prepare(`INSERT INTO health_fasting_settings
+    (user_id, default_goal_minutes, remind_goal, remind_next_start)
+    VALUES (?, 960, 1, 0)`).run(userId);
+  const fastId = db.prepare(`INSERT INTO health_fasts
+    (user_id, start_at, end_at, start_tzid, goal_minutes)
+    VALUES (?, '2026-09-18T06:00:00.000Z', NULL, 'UTC', 960)`).run(userId).lastInsertRowid;
+  db.prepare(`INSERT INTO reminders (entity_type, entity_id, remind_at, created_by)
+    VALUES ('fasting_goal', ?, '2026-09-18T22:00:00.000Z', ?)`).run(fastId, userId);
+  db.prepare(`INSERT INTO reminders (entity_type, entity_id, remind_at, created_by)
+    VALUES ('fasting_next_start', ?, '2026-09-19T06:00:00.000Z', ?)`).run(fastId, userId);
+  db.exec(`CREATE TRIGGER test_fail_preferences_fasting_delete
+    BEFORE DELETE ON reminders
+    WHEN OLD.entity_type IN ('fasting_goal', 'fasting_next_start')
+    BEGIN
+      SELECT RAISE(ABORT, 'forced preferences fasting cleanup failure');
+    END`);
+  try {
+    const unrelated = await put({ disabled_modules: ['tasks'] }, { role: 'admin' });
+    assert.equal(unrelated.status, 200);
+    assert.deepEqual(JSON.parse(db.prepare("SELECT value FROM sync_config WHERE key = 'disabled_modules'").get().value), ['tasks']);
+    assert.equal(db.prepare("SELECT count(*) AS count FROM reminders WHERE entity_type IN ('fasting_goal', 'fasting_next_start') AND created_by = ?").get(userId).count, 2);
+
+    const failed = await put({ disabled_modules: ['tasks', 'health'] }, { role: 'admin' });
+    assert.equal(failed.status, 500);
+    assert.deepEqual(JSON.parse(db.prepare("SELECT value FROM sync_config WHERE key = 'disabled_modules'").get().value), ['tasks']);
+    assert.equal(db.prepare("SELECT count(*) AS count FROM reminders WHERE entity_type IN ('fasting_goal', 'fasting_next_start') AND created_by = ?").get(userId).count, 2);
+  } finally {
+    db.exec('DROP TRIGGER IF EXISTS test_fail_preferences_fasting_delete');
+  }
+
+  const disabled = await put({ disabled_modules: ['tasks', 'health'] }, { role: 'admin' });
+  assert.equal(disabled.status, 200);
+  assert.equal(db.prepare("SELECT count(*) AS count FROM reminders WHERE entity_type = 'fasting_goal' AND created_by = ?").get(userId).count, 0);
+  db.prepare('DELETE FROM users WHERE id = ?').run(userId);
+  cfgSet('disabled_modules', '[]');
 });
 test('PUT health_cycle_enabled: Mitglied -> 403, Admin non-boolean 400, false persist', async () => {
   assert.equal((await put({ health_cycle_enabled: false }, { role: 'member' })).status, 403);

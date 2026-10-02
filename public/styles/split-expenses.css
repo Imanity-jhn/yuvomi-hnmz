@@ -69,6 +69,13 @@
   color: var(--color-text-secondary);
 }
 
+/* Die Angaben des Gruppen-Dialogs bei `budget: read` (#1265 P7): eine Zeile
+ * unter der Beschreibung, eine Stufe kleiner, damit sie als Nachsatz liest. */
+.split-group-meta {
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
 /* Die Kennzahl-Zeile ist .metric-grid (budget.css). Die frühere eigene
  * .split-summary-card war die dritte von fünf Kartenbauarten im selben Modul
  * (Critique 2026-07-30, P0) - ersatzlos entfallen, das Markup trägt jetzt
@@ -97,6 +104,9 @@
 .split-groups-panel {
   padding: var(--space-3);
   min-height: 0;
+  /* So hoch wie seine Gruppen, nicht wie der Hauptbereich daneben: gestreckt
+   * stand bei 1440 unter zwei Gruppen eine leere Flaeche von ueber 1000px. */
+  align-self: start;
   /* Träger der Zeilenliste (tokens.css): die Zeilen laufen bis an die Kante,
    * also muss der Träger sie an seinem Radius beschneiden. */
   overflow: hidden;
@@ -108,64 +118,38 @@
 
 .split-panel-head {
   justify-content: space-between;
+  flex-wrap: wrap;
   padding: 0 var(--space-1) var(--space-2);
+}
+
+/* Die Gruppensuche steht im Kopf der Liste (.section-toolbar, R14 P1): mobil
+ * als Icon neben „+", damit die erste Gruppe eine Zeile hoeher steht. Erst wo
+ * die Gruppen eine eigene schmale Spalte bekommen (zweispaltig ab 976px
+ * Container, unten), bliebe ihr neben Titel und „+" nur ~80px - dort nimmt
+ * sie die eigene Zeile darunter. */
+@container split-page (min-width: 976px) {
+  .split-panel-head.section-toolbar > label.split-search {
+    order: 3;
+    flex: 1 0 100%;
+    max-width: none;
+    margin-inline-start: 0;
+  }
 }
 
 .split-panel-title {
   font-weight: 800;
 }
 
-.split-search {
-  display: grid;
-  gap: var(--space-1);
+/* Der Zaehler der Gruppenliste in der geteilten Zaehler-Tinte
+ * (`.list-group__count`, list-row.css), mit Abstand zum Titel. */
+.split-panel-title .list-group__count {
+  margin-inline-start: var(--space-2);
 }
 
-.split-search__label {
-  color: var(--color-text-secondary);
-  font-size: var(--text-sm);
-  font-weight: var(--font-weight-medium);
-}
-
-.split-search__control {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  border: 1px solid var(--color-border-control);
-  border-radius: var(--radius-md);
-  padding: 0 var(--space-3);
-  background: var(--color-surface-2);
-}
-
-/* Tastaturfokus: das Feld darin ist randlos (outline: 0 unten), also zeigt
- * der TRÄGER den Zustand - dasselbe Rezept wie .input:focus im Feldkanon
- * (layout.css). Ohne diese Regel war das Suchfeld das einzige der App ohne
- * jeden sichtbaren Fokus (WCAG 2.4.7). */
-.split-search:focus-within {
-  border-color: var(--color-accent);
-  box-shadow: 0 0 0 3px var(--color-accent-light);
-}
-
-.split-search input {
-  width: 100%;
-  min-height: 42px;
-  border: 0;
-  outline: 0;
-  background: transparent;
-  color: var(--color-text-primary);
-  /* Drop WebKit's native type=search magnifier; the explicit leading icon is
-   * the only magnifier this field should show. */
-  -webkit-appearance: none;
-  appearance: none;
-}
-
-.split-search input::-webkit-search-decoration,
-.split-search input::-webkit-search-results-decoration,
-.split-search input::-webkit-search-results-button,
-.split-search input::-webkit-search-cancel-button {
-  -webkit-appearance: none;
-  appearance: none;
-  display: none;
-}
+/* Das Suchfeld ist das geteilte (renderPageSearch, page-search.css). Hier
+ * stand ein eigenes mit sichtbarem Label ueber dem Feld, Kante, 12px-Ecke und
+ * eigenem Fokusring - eine der fuenf Suchfeld-Varianten der Critique
+ * 2026-09-26 (P1). Die Seitenleiste braucht vom Feld nichts Eigenes. */
 
 /* Statusfilter der Gruppenliste (Aktiv/Archiviert, #574). Teilt die
  * .filter-chip-Vokabel mit Aufgaben/Dokumenten. */
@@ -187,15 +171,22 @@
  * Jetzt trägt ihn die Fläche allein, wie die Sidebar-Pille. */
 .split-groups {
   margin-top: var(--space-3);
+  /* Die LISTE laeuft bis an die Traegerkante, nicht jede Zeile einzeln ueber
+   * ihre Liste hinaus: vorher trug `.split-group` die negativen Raender samt
+   * `width: calc(100% + 2 * space-3)`, und #split-groups meldete scrollWidth
+   * 306 bei 294 Breite - 12px Ueberstand, den nur das `overflow: hidden` des
+   * Panels verdeckte (Critique 2026-09-25). Jetzt ist die Box so breit wie ihre
+   * Zeilen; Treffflaeche und Flaeche bis zur Kante bleiben gleich. */
+  margin-inline: calc(var(--space-3) * -1);
 }
 
 .split-group {
   /* Die Zeile läuft bis an die Trägerkante: das Panel trägt --space-3 Polster,
    * und eine Zeile ohne Radius, die davor stehenbleibt, wäre ein rechtwinkliges
    * Farbrechteck in einer runden Karte - der Kasten im Kasten in neuer Form.
-   * Das Textpolster kommt deshalb aus der Zeile selbst zurück. */
-  width: calc(100% + var(--space-3) * 2);
-  margin-inline: calc(var(--space-3) * -1);
+   * Den Weg bis zur Kante geht die Liste (.split-groups oben), das
+   * Textpolster kommt aus der Zeile selbst zurück. */
+  width: 100%;
   min-height: 64px;
   padding: var(--space-2) var(--space-3);
   display: flex;
@@ -410,6 +401,42 @@ button.split-expense:hover {
   background: color-mix(in srgb, var(--module-accent) var(--tint-state), transparent);
 }
 
+/* Storno einer Zahlung (#1309). Die Textspalte nimmt den Platz, der Knopf
+ * bleibt so breit wie sein Wort. „Storniert" ist ein Zeichen, kein Knopf: es
+ * steht bei jedem Recht, in der Form der Archiv-Marke, und die Zahlungszeile
+ * darueber ist durchgestrichen - der Betrag zaehlt nicht mehr. */
+.split-activity-item > div {
+  flex: 1 1 auto;
+}
+
+.split-reverse-payment {
+  flex: 0 0 auto;
+}
+
+.split-activity-item--reversed .split-activity-payment {
+  text-decoration: line-through;
+}
+
+.split-activity-item span.split-activity-reversed {
+  align-self: flex-start;
+  padding: var(--space-0h) var(--space-2);
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--module-accent) var(--tint-surface), var(--color-surface-2));
+  font-weight: var(--font-weight-medium);
+}
+
+/* "Mehr laden" unter dem Verlauf (#1309). Die Liste ist Fokusziel, wenn der
+ * Knopf mit der letzten Seite verschwindet - sichtbar ohne Ring, denn sie ist
+ * kein Bedienelement, nur der Ort, an dem es weitergeht. */
+.split-activity-list:focus {
+  outline: none;
+}
+
+.split-activity-more {
+  display: flex;
+  margin: var(--space-2) auto 0;
+}
+
 .split-activity-dot {
   width: 10px;
   height: 10px;
@@ -436,6 +463,16 @@ button.split-expense:hover {
 
 .split-form-row > label {
   flex: 1 1 0;
+}
+
+/* Abbrechen und Speichern bleiben ein Paar, wenn der Dialogfuss umbricht
+ * (mobil: Loeschen bzw. „Gast erstellen" oben links, das Paar darunter
+ * rechts) - frei umbrechend stand „Speichern" allein in der zweiten Zeile.
+ * Dieselbe Gruppe wie im Budget und in den Kontakten. */
+.split-form__footer-actions {
+  display: flex;
+  gap: var(--space-3);
+  margin-inline-start: auto;
 }
 
 /* Formular-Gruppen im Sheet: Inset-Well statt Kasten (tokens.css). */
@@ -485,8 +522,14 @@ button.split-expense:hover {
  *   split-main  → .split-content-grid (Karten hinter dem Gruppen-Panel)
  * -------------------------------------------------------- */
 
-/* Zweispaltig braucht das Panel (max. 320px) + Gap + rund 380px Rest. */
-@container split-page (max-width: 719px) {
+/* NEBENEINANDER NUR, WENN DER HAUPTBEREICH DANEBEN ZWEISPALTIG BLEIBT
+ * (Critique 2026-09-25). Die Grenze lag bei 720px: bei 1024x768 (Seite 740px)
+ * stand das Gruppen-Panel mit 320px neben einem 404px-Hauptbereich, dessen
+ * Karten sich dort einspaltig stapelten - eine Spalte von 194% Viewporthoehe.
+ * Die Rechnung: Panel 320 + Gap 16 + 640 (ab da ist .split-content-grid
+ * zweispaltig, siehe split-main unten) = 976. Darunter steht die kurze
+ * Gruppenliste oben, und der Hauptbereich bekommt die volle Breite. */
+@container split-page (max-width: 975px) {
   .split-layout {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -503,7 +546,16 @@ button.split-expense:hover {
 
 @container split-page (max-width: 639px) {
   /* Die Kennzahl-Zeile bricht über .metric-grid (budget.css) um; die frühere
-     2+1-Reihe ließ die dritte Karte auf halber Breite mit einem Loch daneben. */
+     2+1-Reihe ließ die dritte Karte auf halber Breite mit einem Loch daneben.
+
+     KEINE VOLLE ZEILE FUER EINE ZIFFER (Re-Critique 2026-09-27, A5 / R10
+     L11): die Waise der Umbruchregel war die Karte „Aktive Gruppen" - 59px
+     Hoehe ueber die ganze Breite fuer „2" (390x844, y225-284). Die Zahl steht
+     jetzt am Kopf der Gruppenliste, die sie zaehlt (`.split-panel-count`);
+     mobil bleiben die beiden Betraege, nebeneinander in einer Zeile. */
+  .split-summary-groups {
+    display: none;
+  }
 
   .split-group-header,
   .split-topbar {

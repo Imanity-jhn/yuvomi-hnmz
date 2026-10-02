@@ -5,22 +5,23 @@
  */
 
 import { api } from '/api.js';
-import { openModal as openSharedModal, closeModal as closeSharedModal, selectModal, confirmModal, advancedSection, wireBlurValidation, reportFieldError, refocusAfterRender } from '/components/modal.js';
+import { openModal as openSharedModal, closeModal as closeSharedModal, selectModal, confirmModal, askOverModal, advancedSection, wireBlurValidation, reportFieldError, refocusAfterRender } from '/components/modal.js';
 import { stagger, scheduleUndoableDelete, wireScrollFade } from '/utils/ux.js';
 import { t, formatDate, formatDayMonth, formatDateInput, parseDateInput, isDateInputValid } from '/i18n.js';
 import { esc } from '/utils/html.js';
 import { renderSkeletonList } from '/utils/skeleton.js';
 import { DEFAULT_CATEGORY_NAME } from '/utils/shopping-categories.js';
 import { renderKitchenTabsBar } from '/utils/kitchen-tabs.js';
-import { resolveShoppingTarget, announceTransfer, mountMissingShoppingList } from '/utils/kitchen-transfer.js';
+import { resolveShoppingTarget, announceTransfer, mountMissingShoppingList, mayTransferMealToShopping } from '/utils/kitchen-transfer.js';
 import { ingredientRowHTML } from '/utils/ingredient-row.js';
 import { addLocalDays, startOfLocalWeekKey, todayKey } from '/utils/date.js';
 import { normalizeRecipeMealTypes, recipeSupportsMealType, recipeAllowsMealType } from '/utils/recipe-meal-types.js';
 import { mountEmptyState, mountLoadError, emptyStateEl } from '/utils/empty-state.js';
 import { mealPayloadFromRecipe } from '/utils/recipe-to-meal.js';
 import { findPageFab } from '/utils/fab.js';
-import { zonedWeekday } from '/utils/timezone.js';
-import { mealTypeList, primeMealTypeNames } from '/utils/meal-types.js';
+import { pageToolsMenuHtml, installPopoverMenus, syncPopoverMenuItem } from '/utils/popover-menu.js';
+import { zonedWeekday, nowFields } from '/utils/timezone.js';
+import { mealTypeList, primeMealTypeNames, MEAL_TYPE_KEYS } from '/utils/meal-types.js';
 import { recipeThumbHtml, wireRecipeThumbs } from '/utils/recipe-thumb.js';
 import { toDecimalString, breaksOffAtSeparator, toStoredNumber } from '/utils/money.js';
 
@@ -37,6 +38,13 @@ const DAY_NAMES = () => [
   t('meals.dayMo'), t('meals.dayDi'), t('meals.dayMi'), t('meals.dayDo'),
   t('meals.dayFr'), t('meals.daySa'), t('meals.daySo'),
 ];
+
+// Der VOLLE Wochentagsname fuer Screenreader-Namen (`meals.addMealOnDay`): die
+// Spaltenkoepfe tragen nur das Kuerzel („Mo"), und sieben Knoepfe, die alle
+// „Mahlzeit hinzufuegen" heissen, sind vorgelesen EIN Knopf (Persona Sam).
+// Index = zonedWeekday() (0 = Sonntag), dieselben Keys wie calendar.js.
+const DAY_LONG_KEYS = ['dayLongSunday', 'dayLongMonday', 'dayLongTuesday', 'dayLongWednesday', 'dayLongThursday', 'dayLongFriday', 'dayLongSaturday'];
+const dayLongName = (dateKey) => t(`calendar.${DAY_LONG_KEYS[zonedWeekday(dateKey)]}`);
 
 const EXCLUDED_MEAL_CATEGORY_NAMES = new Set(['Haushalt', 'Drogerie']);
 
@@ -60,6 +68,11 @@ let state = {
 
 // Container-Referenz für Hilfsfunktionen (wird in render() gesetzt)
 let _container = null;
+/**
+ * Steht die Rezept-Spalte schon (ein- oder ausgeklappt)? Erst dann darf das
+ * Board entscheiden, ob „heute" verdeckt ist - siehe revealToday().
+ */
+let _railSettled = false;
 let _dragRecipeId = null;
 
 // --------------------------------------------------------
@@ -74,10 +87,279 @@ function addDays(dateStr, n) {
   return addLocalDays(dateStr, n);
 }
 
+// --------------------------------------------------------
+// Rezept einplanen ohne Ziehen (Re-Kritik 2026-09-28, A4 P1-1)
+// --------------------------------------------------------
+
+/**
+ * Die Mahlzeit, die zur Uhrzeit passt: morgens Fruehstueck, mittags
+ * Mittagessen, danach Abendessen. Der Zwischensnack ist nie die Vermutung -
+ * er ist die Ausnahme, die man bewusst waehlt.
+ */
+function mealTypeForHour(hour) {
+  if (hour < 10) return 'breakfast';
+  if (hour < 15) return 'lunch';
+  return 'dinner';
+}
+
+/**
+ * Wohin ein Rezept aus der Spalte geplant wird, wenn es nicht gezogen,
+ * sondern angetippt wird.
+ *
+ * Mahlzeit: die zur Uhrzeit, sofern sie sichtbar ist und das Rezept sie
+ * erlaubt; sonst die naechste passende danach, sonst die erste passende. Tag:
+ * heute, wenn heute in der sichtbaren Woche liegt, sonst deren Montag - und
+ * von dort der erste Tag, an dem diese Mahlzeit noch frei ist. Ist die Woche
+ * voll, bleibt es beim ersten Tag; der Dialog laesst beides aendern.
+ *
+ * @returns {{date: string, mealType: string}}
+ */
+function railRecipeTarget({ recipe, weekStart, today, hour, visibleMealTypes, meals }) {
+  const visible = MEAL_TYPE_KEYS.filter((key) => visibleMealTypes.includes(key));
+  const allowed = visible.filter((key) => recipeAllowsMealType(recipe, key));
+  const pool = allowed.length ? allowed : (visible.length ? visible : ['lunch']);
+  const wanted = mealTypeForHour(hour);
+  const rank = (key) => MEAL_TYPE_KEYS.indexOf(key);
+  const mealType = pool.includes(wanted)
+    ? wanted
+    : (pool.find((key) => rank(key) > rank(wanted)) ?? pool[0]);
+
+  const week = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i));
+  const days = week.includes(today) ? week.slice(week.indexOf(today)) : week;
+  const taken = (date) => meals.some((m) => m.date === date && m.meal_type === mealType);
+  const date = days.find((d) => !taken(d)) ?? days[0];
+  return { date, mealType };
+}
+
+/** Rezept aus der Spalte in den Dialog "Mahlzeit hinzufuegen" (Klick/Enter). */
+function planRecipeFromRail(recipeId) {
+  const recipe = state.recipes.find((r) => r.id === Number(recipeId));
+  if (!recipe) return;
+  const { date, mealType } = railRecipeTarget({
+    recipe,
+    weekStart: state.currentWeek,
+    today: todayKey(),
+    hour: nowFields()?.hour ?? 12,
+    visibleMealTypes: state.visibleMealTypes,
+    meals: state.meals,
+  });
+  openMealModal({ mode: 'create', date, mealType, recipeId: recipe.id });
+}
+
+/**
+ * Vorschlaege fuer das Namensfeld: gespeicherte Rezepte zuerst (sie bringen
+ * Zutaten und den Weg zum Einkauf mit), dahinter die Namen frueherer
+ * Mahlzeiten, die kein gleichnamiges Rezept schon abdeckt. Ein Rezept wird ueber
+ * einen Wortteil gefunden, nicht nur ueber den Anfang - "ridge" findet
+ * "Porridge"; was mit der Eingabe beginnt, steht vorn.
+ *
+ * @returns {Array<{title: string, recipeId: number|null}>}
+ */
+function mealTitleSuggestions(query, recipes, history, limit = 8) {
+  const norm = (v) => String(v ?? '').toLocaleLowerCase();
+  const needle = norm(query).trim();
+  if (!needle) return [];
+  const recipeHits = recipes
+    .filter((r) => norm(r.title).includes(needle))
+    .sort((a, b) => (norm(a.title).startsWith(needle) ? 0 : 1) - (norm(b.title).startsWith(needle) ? 0 : 1)
+      || String(a.title).localeCompare(String(b.title)))
+    .map((r) => ({ title: r.title, recipeId: r.id }));
+  const seen = new Set(recipeHits.map((h) => norm(h.title)));
+  const historyHits = [];
+  for (const h of history ?? []) {
+    const title = h?.title;
+    if (!title || seen.has(norm(title))) continue;
+    seen.add(norm(title));
+    historyHits.push({ title, recipeId: null });
+  }
+  return [...recipeHits, ...historyHits].slice(0, limit);
+}
+
+/**
+ * Das Namensfeld als ARIA-1.2-Combobox mit Liste.
+ *
+ * Vorher waren die Vorschlaege `div`s ohne Rolle, das Feld hatte weder
+ * `role=combobox` noch `aria-expanded`: fuer den Screenreader gab es die Liste
+ * nicht, und die Pfeiltasten bewegten nur eine CSS-Klasse. Jetzt bleibt der
+ * Fokus im Feld, die Pfeile bewegen die Markierung (`aria-activedescendant`,
+ * `aria-selected`), Enter uebernimmt, Escape schliesst NUR die Liste. Ein
+ * Rezepttreffer ruft `onRecipe` - der Dialog setzt dann Rezept, Zutaten und
+ * `recipe_id` wie die Rezeptauswahl darunter.
+ */
+function wireMealTitleCombobox(panel, { onRecipe } = {}) {
+  const input = panel.querySelector('#modal-title');
+  const box = panel.querySelector('#modal-autocomplete');
+  if (!input || !box) return;
+  let items = [];
+  let active = -1;
+  let timer;
+  let seq = 0;
+  const optionId = (i) => `modal-autocomplete-opt-${i}`;
+
+  const setActive = (index) => {
+    active = index;
+    [...box.children].forEach((el, i) => {
+      el.classList.toggle('meal-modal__autocomplete-item--active', i === index);
+      el.setAttribute('aria-selected', String(i === index));
+    });
+    if (index >= 0) input.setAttribute('aria-activedescendant', optionId(index));
+    else input.removeAttribute('aria-activedescendant');
+  };
+  const close = () => {
+    box.hidden = true;
+    input.setAttribute('aria-expanded', 'false');
+    setActive(-1);
+  };
+  const show = (list) => {
+    items = list;
+    box.replaceChildren(...list.map((s, i) => {
+      const option = document.createElement('div');
+      option.id = optionId(i);
+      option.className = 'meal-modal__autocomplete-item';
+      option.setAttribute('role', 'option');
+      option.setAttribute('aria-selected', 'false');
+      option.dataset.index = String(i);
+      const title = document.createElement('span');
+      title.className = 'meal-modal__autocomplete-title';
+      title.textContent = s.title;
+      option.appendChild(title);
+      if (s.recipeId) {
+        const kind = document.createElement('span');
+        kind.className = 'meal-modal__autocomplete-kind';
+        kind.textContent = t('meals.suggestionRecipe');
+        option.appendChild(kind);
+      }
+      return option;
+    }));
+    if (!list.length) { close(); return; }
+    box.hidden = false;
+    input.setAttribute('aria-expanded', 'true');
+    setActive(-1);
+  };
+  const pick = (index) => {
+    const s = items[index];
+    if (!s) return;
+    input.value = s.title;
+    close();
+    if (s.recipeId) onRecipe?.(s.recipeId);
+  };
+
+  input.addEventListener('input', () => {
+    clearTimeout(timer);
+    const q = input.value.trim();
+    const mine = ++seq;
+    if (!q) { show([]); return; }
+    timer = setTimeout(async () => {
+      let history = [];
+      try {
+        const res = await api.get(`/meals/suggestions?q=${encodeURIComponent(q)}`);
+        history = res?.data ?? [];
+      } catch { history = []; }
+      // Eine spaete Antwort auf eine alte Eingabe ueberschreibt nichts.
+      if (mine !== seq) return;
+      show(mealTitleSuggestions(q, state.recipes, history));
+    }, 200);
+  });
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      if (box.hidden) return;
+      // Die Liste schliessen, nicht den Dialog darum.
+      e.preventDefault();
+      e.stopPropagation();
+      close();
+      return;
+    }
+    if (box.hidden || !items.length) return;
+    if (e.key === 'ArrowDown') { e.preventDefault(); setActive(Math.min(active + 1, items.length - 1)); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setActive(Math.max(active - 1, 0)); }
+    else if (e.key === 'Enter' && active >= 0) {
+      // Enter UEBERNIMMT den Vorschlag und endet hier: bis zum Dialog
+      // durchgereicht, loeste es dessen Enter-zum-Speichern aus, und die
+      // Mahlzeit war angelegt, bevor man sie gesehen hatte.
+      e.preventDefault();
+      e.stopPropagation();
+      pick(active);
+    }
+  });
+
+  // mousedown statt click: sonst nimmt der Blur des Feldes die Liste weg,
+  // bevor der Klick ankommt. preventDefault haelt den Fokus im Feld.
+  box.addEventListener('mousedown', (e) => {
+    const option = e.target.closest?.('.meal-modal__autocomplete-item');
+    if (!option) return;
+    e.preventDefault();
+    pick(Number(option.dataset.index));
+  });
+  input.addEventListener('blur', close);
+}
+
+/**
+ * Schmale Telefone (PR #1200 Review, Blocking 2): das volle Datum an beiden
+ * Enden - "14.09.2026 - 20.09.2026" - lief in de/fr/uk bei 320/375px 21-112px
+ * ueber die Zeile. Seit #1164 lebt `#week-today` in derselben Zeile wie das
+ * Label und macht sie um seine Breite enger; auf main war der schlechteste
+ * Fall 9px bei 320px, hier gemessen bis 112px. Seit Runde 5 (unten,
+ * `syncTodayButton()`) ist `#week-today` unter 640px nur noch ein Icon ohne
+ * Text - der reservierte Platz bleibt dadurch in jeder Sprache gleich schmal
+ * (~44-48px wie ein Pfeil), statt mit dem uebersetzten Wort zu wachsen.
+ *
+ * Unter 640px faellt das Jahr an BEIDEN Enden weg (`formatDayMonth` statt
+ * `formatDate`) - verwandt mit dem Muster, das der Kalender fuer sein eigenes
+ * schmales Wochen-Label nutzt (`updateLabel()`, calendar.js:
+ * `calendar.dayRangeLabel`), dort behaelt nur der Endtag sein Jahr. Hier
+ * fällt es an BEIDEN Tagen weg: eine Kalenderwoche liegt so gut wie nie über
+ * einen Jahreswechsel, und die zusätzliche Breite (nicht nur ein Datum,
+ * sondern zwei) war noetig, um die von Reviewern gemessenen 112px in fr
+ * sicher aufzufangen.
+ */
+const NARROW_WEEK_LABEL_QUERY = '(max-width: 639px)';
+
 function formatWeekLabel(monday) {
   const sunday = addDays(monday, 6);
-  return `${formatDate(monday)} – ${formatDate(sunday)}`;
+  const narrow = window.matchMedia?.(NARROW_WEEK_LABEL_QUERY).matches;
+  // Unter 640px faellt das Jahr an BEIDEN Enden weg (`formatDayMonth`): die
+  // Kalenderwoche liegt so gut wie nie ueber einen Jahreswechsel, und die
+  // gesparte Breite ist hier der knappere Preis - eine Woche wie
+  // "28.12. - 03.01." bleibt trotzdem eindeutig genug fuer den Kopf einer
+  // Seite, die ohnehin "diese Woche" zeigt.
+  const from = narrow ? formatDayMonth(monday) : formatDate(monday);
+  const to = narrow ? formatDayMonth(sunday) : formatDate(sunday);
+  return `${from} - ${to}`;
 }
+
+/**
+ * PR #1200 Review Runde 3, Nice-to-have 4: `formatWeekLabel()` liest
+ * `matchMedia` nur beim Rendern - ein Fenster, das ueber die 640px-Schwelle
+ * gezogen wird, behielt bis zum naechsten Wochenwechsel das alte Format.
+ *
+ * EINE gehaltene `MediaQueryList` statt eines
+ * `window.matchMedia(...).addEventListener(...)` in einem Rutsch: ohne
+ * gehaltene Referenz darf die Engine die Liste einsammeln, und der Listener
+ * verstummt irgendwann still - dasselbe Muster wie router.js' `darkSchemeQuery`.
+ * Modul-Top-Level statt in `render()`: `render()` laeuft bei jeder Navigation
+ * zur Seite neu, ein dort gebundener Listener wuerde sich mit jedem Besuch
+ * verdoppeln.
+ *
+ * `_container?.isConnected` (wie beim Fokus-Rueckstoss weiter unten) haelt den
+ * Listener nach einer Navigation weg von /meals stumm - ohne die Prüfung
+ * rendert er in einen Container, den niemand mehr sieht.
+ *
+ * PR #1200 Review Runde 4, Should-fix 2: hier stand `renderWeekGrid()` statt
+ * `updateWeekLabel()` - eine Bildschirmdrehung ueber die 640px-Schwelle riss
+ * damit das GANZE Wochengitter neu auf (jede Karte, den Stagger, den Scroll
+ * zur heutigen Spalte), obwohl nur das Label ein anderes Format braucht.
+ * Stand der Fokus auf einer Mahlzeit-Karte, landete er nach dem Neuaufbau auf
+ * `<body>` - eine Kartenreferenz, die `renderWeekGrid()` wegwirft, ueberlebt
+ * den Wechsel nicht. `updateWeekLabel()` ruehrt nur `#week-label` und den
+ * Reset-Knopf an, beide unabhaengig vom Karten-DOM - der Fokus bleibt daher
+ * unberuehrt, wo immer er gerade steht.
+ */
+function onNarrowWeekLabelQueryChange() {
+  if (_container?.isConnected) updateWeekLabel();
+}
+const _narrowWeekLabelQuery = typeof window !== 'undefined' ? window.matchMedia?.(NARROW_WEEK_LABEL_QUERY) ?? null : null;
+_narrowWeekLabelQuery?.addEventListener('change', onNarrowWeekLabelQueryChange);
 
 function isToday(dateStr) {
   return dateStr === todayKey();
@@ -205,8 +487,116 @@ async function loadPreferences() {
 // Render
 // --------------------------------------------------------
 
+/**
+ * Der Zeitraum-Kopf: zurueck, Wert, vor - und DAHINTER der Reset. „Heute" ist
+ * ein Reset, kein Navigationsschritt: hinter dem Stepper statt zwischen den
+ * Inhalts-Aktionen. Das ist die Regel, die budget.js an „Aktuell" festhaelt,
+ * und seit #1164 gilt sie fuer alle drei Zeitraum-Koepfe (Kalender,
+ * Wochenplan, Budget). Vorher stand „Heute" im Actions-Slot neben
+ * „Zufallsplan" und „+ Gericht" - Inhalts-Aktionen einer ganz anderen
+ * Gewichtung - und landete unter ~768px auf einer zweiten Zeile, getrennt vom
+ * Stepper, den es zuruecksetzt. Als eigener Baustein, damit der
+ * Verhaltenstest die GERENDERTE Reihenfolge prueft (test-meals.js), statt
+ * Quelltext zu lesen.
+ */
+function weekNavHtml() {
+  return `
+          <button class="btn btn--icon" id="week-prev" aria-label="${t('meals.prevWeek')}">
+            <i data-lucide="chevron-left" aria-hidden="true"></i>
+          </button>
+          <span class="week-nav__label" id="week-label"></span>
+          <button class="btn btn--icon" id="week-next" aria-label="${t('meals.nextWeek')}">
+            <i data-lucide="chevron-right" aria-hidden="true"></i>
+          </button>
+          <button class="btn btn--secondary week-nav__today" id="week-today">${t('meals.today')}</button>
+  `;
+}
+
+/**
+ * „Heute" erscheint nur, wenn die aktuelle Woche nicht zu sehen ist -
+ * dieselbe Sichtbarkeitsregel wie syncTodayButton() im Kalender (#1164).
+ *
+ * `.is-current` statt `hidden` (PR #1200 Review): `hidden` entfernte die Box
+ * aus dem Fluss, und `.week-nav__label` daneben (`flex: 1`) wuchs in den frei
+ * gewordenen Platz - "›" ruckte dadurch um die Knopfbreite, sobald der Reset
+ * erschien oder verschwand. `.is-current` (layout.css, `.btn.is-current`)
+ * blendet nur per `visibility` aus; die Box bleibt im Fluss, der Slot bleibt
+ * gleich breit. `inert` nimmt dem Knopf zusaetzlich Zeiger, Fokus und
+ * A11y-Baum.
+ *
+ * War der Knopf fokussiert (Enter auf „Heute" fuehrt genau in den Zustand, der
+ * ihn gleich verbirgt), holt sich der Fokus vorher einen Stepper daneben -
+ * sonst faellt er auf `<body>`, denn ein `inert`es Element blurred wie
+ * `display: none` es taete.
+ *
+ * PR #1200 Review Runde 5, Should-fix: unter 640px wird der Knopf hier
+ * zusaetzlich auf ein reines Icon umgeschaltet (kein sichtbarer Text mehr) -
+ * dieselbe `NARROW_WEEK_LABEL_QUERY`-Schwelle wie `formatWeekLabel()`, damit
+ * beide zusammen kippen. Der uebersetzte Text von `meals.today` bleibt
+ * erhalten, wandert aber auf `aria-label`/`title` statt auf den sichtbaren
+ * Inhalt - Icons skalieren nicht mit der Wortlaenge der Uebersetzung, anders
+ * als der vorherige Text-Knopf (Runde 3/4). `dataset.iconOnly` haelt fest,
+ * welche Darstellung gerade steht, damit ein Aufruf ohne Wechsel (z. B. bei
+ * jedem Wochenwechsel) das Icon nicht unnoetig neu erzeugt.
+ */
+function syncTodayButton(root = _container) {
+  const btn = root?.querySelector('#week-today');
+  if (!btn) return;
+  const isCurrent = state.currentWeek === getMondayOf(todayKey());
+  // `typeof document` statt eines nackten Bezeichners: Testumgebungen ohne DOM
+  // stubben `document` nicht immer, und ein nackter Bezeichner wirft dort
+  // schon beim Werteauswerten.
+  const active = typeof document !== 'undefined' ? document.activeElement : null;
+  if (isCurrent && active === btn) {
+    (root.querySelector('#week-prev') || root.querySelector('#week-next'))?.focus();
+  }
+  btn.classList.toggle('is-current', isCurrent);
+  btn.inert = isCurrent;
+
+  const label = t('meals.today');
+  btn.setAttribute('aria-label', label);
+  btn.title = label;
+  const narrow = typeof window !== 'undefined'
+    ? Boolean(window.matchMedia?.(NARROW_WEEK_LABEL_QUERY).matches)
+    : false;
+  if (narrow) {
+    if (btn.dataset.iconOnly !== 'true') {
+      btn.textContent = '';
+      btn.insertAdjacentHTML('beforeend', '<i data-lucide="calendar-check" aria-hidden="true"></i>');
+      btn.dataset.iconOnly = 'true';
+      if (window.lucide) lucide.createIcons({ el: btn });
+    }
+  } else if (btn.dataset.iconOnly === 'true') {
+    btn.textContent = label;
+    btn.dataset.iconOnly = 'false';
+  }
+}
+
+/**
+ * Das EINE Werkzeugmenue des Wochenplans (Kopfregel mobil, DESIGN.md).
+ *
+ * „Plan zufaellig fuellen" kann 28 Slots umschreiben und ist eine seltene
+ * Handlung - im Menue steht sie mit Label, statt als Textknopf eine eigene
+ * Kopfzeile zu kosten. Der Schalter der Rezept-Spalte ist ein
+ * `menuitemcheckbox`: der Haken zeigt, ob die Spalte steht. Die Spalte gibt es
+ * nur ab 1024px, darunter blendet meals.css den Eintrag aus (dieselbe
+ * Schwelle wie `.meals-layout`); der Anfangszustand wird von
+ * `wireRailToggle()` nachgezogen, sobald die Messung steht.
+ */
+function mealsToolsMenuHtml() {
+  return pageToolsMenuHtml({
+    id: 'meals-tools-menu',
+    label: t('common.moreActions'),
+    items: [
+      { action: 'randomize-plan', label: t('meals.randomizePlan'), icon: 'shuffle' },
+      { action: 'toggle-rail', label: t('meals.showRecipes'), icon: 'panel-right', checked: true },
+    ],
+  });
+}
+
 export async function render(container, { user }) {
   _container = container;
+  _railSettled = false;
   container.replaceChildren();
   container.insertAdjacentHTML('beforeend', `
     <div class="meals-page">
@@ -220,30 +610,16 @@ export async function render(container, { user }) {
            standen „<" und „>" an den beiden Enden der Zeile, mit dem gesamten
            Aktionsblock dazwischen - mobil gemessen 80px und 705px, einhändig
            also nie beide erreichbar. -->
-      <div class="page-toolbar page-toolbar--in-group page-toolbar--wrap">
-        <div class="page-toolbar__center week-nav">
-          <button class="btn btn--icon" id="week-prev" aria-label="${t('meals.prevWeek')}">
-            <i data-lucide="chevron-left" aria-hidden="true"></i>
-          </button>
-          <span class="week-nav__label" id="week-label"></span>
-          <button class="btn btn--icon" id="week-next" aria-label="${t('meals.nextWeek')}">
-            <i data-lucide="chevron-right" aria-hidden="true"></i>
-          </button>
-        </div>
+      <div class="page-toolbar page-toolbar--in-group meals-toolbar">
+        <div class="page-toolbar__center week-nav">${weekNavHtml()}</div>
         <div class="page-toolbar__actions">
-          <button class="btn btn--secondary week-nav__today" id="week-today">${t('meals.today')}</button>
-          <!-- Nur Desktop: klappt die Rezept-Spalte weg, damit alle sieben
-               Tagesspalten in voller Breite ins Board passen. -->
-          <button class="btn btn--icon week-nav__rail-toggle" id="rail-toggle"
-                  aria-expanded="true" aria-controls="recipe-sidebar"
-                  aria-label="${t('meals.hideRecipes')}" title="${t('meals.hideRecipes')}">
-            <i data-lucide="panel-right-close" class="icon-md" aria-hidden="true"></i>
-          </button>
-          <!-- Zuletzt und als Ghost: der Zufallsplan kann 28 Slots umschreiben,
-               stand aber im teuersten Pixel des Kopfes direkt neben „Heute" -
-               in der Gewichtung eines Datumssprungs (Critique 2026-07-29). Er
-               bleibt erreichbar, führt den Kopf aber nicht mehr an. -->
-          <button class="btn btn--ghost week-nav__randomize" id="week-randomize">${t('meals.randomizePlan')}</button>
+          <!-- KUECHENKOPF (Kopfregel mobil, 2026-09-26): Zeile 1 ist die
+               Kuechen-Leiste, Zeile 2 der Kontext des Tabs - hier der
+               Wochenstepper - und am Ende EIN Werkzeugmenue. Zufallsplan und
+               Rezept-Spalte standen hier als loser Textknopf und loses Icon;
+               mobil brach der Textknopf auf eine eigene 48px-Zeile um (Kopf
+               177px). Den Primaerknopf dockt der Router am Desktop dahinter an. -->
+          ${mealsToolsMenuHtml()}
         </div>
       </div>
       <div class="meals-layout">
@@ -260,9 +636,19 @@ export async function render(container, { user }) {
 
   if (window.lucide) lucide.createIcons({ el: container });
   renderKitchenTabsBar(container, '/meals');
+  installPopoverMenus(container.querySelector('.meals-toolbar'));
 
   const today  = todayKey();
   const monday = getMondayOf(today);
+
+  // Vor dem ersten Laden synchronisieren, nicht erst danach: `state.currentWeek`
+  // steht schon (die Seite oeffnet immer auf der aktuellen Woche), also kann
+  // „Heute" seinen Zielzustand VOR dem ersten Bildaufbau bekommen. Sonst
+  // rendert weekNavHtml() ihn sichtbar, der Ladevorgang laeuft, und erst danach
+  // versteckt syncTodayButton() ihn wieder - ein sichtbares Aufblitzen bei
+  // jedem frischen Laden von /meals (PR #1200 Review, Befund 5).
+  state.currentWeek = monday;
+  syncTodayButton();
 
   await Promise.all([loadWeek(monday), loadLists(), loadPreferences(), loadCategories(), loadRecipes()]);
   renderWeekGrid();
@@ -292,23 +678,22 @@ const RAIL_STORAGE_KEY = 'yuvomi-meals-rail';
  * wieder silbenweise brechen (siehe Kommentar an .week-grid in meals.css).
  */
 function wireRailToggle() {
-  const btn = _container.querySelector('#rail-toggle');
+  // Der Schalter ist ein Eintrag im Werkzeugmenue (Kopfregel mobil) - vorher
+  // ein loses Icon im Kopf. Der Haken traegt den Zustand, den dort das
+  // Icon-Paar panel-right-open/-close trug.
+  const item = _container.querySelector('.popover-menu__item[data-action="toggle-rail"]');
   const layout = _container.querySelector('.meals-layout');
-  if (!btn || !layout) return;
+  if (!item || !layout) {
+    // Ohne Schalter keine Entscheidung - die Breite steht trotzdem fest.
+    _railSettled = true;
+    revealToday(_container.querySelector('#week-grid'));
+    return;
+  }
+  const toolbar = _container.querySelector('.meals-toolbar');
 
   const apply = (hidden) => {
     layout.classList.toggle('meals-layout--rail-hidden', hidden);
-    btn.setAttribute('aria-expanded', String(!hidden));
-    const label = hidden ? t('meals.showRecipes') : t('meals.hideRecipes');
-    btn.setAttribute('aria-label', label);
-    btn.title = label;
-    const icon = btn.querySelector('i, svg');
-    if (icon) {
-      icon.remove();
-      btn.insertAdjacentHTML('afterbegin',
-        `<i data-lucide="${hidden ? 'panel-right-open' : 'panel-right-close'}" class="icon-md" aria-hidden="true"></i>`);
-      if (window.lucide) lucide.createIcons({ el: btn });
-    }
+    syncPopoverMenuItem(toolbar, 'toggle-rail', !hidden);
   };
 
   // Default: gemessen, nicht per Breakpoint.
@@ -332,8 +717,12 @@ function wireRailToggle() {
     hidden = Boolean(desktop && grid && grid.scrollWidth > grid.clientWidth + 1);
   }
   apply(hidden);
+  // Jetzt steht die Breite des Boards fest - erst jetzt die Frage, ob „heute"
+  // verdeckt ist (revealToday).
+  _railSettled = true;
+  revealToday(_container.querySelector('#week-grid'));
 
-  btn.addEventListener('click', () => {
+  item.addEventListener('click', () => {
     hidden = !layout.classList.contains('meals-layout--rail-hidden');
     apply(hidden);
     try { localStorage.setItem(RAIL_STORAGE_KEY, hidden ? 'hidden' : 'shown'); } catch { /* ignore */ }
@@ -344,12 +733,24 @@ function wireRailToggle() {
 // Wochengitter
 // --------------------------------------------------------
 
+/**
+ * Aktualisiert NUR Label und Reset-Knopf der Wochen-Navigation - ohne das
+ * Wochengitter anzufassen. Eigene Funktion statt zweier Zeilen inline in
+ * `renderWeekGrid()` (PR #1200 Review Runde 4, Should-fix 2): der
+ * Breakpoint-Handler unten braucht GENAU diese zwei Zeilen, keine der
+ * Karten-Neuaufbauten, die im Rest von `renderWeekGrid()` folgen.
+ */
+function updateWeekLabel() {
+  const label = _container?.querySelector('#week-label');
+  if (label) label.textContent = formatWeekLabel(state.currentWeek);
+  syncTodayButton();
+}
+
 function renderWeekGrid() {
   const grid = _container.querySelector('#week-grid');
   if (!grid) return;
 
-  _container.querySelector('#week-label').textContent =
-    formatWeekLabel(state.currentWeek);
+  updateWeekLabel();
 
   // Fehlgeschlagene Woche: Fehlerzustand statt Leerzustand. Muss VOR der
   // Leer-Prüfung stehen - `state.meals` ist nach einem Fehler ebenfalls leer,
@@ -435,14 +836,14 @@ function renderWeekGrid() {
         <div class="day-header ${todayClass}" style="--day-col: ${dayCol}">
           <span class="day-header__name">${dayNames[dayNameIndex]}</span>
           <span class="day-header__date">${formatDayDate(date)}</span>
+          <button class="day-add" data-action="add-meal" data-date="${date}" data-type="${firstType}" aria-label="${esc(t('meals.addMealOnDay', { day: dayLongName(date) }))}">
+            <i data-lucide="plus" class="icon-md" aria-hidden="true"></i>
+            <span class="day-add__label">${t('meals.addMealTitle')}</span>
+          </button>
         </div>
         <div class="day-slots">
           ${visibleTypes.map((type, ti) => renderSlot(date, type, mealsForDay, dayCol, ti + 2)).join('')}
         </div>
-        <button class="day-add" data-action="add-meal" data-date="${date}" data-type="${firstType}" aria-label="${t('meals.addMealTitle')}">
-          <i data-lucide="plus" class="icon-sm" aria-hidden="true"></i>
-          <span>${t('meals.addMealTitle')}</span>
-        </button>
       </div>
     `;
   }).join(''));
@@ -452,7 +853,7 @@ function renderWeekGrid() {
   // Vorschaubilder brauchen ihren Platzhalter-Ruecksturz per Listener (#1059) -
   // ein `onerror` im Markup waere ein Inline-Handler und CSP-verboten.
   wireRecipeThumbs(grid);
-  stagger(grid.querySelectorAll('.meal-card'));
+  stagger(grid.querySelectorAll('.meal-card'), { host: grid });
   wireGrid(grid);
 
   // Scroll-Affordance des Desktop-Boards: End-Anriss signalisiert verborgene
@@ -464,6 +865,25 @@ function renderWeekGrid() {
     wireScrollFade(grid);
   }
 
+  revealToday(grid);
+}
+
+
+/**
+ * Holt den heutigen Tag in den Blick - schmal per Stapel-Scroll, am Board nur,
+ * wenn er verdeckt ist.
+ *
+ * ERST NACH DER REZEPT-SPALTE (Critique 2026-09-26, A4 P1). Die Spalte kostet
+ * 272-320px, und ob sie steht, entscheidet wireRailToggle() GEMESSEN am schon
+ * gezeichneten Board. Lief die Frage „heute verdeckt?" vorher, sah sie das
+ * Board bei offener Spalte (~820px), zentrierte den Samstag, und erst danach
+ * klappte die Spalte zu - `scrollLeft` klemmte bei 1440px auf 52px, und der
+ * Montag lag unter der Gutter-Spalte, ohne dass jemand gescrollt hatte. Vor
+ * der Entscheidung tut diese Funktion deshalb nichts; wireRailToggle() ruft
+ * sie danach selbst.
+ */
+function revealToday(grid) {
+  if (!_railSettled || !grid) return;
   // Auf schmalen Viewports (gestapelte Tage) den heutigen Tag in den Blick scrollen.
   if (window.matchMedia?.('(max-width: 639px)').matches) {
     grid.querySelector('.day-header--today')?.closest('.day-column')
@@ -524,7 +944,9 @@ function renderRecipeSidebar() {
 
   const hint = document.createElement('p');
   hint.className = 'recipe-sidebar__hint';
-  hint.textContent = t('recipes.dragToMealsHint');
+  // Antippen ODER Ziehen (Re-Kritik 2026-09-28): der alte Satz nannte nur das
+  // Ziehen, und genau das geht per Tastatur und fuer viele Haende nicht.
+  hint.textContent = t('recipes.railHint');
   sidebar.appendChild(hint);
 
   const list = document.createElement('div');
@@ -536,17 +958,30 @@ function renderRecipeSidebar() {
     card.draggable = true;
     card.dataset.recipeId = String(recipe.id);
 
-    const titleEl = document.createElement('div');
+    // DIE KARTE IST EIN KNOPF (Re-Kritik 2026-09-28, A4 P1-1). Sie war nur zu
+    // ziehen: ohne Fokus, ohne Klick - per Tastatur kam kein Rezept in den
+    // Plan, und ein Tipp auf die Karte tat nichts. Der Knopf fuellt die Karte
+    // und oeffnet "Mahlzeit hinzufuegen" mit gesetztem Rezept
+    // (planRecipeFromRail); das Ziehen bleibt am `article` als Beschleuniger.
+    const open = document.createElement('button');
+    open.type = 'button';
+    open.className = 'recipe-sidebar__card-open';
+    open.dataset.action = 'plan-recipe';
+    open.dataset.recipeId = String(recipe.id);
+    open.setAttribute('aria-label', t('meals.planRecipeNamed', { name: recipe.title }));
+    card.appendChild(open);
+
+    const titleEl = document.createElement('span');
     titleEl.className = 'recipe-sidebar__card-title';
     titleEl.textContent = recipe.title;
-    card.appendChild(titleEl);
+    open.appendChild(titleEl);
 
     if (recipe.source !== 'native') {
       const sourceBadgeEl = document.createElement('span');
       sourceBadgeEl.className = `source-badge source-badge--${recipe.source}`;
       sourceBadgeEl.textContent = t(`recipes.source${recipe.source[0].toUpperCase()}${recipe.source.slice(1)}`);
       if (recipe.provider_account_name) sourceBadgeEl.title = recipe.provider_account_name;
-      card.appendChild(sourceBadgeEl);
+      open.appendChild(sourceBadgeEl);
     }
 
     // Mahlzeiten-Chips nur bei echter Teilmenge: ein Rezept, das zu allen Typen
@@ -567,7 +1002,7 @@ function renderRecipeSidebar() {
           badge.textContent = option.label;
           types.appendChild(badge);
         });
-      card.appendChild(types);
+      open.appendChild(types);
     } else if (!recipeTypes.length) {
       const types = document.createElement('div');
       types.className = 'recipe-sidebar__card-types';
@@ -575,7 +1010,7 @@ function renderRecipeSidebar() {
       badge.className = 'meal-type-badge meal-type-badge--none';
       badge.textContent = t('recipes.mealTypeNone');
       types.appendChild(badge);
-      card.appendChild(types);
+      open.appendChild(types);
     }
 
     list.appendChild(card);
@@ -611,7 +1046,7 @@ function renderSlot(date, type, mealsForDay, dayCol, typeRow) {
           data-action="add-meal"
           data-date="${date}"
           data-type="${type.key}"
-          aria-label="${t('meals.addMeal', { type: type.label })}"
+          aria-label="${esc(t('meals.addMealTypeOnDay', { type: type.label, day: dayLongName(date) }))}"
         >
           <i data-lucide="plus" class="icon-md" aria-hidden="true"></i>
         </button>
@@ -636,7 +1071,10 @@ function renderSlot(date, type, mealsForDay, dayCol, typeRow) {
     const ingCount    = ownCount || recipeCount;
     const ingLabel    = ingCount > 0 ? t('meals.ingredientCount', { count: ingCount }) : '';
     const ingDoneLabel = ownCount > 0 && ingDone === ownCount ? ' ✓' : '';
-    const canTransfer  = recipeCount > 0 || (ownCount > 0 && ingDone < ownCount);
+    // Und nur, wenn der Server den Transfer annaehme: Pfad-Guard (`meals`) UND
+    // Einkaufs-Recht (#1290). Ohne eines davon endete der Knopf im 403.
+    const canTransfer  = (recipeCount > 0 || (ownCount > 0 && ingDone < ownCount))
+      && mayTransferMealToShopping(meal.id);
     const recurrenceBadge = meal.recurrence_template_id
       ? `<span class="meal-card__recurrence" aria-label="${t('meals.recurrenceBadge')}"><i data-lucide="repeat-2" class="icon-sm" aria-hidden="true"></i></span>`
       : '';
@@ -645,6 +1083,24 @@ function renderSlot(date, type, mealsForDay, dayCol, typeRow) {
     // interaktiver Inhalt in einem Button ist invalides HTML - Screenreader
     // verlieren dann die inneren Aktionen (Critique 2026-08-17). Das Öffnen
     // gehört der Titelfläche; die Aktionen stehen daneben, nicht darin.
+    //
+    // Der Ziehgriff (#1317) gehoert der schmalen Zeile. Dort liegt der
+    // Wochenplan im vertikalen Scroller (.app-content, pan-y), und der Browser
+    // nahm jeden Zug an der Karte als Scroll und brach den Pointer mit
+    // pointercancel ab. Der Griff traegt als einzige Stelle `touch-action:
+    // none` (meals.css), der Rest der Zeile bleibt dem Scrollen. Kein Button:
+    // wie im Kategorie-Manager (role="img") ist er eine Zeigergeste ohne eigene
+    // Tastaturhandlung - der Weg ohne Zeiger ist das Datum im Bearbeiten-
+    // Dialog. Er steht AUSSERHALB von .meal-card__actions, die wireDragDrop
+    // ausnimmt. Ausserhalb der schmalen Fassung ist er ausgeblendet: dort
+    // greift die Maus weiter die ganze Karte.
+    //
+    // DER TYP STEHT ALS VORSATZ IM TITEL (R9 M6). Mobil ist eine Mahlzeit eine
+    // Zeile im Tagestraeger, und das Typ-Label kostete dort eine eigene
+    // Overline-Zeile ueber jeder Karte. `.meal-card__type` steht deshalb vor
+    // dem Namen und ist nur in der schmalen Fassung sichtbar (meals.css); am
+    // Board und am Tablet traegt weiter das Slot-Label den Typ. Nebenbei nennt
+    // der Oeffnen-Knopf damit mobil auch die Mahlzeit, nicht nur das Gericht.
     return `
       <div class="meal-card" data-meal-id="${meal.id}">
         <button type="button" class="meal-card__open${(meal.recipe_has_own_image || meal.recipe_has_image) ? ' meal-card__open--with-thumb' : ''}"
@@ -656,34 +1112,38 @@ function renderSlot(date, type, mealsForDay, dayCol, typeRow) {
             hasOwnImage: meal.recipe_has_own_image,
             className: 'meal-card__thumb',
           }) : ''}
-          <span class="meal-card__title"><span class="meal-card__title-text">${esc(meal.title)}</span>${recurrenceBadge}</span>
+          <span class="meal-card__title"><span class="meal-card__type">${esc(type.label)}</span><span class="meal-card__title-text">${esc(meal.title)}</span>${recurrenceBadge}</span>
           ${ingLabel ? `<span class="meal-card__meta">
             <span class="meal-card__ingredients-count">${ingLabel}${esc(ingDoneLabel)}</span>
           </span>` : ''}
         </button>
+        <span class="meal-card__drag" role="img"
+              aria-label="${esc(t('meals.dragHandle', { title: meal.title }))}">
+          <i data-lucide="grip-vertical" class="icon-md" aria-hidden="true"></i>
+        </span>
         <div class="meal-card__actions">
           ${meal.recipe_id && recipesReachable() ? `<a class="meal-card__action-btn meal-card__action-btn--recipe"
             data-action="open-linked-recipe"
             href="/recipes?open=${encodeURIComponent(meal.recipe_id)}"
             aria-label="${esc(t('meals.viewRecipeNamed', { title: meal.title }))}"
-          ><i data-lucide="chef-hat" class="icon-sm" aria-hidden="true"></i></a>`
+          ><i data-lucide="chef-hat" class="icon-md" aria-hidden="true"></i></a>`
           : meal.recipe_url ? `<a class="meal-card__action-btn meal-card__action-btn--recipe"
             data-action="open-recipe"
             href="${esc(meal.recipe_url)}"
             target="_blank"
             rel="noopener noreferrer"
             aria-label="${esc(t('meals.openRecipeNamed', { title: meal.title }))}"
-          ><i data-lucide="link" class="icon-sm" aria-hidden="true"></i></a>` : ''}
+          ><i data-lucide="link" class="icon-md" aria-hidden="true"></i></a>` : ''}
           ${canTransfer ? `<button class="meal-card__action-btn meal-card__action-btn--shopping"
             data-action="transfer-meal"
             data-meal-id="${meal.id}"
             aria-label="${esc(t('common.toShoppingListNamed', { title: meal.title }))}"
-          ><i data-lucide="shopping-cart" class="icon-sm" aria-hidden="true"></i></button>` : ''}
-          <button class="meal-card__action-btn"
+          ><i data-lucide="shopping-cart" class="icon-md" aria-hidden="true"></i></button>` : ''}
+          <button class="meal-card__action-btn meal-card__action-btn--delete"
             data-action="delete-meal"
             data-meal-id="${meal.id}"
             aria-label="${esc(t('meals.deleteMealNamed', { title: meal.title }))}"
-          ><i data-lucide="trash-2" class="icon-sm" aria-hidden="true"></i></button>
+          ><i data-lucide="trash-2" class="icon-md" aria-hidden="true"></i></button>
         </div>
       </div>
     `;
@@ -698,7 +1158,7 @@ function renderSlot(date, type, mealsForDay, dayCol, typeRow) {
         data-action="add-meal"
         data-date="${date}"
         data-type="${type.key}"
-        aria-label="${t('meals.addMeal', { type: type.label })}"
+        aria-label="${esc(t('meals.addMealTypeOnDay', { type: type.label, day: dayLongName(date) }))}"
       ><i data-lucide="plus" class="icon-sm" aria-hidden="true"></i></button>
     </div>
   `;
@@ -735,7 +1195,7 @@ function wireNav() {
     renderWeekGrid();
   });
 
-  _container.querySelector('#week-randomize')?.addEventListener('click', openRandomizeModal);
+  _container.querySelector('[data-action="randomize-plan"]')?.addEventListener('click', openRandomizeModal);
 }
 
 function wireGrid(grid) {
@@ -753,7 +1213,7 @@ function wireGrid(grid) {
     const action = btn.dataset.action;
 
     if (action === 'add-meal') {
-      openMealModal({ mode: 'create', date: btn.dataset.date, mealType: btn.dataset.type });
+      openMealModal({ mode: 'create', date: btn.dataset.date, mealType: btn.dataset.type, fromSlot: true });
       return;
     }
 
@@ -843,6 +1303,11 @@ function wireRecipeSidebar() {
     card.classList.add('recipe-sidebar__card--dragging');
     e.dataTransfer.effectAllowed = 'copy';
     e.dataTransfer.setData('text/plain', card.dataset.recipeId);
+  });
+
+  sidebar.addEventListener('click', (e) => {
+    const open = e.target.closest('[data-action="plan-recipe"]');
+    if (open) planRecipeFromRail(open.dataset.recipeId);
   });
 
   sidebar.addEventListener('dragend', (e) => {
@@ -984,6 +1449,17 @@ function wireDragDrop(grid) {
     // in einen anderen Slot und verschluckte den Klick. Eine Liste vergisst den
     // naechsten Knopf genauso - der Container ist die Regel.
     if (e.target.closest('.meal-card__actions')) return;
+    // Ein Finger (oder Stift) zieht nur am Griff, sobald die Zeile einen zeigt
+    // (#1317). Ueberall sonst gehoert die Geste dem Scroller: er beansprucht sie
+    // wegen `touch-action: pan-y` ohnehin und beendet den Pointer mit
+    // pointercancel - ein hier begonnener Zug brach also nur ab, und das
+    // preventDefault darunter liess nicht einmal den Scroll sauber anlaufen.
+    // Die Maus greift weiter die ganze Karte. Wo der Griff ausgeblendet ist
+    // (breites Board auf einem Tablet), bleibt es beim bisherigen Verhalten.
+    if (e.pointerType !== 'mouse' && !e.target.closest('.meal-card__drag')) {
+      const handle = card.querySelector('.meal-card__drag');
+      if (handle && handle.getClientRects().length > 0) return;
+    }
 
     const slot = card.closest('.meal-slot');
     if (!slot) return;
@@ -1219,44 +1695,6 @@ function openMealModal(opts) {
     content,
     size: 'md',
     onSave(panel) {
-      // Autocomplete
-      const titleInput = panel.querySelector('#modal-title');
-      const acDropdown = panel.querySelector('#modal-autocomplete');
-      let acIndex = -1;
-      let acTimer;
-
-      titleInput.addEventListener('input', () => {
-        clearTimeout(acTimer);
-        acTimer = setTimeout(async () => {
-          const q = titleInput.value.trim();
-          if (!q) { acDropdown.hidden = true; return; }
-          try {
-            const res = await api.get(`/meals/suggestions?q=${encodeURIComponent(q)}`);
-            if (!res.data.length) { acDropdown.hidden = true; return; }
-            acIndex = -1;
-            acDropdown.replaceChildren();
-            acDropdown.insertAdjacentHTML('beforeend', res.data.map((s) => `
-              <div class="meal-modal__autocomplete-item" data-title="${esc(s.title)}">${esc(s.title)}</div>
-            `).join(''));
-            acDropdown.hidden = false;
-          } catch { acDropdown.hidden = true; }
-        }, 200);
-      });
-
-      titleInput.addEventListener('keydown', (e) => {
-        const items = [...acDropdown.querySelectorAll('.meal-modal__autocomplete-item')];
-        if (!items.length) return;
-        if (e.key === 'ArrowDown') { e.preventDefault(); acIndex = Math.min(acIndex + 1, items.length - 1); items.forEach((el, i) => el.classList.toggle('meal-modal__autocomplete-item--active', i === acIndex)); }
-        if (e.key === 'ArrowUp')   { e.preventDefault(); acIndex = Math.max(acIndex - 1, 0);                items.forEach((el, i) => el.classList.toggle('meal-modal__autocomplete-item--active', i === acIndex)); }
-        if (e.key === 'Enter' && acIndex >= 0) { e.preventDefault(); titleInput.value = items[acIndex].dataset.title; acDropdown.hidden = true; acIndex = -1; }
-        if (e.key === 'Escape') acDropdown.hidden = true;
-      });
-
-      acDropdown.addEventListener('mousedown', (e) => {
-        const item = e.target.closest('.meal-modal__autocomplete-item');
-        if (item) { titleInput.value = item.dataset.title; acDropdown.hidden = true; }
-      });
-
       // Zutaten
       const ingList   = panel.querySelector('#ingredient-list');
       const addIngBtn = panel.querySelector('#add-ingredient-btn');
@@ -1298,6 +1736,18 @@ function openMealModal(opts) {
         if (recipeScaleInput) recipeScaleInput.value = '1';
         applyRecipe(recipeSelect.value);
       });
+
+      // Namensfeld als Combobox (Re-Kritik 2026-09-28, A4 P1-1): ein
+      // Rezepttreffer geht denselben Weg wie die Rezeptauswahl darunter.
+      const chooseRecipe = (id) => {
+        if (recipeSelect) recipeSelect.value = String(id);
+        if (recipeScaleInput) recipeScaleInput.value = '1';
+        applyRecipe(id);
+      };
+      wireMealTitleCombobox(panel, { onRecipe: chooseRecipe });
+      // Aus der Rezept-Spalte geoeffnet: das Rezept ist schon gewaehlt, also
+      // stehen Titel, Zutaten und Notizen gleich da.
+      if (opts.recipeId) chooseRecipe(opts.recipeId);
 
       recipeScaleInput?.addEventListener('input', () => {
         const currentRecipeId = Number(recipeSelect?.value || 0);
@@ -1382,6 +1832,9 @@ function openMealModal(opts) {
         const selectEl = panel.querySelector('#transfer-list-select');
         const listId   = parseInt(selectEl?.value, 10);
         if (!listId || !state.modal?.meal) return;
+        // Zweite Linie hinter dem Markup (Regel 2 in utils/module-access.js):
+        // die Rechte koennen sich aendern, waehrend der Dialog offen steht.
+        if (!mayTransferMealToShopping(state.modal.meal.id)) return;
         const btn = panel.querySelector('#transfer-btn');
         btn.disabled = true;
         try {
@@ -1429,6 +1882,20 @@ function openMealModal(opts) {
       });
 
       panel.querySelector('#modal-cancel').addEventListener('click', closeModal);
+      /* EIN ABGEBROCHENES SERIEN-LOESCHEN NAHM DEN EDITOR MIT (Codex an #1485):
+       * der Knopf schloss den Dialog, bevor deleteMeal() nach dem Umfang
+       * fragte - brach man dort ab, war nichts geloescht, aber Editor und
+       * ungespeicherte Aenderungen waren weg. Die Frage steht jetzt ueber dem
+       * geparkten Editor; zu geht er erst, wenn wirklich geloescht wird. */
+      panel.querySelector('#modal-delete')?.addEventListener('click', async () => {
+        let scope;
+        if (meal.recurrence_template_id) {
+          scope = await askOverModal(() => selectModal(...mealDeleteScopeQuestion()));
+          if (scope === null || scope === undefined) return;
+        }
+        closeModal({ force: true });
+        deleteMeal(meal.id, { scope });
+      });
       panel.querySelector('#modal-save').addEventListener('click', () => saveModal(panel));
       // Pflichtfelder melden sich beim Verlassen inline (geteiltes Muster).
       wireBlurValidation(panel);
@@ -1436,7 +1903,7 @@ function openMealModal(opts) {
   });
 }
 
-function buildModalContent({ mode, date, mealType, meal }) {
+function buildModalContent({ mode, date, mealType, meal, fromSlot = false, recipeId = null }) {
   const isEdit   = mode === 'edit';
   const isRecurring = isEdit && meal.recurrence_template_id;
   const typeOpts = MEAL_TYPES().map((mt) =>
@@ -1456,8 +1923,12 @@ function buildModalContent({ mode, date, mealType, meal }) {
     : '';
 
   const hasIngOpen = isEdit && meal.ingredients?.some((i) => !i.on_shopping_list);
+  // Der Abschnitt „Auf die Einkaufsliste" entfaellt GANZ, wenn der Server den
+  // Transfer abwiese (#1290) - ein Auswahlfeld ohne Knopf verspraeche dasselbe.
+  const canTransfer = hasIngOpen && mayTransferMealToShopping(meal.id);
 
-  const recipeOptionHtml = (r) => `<option value="${r.id}" ${isEdit && meal.recipe_id === r.id ? 'selected' : ''}>${esc(r.title)}</option>`;
+  const chosenRecipeId = isEdit ? meal.recipe_id : recipeId;
+  const recipeOptionHtml = (r) => `<option value="${r.id}" ${chosenRecipeId === r.id ? 'selected' : ''}>${esc(r.title)}</option>`;
   // Optgroups nur, sobald gespiegelte Rezepte wirklich vorkommen: ohne Mirror-
   // Account bleibt die flache Liste von vorher unverändert (kein UI-Rauschen).
   const hasMirroredRecipes = state.recipes.some((r) => r.source !== 'native');
@@ -1473,7 +1944,10 @@ function buildModalContent({ mode, date, mealType, meal }) {
       ...state.recipes.map(recipeOptionHtml),
     ].join('');
 
-  const advancedOpen = isEdit && (!!meal.recipe_id || !!meal.notes || !!meal.recipe_url || isRecurring);
+  // Wie beim Bearbeiten einer Mahlzeit mit Rezept: aus der Rezept-Spalte
+  // geoeffnet, steht die Rezeptauswahl offen da, damit sichtbar ist, WOHER Titel
+  // und Zutaten kommen.
+  const advancedOpen = (isEdit && (!!meal.recipe_id || !!meal.notes || !!meal.recipe_url || isRecurring)) || Boolean(recipeId);
 
   const advancedFieldsHtml = `
     <div class="form-group">
@@ -1536,8 +2010,8 @@ function buildModalContent({ mode, date, mealType, meal }) {
       </div>
     </div>`}`;
 
-  return `
-    <div class="modal-grid modal-grid--2">
+  const whenHtml = `
+    <div class="modal-grid modal-grid--2${fromSlot && !isEdit ? ' meal-modal__when' : ''}">
       <div class="form-group">
         <label class="form-label" for="modal-date">${t('meals.dateLabel')}</label>
         <yuvomi-datepicker type="date" id="modal-date" value="${formatDateInput(date)}"></yuvomi-datepicker>
@@ -1547,28 +2021,40 @@ function buildModalContent({ mode, date, mealType, meal }) {
         <select class="form-input" id="modal-type">${typeOpts}</select>
       </div>
     </div>
-
+`;
+  const nameHtml = `
     <div class="form-group" style="position:relative;">
       <label class="form-label" for="modal-title">${t('common.nameLabel')}</label>
       <input type="text" class="form-input" id="modal-title" required
              placeholder="${t('meals.titlePlaceholder')}"
              value="${esc(isEdit ? meal.title : '')}"
-             autocomplete="off">
-      <div id="modal-autocomplete" class="meal-modal__autocomplete" hidden></div>
+             autocomplete="off" role="combobox" aria-autocomplete="list"
+             aria-expanded="false" aria-controls="modal-autocomplete">
+      <div id="modal-autocomplete" class="meal-modal__autocomplete" role="listbox"
+           aria-label="${esc(t('meals.suggestionsLabel'))}" hidden></div>
     </div>
+`;
+  // AUS DEM SLOT: NAME ZUERST (Re-Critique 2026-09-28, A4 P2-9). Der Slot
+  // weiss Tag und Mahlzeit schon; oben standen trotzdem genau diese zwei
+  // Felder, und der Name lag bei 427px Hoehe unter dem Falz. Aus dem Slot
+  // fuehrt jetzt der Name (mit den Rezeptvorschlaegen des Autocompletes), Tag
+  // und Mahlzeit stehen als ruhige, weiter editierbare Zeile darunter. Ohne
+  // Slot (FAB, Kurzbefehl) bleibt "erst wann, dann was".
+  return `
+    ${fromSlot && !isEdit ? nameHtml + whenHtml : whenHtml + nameHtml}
 
     <div class="form-group">
       <label class="form-label">${t('meals.ingredientsLabel')}</label>
       <div class="ingredient-list" id="ingredient-list">${ingRows}</div>
-      <button class="add-ingredient-btn" id="add-ingredient-btn" type="button">
-        <i data-lucide="plus" class="icon-sm" aria-hidden="true"></i>
+      <button class="btn btn--secondary add-ingredient-btn" id="add-ingredient-btn" type="button">
+        <i data-lucide="plus" class="icon-md" aria-hidden="true"></i>
         ${t('meals.addIngredient')}
       </button>
     </div>
 
     ${advancedSection(advancedFieldsHtml, { open: advancedOpen })}
 
-    ${isEdit && hasIngOpen ? `
+    ${canTransfer ? `
     <div class="shopping-transfer">
       <div class="shopping-transfer__label">
         <i data-lucide="shopping-cart" class="icon-sm" aria-hidden="true"></i>
@@ -1588,7 +2074,11 @@ function buildModalContent({ mode, date, mealType, meal }) {
       : '<div id="transfer-missing" class="shopping-transfer__missing"></div>'}
     </div>` : ''}
 
+    ${/* Loeschen links im Dialogfuss (Kanon, R8 H10): am Desktop war eine
+        * Mahlzeit sonst nur ueber den Papierkorb der Karte loeschbar. Es geht
+        * denselben Weg wie dort (`deleteMeal`: Serienabfrage, Rueckgaengig). */ ''}
     <div class="modal-panel__footer modal-panel__footer--plain">
+      ${isEdit ? `<button type="button" class="btn btn--danger-outline" id="modal-delete" data-delete-name="${esc(meal.title)}" style="margin-inline-end:auto"><i data-lucide="trash-2" class="icon-md" aria-hidden="true"></i>${esc(t('common.delete'))}</button>` : ''}
       <button class="btn btn--secondary" id="modal-cancel">${t('common.cancel')}</button>
       <button class="btn btn--primary" id="modal-save">${isEdit ? t('common.save') : t('common.add')}</button>
     </div>`;
@@ -1704,7 +2194,25 @@ function collectModalIngredients(overlay) {
 // Mahlzeit löschen
 // --------------------------------------------------------
 
-async function deleteMeal(mealId) {
+/**
+ * Die Umfangs-Frage einer Serien-Mahlzeit als Argumente fuer selectModal():
+ * Einzeltermin, alles ab hier oder ganze Serie. Der Editor stellt sie ueber
+ * sich selbst (askOverModal), die Karte direkt.
+ */
+function mealDeleteScopeQuestion() {
+  return [t('meals.deleteRecurringTitle'), [
+    { value: 'single', label: t('meals.deleteScopeSingle') },
+    { value: 'future', label: t('meals.deleteScopeFuture') },
+    { value: 'series', label: t('meals.deleteScopeSeries') },
+  ]];
+}
+
+/**
+ * Loescht eine Mahlzeit. `scope` ist der schon erfragte Umfang einer Serie
+ * (der Editor fragt ihn ueber sich selbst, bevor er schliesst); ohne ihn
+ * fragt die Funktion selbst.
+ */
+async function deleteMeal(mealId, { scope } = {}) {
   const meal = state.meals.find((m) => m.id === mealId);
 
   // Wiederkehrende Mahlzeit: Einzeltermin, alles ab hier oder ganze Serie löschen.
@@ -1712,11 +2220,7 @@ async function deleteMeal(mealId) {
   // nur nach vorn enden soll - ohne ihn blieb nur, jedes künftige Vorkommen
   // einzeln zu löschen, während die nächste Woche schon wieder eines erzeugte (#619).
   if (meal?.recurrence_template_id) {
-    const choice = await selectModal(t('meals.deleteRecurringTitle'), [
-      { value: 'single', label: t('meals.deleteScopeSingle') },
-      { value: 'future', label: t('meals.deleteScopeFuture') },
-      { value: 'series', label: t('meals.deleteScopeSeries') },
-    ]);
+    const choice = scope ?? await selectModal(...mealDeleteScopeQuestion());
     if (choice === null) return;
 
     if (choice === 'series' || choice === 'future') {
@@ -1760,6 +2264,10 @@ async function deleteMeal(mealId) {
 // --------------------------------------------------------
 
 async function transferMeal(mealId, btn) {
+  // Zweite Linie hinter dem Markup (Regel 2 in utils/module-access.js): der
+  // Knopf fehlt ohne beide Rechte, und der Handler loest den Aufruf dann auch
+  // nicht aus.
+  if (!mayTransferMealToShopping(mealId)) return;
   // Vorprüfung, Listenwahl und die Antwort auf „es gibt keine Liste" liegen im
   // geteilten Baustein (utils/kitchen-transfer.js).
   const target = await resolveShoppingTarget(state.lists);
@@ -1801,10 +2309,55 @@ async function transferMeal(mealId, btn) {
 
 export const __test = {
   buildRandomMealAssignments,
+  // Kuechenkopf (Kopfregel mobil): das EINE Werkzeugmenue (test-meals.js).
+  mealsToolsMenuHtml,
   mealPayloadFromRecipe,
   // Skalierte Zutatenmenge: haengt an der Format-Locale und ist deshalb nur
   // verhaltensgetrieben pruefbar (siehe test-meals.js).
   scaleQuantityText,
+  // Zeitraum-Kopf (#1164): Reihenfolge und Sichtbarkeitsregel des
+  // „Heute"-Resets sind verhaltensgetrieben gepinnt (test-meals.js).
+  weekNavHtml,
+  syncTodayButton,
+  getMondayOf,
+  formatWeekLabel,
+  state,
+  // PR #1200 Review Runde 3, Nice-to-have 1: der bisherige Verdrahtungstest
+  // las `renderWeekGrid()` als QUELLTEXT (Regex auf den Funktionskoerper) -
+  // ein auskommentiertes `// syncTodayButton();` im echten Render-Pfad blieb
+  // gruen, solange der String noch irgendwo im Funktionskoerper stand. Dieser
+  // Wrapper laesst den TATSAECHLICHEN Render-Pfad laufen (mit einem
+  // uebergebenen Test-Container statt des Modul-internen `_container`), damit
+  // der Test die echte Verdrahtung prueft, nicht ihre Textform.
+  renderWeekGridForTest(container) {
+    _container = container;
+    renderWeekGrid();
+  },
+  // PR #1200 Review Runde 3, Nice-to-have 4: pinnt, dass ein Wechsel ueber die
+  // 640px-Schwelle das Wochen-Label wirklich neu zeichnet (test-meals.js).
+  onNarrowWeekLabelQueryChange,
+  // #1317: Griff-Markup und der ECHTE pointerdown-Handler, verhaltensgetrieben
+  // gepinnt (test-meals.js, „Ziehgriff").
+  renderSlot,
+  wireDragDrop,
+  // A4 P1 (Critique 2026-09-26): die Reihenfolge Rezept-Spalte -> „heute in den
+  // Blick" wird als Programm gefahren (test-meals.js, „Montag").
+  revealToday,
+  wireRailToggle,
+  setContainerForTest(container) { _container = container; _railSettled = false; },
+  // #1290: der Transfer in den Einkauf braucht BEIDE Schreibrechte - Markup
+  // (Kachel und Dialog) und der Handler werden als Programm gefahren
+  // (test-kitchen-transfer-ui.js).
+  buildModalContent,
+  openMealModal,
+  transferMeal,
+  // Re-Kritik 2026-09-28 (A4 P1-1): Rezept einplanen ohne Ziehen - Ziel der
+  // Spalte, Spalte samt Klick, Vorschlaege des Namensfelds
+  // (test-meals-recipe-entry.js).
+  railRecipeTarget,
+  renderRecipeSidebar,
+  wireRecipeSidebar,
+  mealTitleSuggestions,
 };
 
 // --------------------------------------------------------

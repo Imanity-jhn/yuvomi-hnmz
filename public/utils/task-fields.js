@@ -18,6 +18,7 @@ import { t, formatDate, formatDayMonth, formatTime } from '/i18n.js';
 import { parseLocalDateKey } from '/utils/date.js';
 import { nowFields } from '/utils/timezone.js';
 import { isPreviewable } from '/utils/document-preview.js';
+import { isNavModuleReadOnly } from '/permissions.js';
 
 // --------------------------------------------------------
 // Prioritaet und Status
@@ -50,6 +51,18 @@ export const FILTER_STATUSES = () => [...STATUSES(), { value: 'archived', label:
 export const PRIORITY_LABELS = () => Object.fromEntries(PRIORITIES().map((p) => [p.value, p.label]));
 export const STATUS_LABELS   = () => Object.fromEntries(FILTER_STATUSES().map((s) => [s.value, s.label]));
 
+/**
+ * Wie heisst dieser Zustand? Fuer jedes Zeichen, das den Zustand NENNT statt
+ * eine Handlung anzubieten (Leserecht, Tablett). Es sind drei Zustaende, nicht
+ * zwei: die Frage „erledigt oder nicht?" rief eine begonnene Aufgabe „offen",
+ * waehrend der Ring daneben gelb „in Bearbeitung" zeigte. Ein unbekannter Wert
+ * liest sich als offen - so, wie ihn auch der Ring zeichnet.
+ */
+export function statusLabel(status) {
+  const labels = STATUS_LABELS();
+  return labels[status] ?? labels.open;
+}
+
 // --------------------------------------------------------
 // Ablage und Sperre
 // --------------------------------------------------------
@@ -80,6 +93,14 @@ export function isArchived(task) {
  * @param {{isAdmin?: boolean, currentUserId?: number|string|null}} viewer
  */
 export function canEditTaskDefinition(task, parent = null, viewer = {}) {
+  // NUR-LESEN SCHLAEGT DIE EIGENE URHEBERSCHAFT. Die Sperre aus #830 fragt, wem
+  // eine einzelne Aufgabe gehoert; das Modulrecht fragt, ob dieser Nutzer
+  // ueberhaupt in Aufgaben schreiben darf - und die zweite Frage kommt zuerst.
+  // Sie steht hier und nicht in den Renderern, weil sonst dieselbe Antwort in
+  // der Zeile, in der Leseansicht und im Unteraufgaben-Knopf je einmal
+  // geschrieben stuende. Der Server entscheidet verbindlich (#467); dies ist
+  // die ehrliche Oberflaeche dazu.
+  if (isNavModuleReadOnly('tasks')) return false;
   const lock = task?.locked ? task : (parent?.locked ? parent : null);
   if (!lock) return true;
   if (viewer.isAdmin) return true;
@@ -199,11 +220,11 @@ export function formatDueDate(dateStr, timeStr, isDone = false) {
     (parseLocalDateKey(dayKey) - parseLocalDateKey(todayDay)) / (1000 * 60 * 60 * 24),
   );
 
-  const timeLabel = dueTime ? ` – ${formatTime(dueStamp)}` : '';
+  const timeLabel = dueTime ? `, ${formatTime(dueStamp)}` : '';
 
   /* DAS JAHR STEHT NUR DA, WO ES ETWAS UNTERSCHEIDET.
    *
-   * Gemessen bei 390px: die Metazeile hat 228px, und „Überfällig – 11.08.2026"
+   * Gemessen bei 390px: die Metazeile hat 228px, und „Überfällig · 11.08.2026"
    * allein belegte 154px davon - mit dem Prioritäts-Chip davor lief die Zeile
    * über und schnitt sich selbst an („11.08.202|6"). Das Jahr war dabei die
    * einzige Angabe, die nichts beitrug: eine Aufgabe, die dieses Jahr fällig
@@ -224,7 +245,7 @@ export function formatDueDate(dateStr, timeStr, isDone = false) {
 
   // Beide Seiten sind Wanduhrzeit DERSELBEN Zone und damit als Text vergleichbar.
   if (dueStamp < nowStamp) {
-    return { label: `${t('tasks.overdue')} – ${fullLabel}`, cls: 'due-date--overdue' };
+    return { label: `${t('tasks.overdue')} · ${fullLabel}`, cls: 'due-date--overdue' };
   }
   if (calDayDiff === 0) {
     return { label: `${t('tasks.dueToday')}${timeLabel}`, cls: 'due-date--today' };

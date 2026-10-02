@@ -8,8 +8,12 @@ import express from 'express';
 import { createHmac, randomBytes } from 'node:crypto';
 import * as db from '../db.js';
 import { createLogger } from '../logger.js';
-import { str, collectErrors, id as validateId, MAX_TEXT, MAX_TITLE } from '../middleware/validate.js';
+import { str, date as validateDate, num, collectErrors, id as validateId, MAX_TEXT, MAX_TITLE } from '../middleware/validate.js';
 import { isAdminRequest } from '../middleware/require-admin.js';
+import { mayReadModule } from '../permissions.js';
+import { visibilityWhere } from '../services/visibility.js';
+import { budgetDetailsVisibleWhere, resolveBudgetMode } from '../services/budget-visibility.js';
+import { reminderDateBefore, reminderIsInThePast } from '../utils/reminder-schedule.js';
 import { canManageDocument, documentVisibleSql } from '../services/document-access.js';
 import { newNonMembers, nonMemberMessage } from '../services/household-members.js';
 import {
@@ -23,6 +27,7 @@ import { ensureModuleFolder, isModuleFolderKey } from '../services/document-fold
 import { subtreeIds, folderMoveIssue, MAX_FOLDER_DEPTH } from '../../public/utils/folder-tree.js';
 import { getAdapter as defaultGetDmsAdapter } from '../services/dms/index.js';
 import { getStatus as getGoogleDriveStatus } from '../services/google-drive-storage.js';
+import { refuseWhileRestoring } from '../middleware/restore-gate.js';
 import {
   StorageError,
   assertWebdavTargetAllowed,
@@ -45,6 +50,7 @@ import {
 } from '../services/document-storage.js';
 import { MAX_UPLOAD_BYTES, MAX_UPLOAD_MB } from '../utils/upload-limit.js';
 import { contentMatchesMime } from '../utils/file-signature.js';
+import { todayKey } from '../utils/timezone.js';
 
 let dmsAdapterFactory = defaultGetDmsAdapter;
 export function _setDmsAdapterFactory(fn) { dmsAdapterFactory = fn || defaultGetDmsAdapter; }
@@ -153,6 +159,73 @@ function canSeeSql(alias = 'd') {
   return documentVisibleSql(alias);
 }
 
+const EXPIRY_REMINDER_MIN_DAYS = 0;
+const EXPIRY_REMINDER_MAX_DAYS = 365;
+
+/**
+ * `expires_at` ist optional und einfach `undefined` (nicht mitgeschickt) vs.
+ * `null`/`''` (bewusst geloescht) unterscheidbar - PATCH lässt ein Feld sonst
+ * nicht einzeln weglassbar.
+ */
+function vExpiresAt(value) {
+  if (value === undefined) return { value: undefined, error: null };
+  if (value === null || value === '') return { value: null, error: null };
+  return validateDate(value, 'Expiry date');
+}
+
+/**
+ * 0-365, mirroring `inventory_item_dates.reminder_offset_days`. Anders als dort
+ * gibt es hier keinen Default - `null`/nicht mitgeschickt heisst "keine
+ * Erinnerung", nicht "30 Tage". Ein explizites `0` bleibt `0` (Range-Check
+ * unterscheidet nicht per Wahrheitswert, sondern per `undefined`/`null`/`''`).
+ */
+function vExpiryReminderDays(value) {
+  if (value === undefined) return { value: undefined, error: null };
+  if (value === null || value === '') return { value: null, error: null };
+  const parsed = num(value, 'Reminder lead time');
+  if (parsed.error) return parsed;
+  if (!Number.isInteger(parsed.value) || parsed.value < EXPIRY_REMINDER_MIN_DAYS || parsed.value > EXPIRY_REMINDER_MAX_DAYS) {
+    return { value: null, error: `Reminder lead time must be an integer between ${EXPIRY_REMINDER_MIN_DAYS} and ${EXPIRY_REMINDER_MAX_DAYS}.` };
+  }
+  return { value: parsed.value, error: null };
+}
+
+/**
+ * Erinnerungs-Sync fuer den Ablauf eines Dokuments, identisches Muster wie
+ * server/routes/inventory/items.js#syncReminder: bei jedem Schreiben erst
+ * loeschen, dann - falls die Bedingungen greifen - neu anlegen. Eigentuemer ist
+ * `created_by` (der Anlegende), nicht die gerade schreibende Person - gleiche
+ * Regel wie bei den Inventar-Fristen.
+ */
+function syncDocumentExpiryReminder(document) {
+  const database = db.get();
+  database.prepare(`
+    DELETE FROM reminders WHERE entity_type = 'document_expiry' AND entity_id = ?
+  `).run(document.id);
+
+  if (!document.expires_at || document.expiry_reminder_days == null || !document.created_by) return;
+
+  const remindAt = reminderDateBefore(document.expires_at, document.expiry_reminder_days);
+  if (reminderIsInThePast(remindAt)) return;
+
+  database.prepare(`
+    INSERT INTO reminders (entity_type, entity_id, remind_at, created_by)
+    VALUES ('document_expiry', ?, ?, ?)
+  `).run(document.id, remindAt, document.created_by);
+}
+
+/**
+ * Abraeumen, wo ein Dokument den aktiven Bestand verlaesst: geloescht, im
+ * Ordnerbaum mitgeloescht, oder archiviert. `reminders.entity_id` hat keinen
+ * FK, also ist das explizit noetig - gleiches Muster wie
+ * item-dates.js#removeTrackedDateReminders.
+ */
+function removeDocumentExpiryReminder(documentId) {
+  db.get().prepare(`
+    DELETE FROM reminders WHERE entity_type = 'document_expiry' AND entity_id = ?
+  `).run(documentId);
+}
+
 function parseMemberIds(value) {
   if (!Array.isArray(value)) return [];
   return [...new Set(value.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0))];
@@ -184,6 +257,7 @@ function documentSelect() {
            d.original_name, d.mime_type, d.file_size, d.storage_provider,
            d.storage_backend, d.storage_key, d.dms_account_id, d.external_url,
            d.external_meta, d.folder_id, d.created_by, d.created_at, d.updated_at,
+           d.expires_at, d.expiry_reminder_days,
            f.name AS folder_name,
            u.display_name AS creator_name, u.avatar_color AS creator_color,
            da.provider AS dms_provider,
@@ -207,7 +281,7 @@ function normalizeDocument(row) {
 }
 
 function getVisibleDocument(id, req, includeContent = false) {
-  const columns = includeContent ? 'd.*' : 'd.id, d.created_by, d.visibility, d.description, d.folder_id';
+  const columns = includeContent ? 'd.*' : 'd.id, d.created_by, d.visibility, d.description, d.folder_id, d.status, d.expires_at, d.expiry_reminder_days';
   return db.get().prepare(`
     SELECT ${columns}
     FROM family_documents d
@@ -250,11 +324,13 @@ async function resolveDmsThumbnail(account, storageKey) {
   return { buffer: thumb.buffer, mime };
 }
 
-function sendThumbnail(res, thumb, cacheSeconds) {
+// no-store wie beim Viewer: ein Vorschaubild zeigt die erste Seite eines
+// Dokuments, und der Browser-Cache ueberlebt das Abmelden.
+function sendThumbnail(res, thumb) {
   res.setHeader('Content-Type', thumb.mime);
   res.setHeader('Content-Length', String(thumb.buffer.length));
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('Cache-Control', `private, max-age=${cacheSeconds}`);
+  res.setHeader('Cache-Control', 'no-store');
   res.setHeader('Content-Security-Policy', "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'");
   res.end(thumb.buffer);
 }
@@ -529,6 +605,27 @@ function allFolders() {
   return db.get().prepare('SELECT id, name, parent_id FROM family_document_folders').all();
 }
 
+/**
+ * Die Dokumente eines Zweigs, die diese Person sieht - fuer Vorschau und
+ * DELETE dieselbe Abfrage, damit beide ueber dieselbe Menge urteilen.
+ * content_data bleibt bewusst draussen: Legacy-BLOBs koennen bis zum
+ * Uploadlimit gross sein, fuer das Loeschen braucht der Storage-Adapter aber
+ * nur Backend und Key.
+ */
+function visibleFolderDocuments(req, folderIds) {
+  const folderParams = Object.fromEntries(folderIds.map((value, i) => [`f${i}`, value]));
+  const folderPlaceholders = folderIds.map((_v, i) => `@f${i}`).join(',');
+  return db.get()
+    .prepare(`
+      SELECT d.id, d.name, d.storage_backend, d.storage_key, d.created_by
+      FROM family_documents d
+      WHERE d.folder_id IN (${folderPlaceholders})
+        AND ${documentVisibleSql('d')}
+      ORDER BY d.id ASC
+    `)
+    .all({ ...folderParams, userId: userId(req) });
+}
+
 /** Bind a destructive confirmation to exact folder and document identities. */
 function folderDeleteSnapshot(folderIds, documentIds, linkedState) {
   const numericSort = (a, b) => a - b;
@@ -543,43 +640,104 @@ function folderDeleteSnapshot(folderIds, documentIds, linkedState) {
     .digest('hex');
 }
 
-/** Exact link identities affected by deleting the selected documents. */
-function folderDeleteLinkedState(documentIds) {
-  if (!documentIds.length) {
-    return {
-      calendar_events: [], housekeeping_work_sessions: [], expense_groups: [],
-      settlements: [], expense_attachments: [], task_documents: [],
-      budget_entry_attachments: [], inventory_item_documents: [],
-    };
-  }
+/**
+ * Die Verknuepfungen, die das Loeschen der sichtbaren Dokumente mitnimmt -
+ * exakt, als IDs, damit der Snapshot sie binden kann.
+ *
+ * NUR, WAS DIE FRAGENDE PERSON IN DEM ANDEREN MODUL SIEHT. Die Vorschau zaehlte
+ * jede Verknuepfung ohne Blick auf das Modul: ein Mitglied mit `budget: none`
+ * oder ein Token mit nur `documents:read` erfuhr, wie viele Buchungen,
+ * Aufgaben oder Termine an einem Dokument haengen, und wer das Modul lesen
+ * durfte, erfuhr von Verknuepfungen aus fremden privaten Terminen und
+ * Aufgaben - und der Snapshot aenderte sich mit ihnen. Jetzt gilt je Modul:
+ *   - ohne Leserecht (Sitzung UND Token-Scope, `mayReadModule()`) steht dort
+ *     `null` - nicht erzaehlt, nicht 0 (wie `attachments` seit #1358);
+ *   - mit Leserecht zaehlt nur, was die Leseregel des Moduls zeigt: Termine
+ *     und Aufgaben ueber `visibilityWhere()` (Termine dazu nur aus geteilten
+ *     oder eigenen Abos, wie GET /calendar), Buchungen ueber
+ *     `budgetDetailsVisibleWhere()` (eine maskierte Buchung zeigt keine
+ *     Belege), Ausgabengruppen samt Ausgaben und Ausgleichen nur fuer
+ *     Mitglieder der Gruppe oder Admins (`requireGroupAccess()`). Besuche und
+ *     Inventar gehoeren dem Haushalt und kennen keine Zeilen-Sichtbarkeit.
+ * Die geteilten Ausgaben haengen am Modulrecht `budget` (scopes.js).
+ */
+function folderDeleteLinkedState(req, documentIds) {
   const params = Object.fromEntries(documentIds.map((value, index) => [`d${index}`, value]));
   const placeholders = documentIds.map((_value, index) => `@d${index}`).join(',');
-  const ids = (table, column, identity = 'id') => db.get().prepare(`
-    SELECT ${identity} AS identity
-      FROM ${table}
-     WHERE ${column} IN (${placeholders})
-     ORDER BY ${identity}
-  `).all(params).map((row) => row.identity);
+  const ids = (sql) => (documentIds.length
+    ? db.get().prepare(sql).all({ ...params, userId: userId(req) }).map((row) => row.identity)
+    : []);
+  const reads = (moduleKey) => mayReadModule(req, moduleKey);
+  const groupVisible = (column) => (isAdminRequest(req) ? '1=1' : `EXISTS (
+    SELECT 1 FROM expense_group_members gm WHERE gm.group_id = ${column} AND gm.user_id = @userId
+  )`);
+  const readsCalendar = reads('calendar');
+  const readsBudget = reads('budget');
+  const readsTasks = reads('tasks');
   return {
-    calendar_events: ids('calendar_events', 'attachment_document_id'),
-    housekeeping_work_sessions: ids('housekeeping_work_sessions', 'receipt_document_id'),
-    expense_groups: ids('expense_groups', 'avatar_document_id'),
-    settlements: ids('settlements', 'proof_document_id'),
-    expense_attachments: ids('expense_attachments', 'document_id'),
-    task_documents: ids('task_documents', 'document_id', "printf('%d:%d', task_id, document_id)"),
-    budget_entry_attachments: ids('budget_entry_attachments', 'document_id'),
-    inventory_item_documents: ids('inventory_item_documents', 'document_id'),
+    calendar_events: readsCalendar ? ids(`
+      SELECT e.id AS identity FROM calendar_events e
+       WHERE e.attachment_document_id IN (${placeholders})
+         AND (e.external_source <> 'ics' OR e.subscription_id IN (
+           SELECT id FROM ics_subscriptions WHERE shared = 1 OR created_by = @userId))
+         AND ${visibilityWhere('e', 'event_assignments', 'event_id', '@userId')}
+       ORDER BY e.id
+    `) : null,
+    housekeeping_work_sessions: reads('housekeeping') ? ids(`
+      SELECT h.id AS identity FROM housekeeping_work_sessions h
+       WHERE h.receipt_document_id IN (${placeholders})
+       ORDER BY h.id
+    `) : null,
+    expense_groups: readsBudget ? ids(`
+      SELECT g.id AS identity FROM expense_groups g
+       WHERE g.avatar_document_id IN (${placeholders}) AND ${groupVisible('g.id')}
+       ORDER BY g.id
+    `) : null,
+    settlements: readsBudget ? ids(`
+      SELECT s.id AS identity FROM settlements s
+       WHERE s.proof_document_id IN (${placeholders}) AND ${groupVisible('s.group_id')}
+       ORDER BY s.id
+    `) : null,
+    expense_attachments: readsBudget ? ids(`
+      SELECT a.id AS identity FROM expense_attachments a
+        JOIN expenses x ON x.id = a.expense_id
+       WHERE a.document_id IN (${placeholders}) AND ${groupVisible('x.group_id')}
+       ORDER BY a.id
+    `) : null,
+    task_documents: readsTasks ? ids(`
+      SELECT printf('%d:%d', td.task_id, td.document_id) AS identity FROM task_documents td
+        JOIN tasks t ON t.id = td.task_id
+       WHERE td.document_id IN (${placeholders})
+         AND ${visibilityWhere('t', 'task_assignments', 'task_id', '@userId')}
+       ORDER BY identity
+    `) : null,
+    budget_entry_attachments: readsBudget ? ids(`
+      SELECT a.id AS identity FROM budget_entry_attachments a
+        JOIN budget_entries b ON b.id = a.entry_id
+       WHERE a.document_id IN (${placeholders})
+         AND ${budgetDetailsVisibleWhere('b', '@userId', { mode: resolveBudgetMode(db.get()) })}
+       ORDER BY a.id
+    `) : null,
+    inventory_item_documents: reads('inventory') ? ids(`
+      SELECT i.id AS identity FROM inventory_item_documents i
+       WHERE i.document_id IN (${placeholders})
+       ORDER BY i.id
+    `) : null,
   };
 }
 
+/** Die Zaehler der Vorschau; ein Modul ohne Leserecht bleibt `null`. */
 function folderDeleteLinkedRecords(state) {
+  const count = (...lists) => (lists.some((list) => list === null)
+    ? null
+    : lists.reduce((sum, list) => sum + list.length, 0));
   return {
-    calendar: state.calendar_events.length,
-    housekeeping: state.housekeeping_work_sessions.length,
-    split_expenses: state.expense_groups.length + state.settlements.length + state.expense_attachments.length,
-    tasks: state.task_documents.length,
-    budget: state.budget_entry_attachments.length,
-    inventory: state.inventory_item_documents.length,
+    calendar: count(state.calendar_events),
+    housekeeping: count(state.housekeeping_work_sessions),
+    split_expenses: count(state.expense_groups, state.settlements, state.expense_attachments),
+    tasks: count(state.task_documents),
+    budget: count(state.budget_entry_attachments),
+    inventory: count(state.inventory_item_documents),
   };
 }
 
@@ -643,31 +801,30 @@ router.get('/folders/:id/delete-impact', (req, res) => {
     if (!existing) return res.status(404).json({ error: 'Folder not found.', code: 404 });
 
     const subtree = [...subtreeIds(allFolders(), id)];
-    const folderParams = Object.fromEntries(subtree.map((value, i) => [`f${i}`, value]));
-    const folderPlaceholders = subtree.map((_v, i) => `@f${i}`).join(',');
-    const documents = db.get()
-      .prepare(`SELECT id, created_by FROM family_documents WHERE folder_id IN (${folderPlaceholders})`)
-      .all(folderParams);
-    const visibleDocuments = db.get()
-      .prepare(`
-        SELECT d.id, d.created_by
-        FROM family_documents d
-        WHERE d.folder_id IN (${folderPlaceholders})
-          AND ${documentVisibleSql('d')}
-      `)
-      .all({ ...folderParams, userId: userId(req) });
-    const canDeleteDocuments = visibleDocuments.length === documents.length
-      && visibleDocuments.every((document) => mayManage(req, document));
+    const visibleDocuments = visibleFolderDocuments(req, subtree);
+    // AUCH DAS URTEIL SIEHT NUR DAS SICHTBARE (#1358). `can_delete_documents`
+    // fragte, ob ALLE Dokumente im Zweig sichtbar sind - fuer einen Admin, der
+    // jedes sichtbare Dokument loeschen darf, hiess `false` genau: hier liegt
+    // ein privates Dokument, das du nicht siehst. Die Vorschau ist mit und
+    // ohne unsichtbares Dokument dieselbe, und das DELETE ebenso: es loescht
+    // nur das Sichtbare, ein unsichtbares Dokument verliert nur den Ordner.
+    const canDeleteDocuments = visibleDocuments.every((document) => mayManage(req, document));
 
-    const linkedState = folderDeleteLinkedState(documents.map((document) => document.id));
-    const visibleLinkedState = folderDeleteLinkedState(visibleDocuments.map((document) => document.id));
+    // DER SNAPSHOT DECKT NUR, WAS DIE FRAGENDE PERSON SIEHT (#1355). Ueber
+    // alle Dokumente gebildet, aenderte er sich mit jedem unsichtbaren
+    // Dokument, das in den Zweig kam, ging oder verknuepft wurde - zweimal
+    // fragen verriet Aktivitaet an fremden privaten Dokumenten. Dasselbe gilt
+    // fuer die Verknuepfungen: nur aus lesbaren Modulen, nur sichtbare
+    // Datensaetze (folderDeleteLinkedState).
+    const visibleIds = visibleDocuments.map((document) => document.id);
+    const visibleLinkedState = folderDeleteLinkedState(req, visibleIds);
     res.json({ data: {
       id,
       removed_folders: subtree.length,
       documents: visibleDocuments.length,
       can_delete_documents: canDeleteDocuments,
       linked_records: folderDeleteLinkedRecords(visibleLinkedState),
-      snapshot: folderDeleteSnapshot(subtree, documents.map((document) => document.id), linkedState),
+      snapshot: folderDeleteSnapshot(subtree, visibleIds, visibleLinkedState),
     } });
   } catch (err) {
     log.error('GET /folders/:id/delete-impact error:', err);
@@ -793,29 +950,18 @@ router.delete('/folders/:id', async (req, res) => {
     // folder_id traegt ON DELETE SET NULL und die Dokumente landen unter
     // "ohne Ordner". `documents=delete` ist eine eigene, vorab bestaetigte
     // Aktion und loescht Inhalt plus Zeile nacheinander.
+    //
+    // BEIDE MODI SEHEN NUR DAS SICHTBARE. Ein Dokument, das die Person nicht
+    // sieht, wird nie gelesen, gezaehlt, gesperrt oder geloescht - es verliert
+    // mit dem Ordner nur seine Ordnerbindung, im destruktiven Modus genau wie
+    // beim Entordnen. Bis dahin verweigerte `documents=delete` einen Zweig mit
+    // unsichtbarem Dokument (403 FOLDER_DOCUMENTS_NOT_MANAGEABLE), und jede
+    // Absage, die an einem unsichtbaren Dokument haengt, sagt, dass es da ist:
+    // vor dem Snapshot-Vergleich stand sie 403 gegen 409, danach waere es 403
+    // gegen 200 gewesen. Der Schutz aus DECISIONS.md Eintrag 1 bleibt: ein
+    // unsichtbares Dokument loescht auch ein Admin ueber einen Ordner nie.
     const subtree = [...subtreeIds(allFolders(), id)];
-    const folderParams = Object.fromEntries(subtree.map((value, i) => [`f${i}`, value]));
-    const folderPlaceholders = subtree.map((_v, i) => `@f${i}`).join(',');
-    const documents = db.get()
-      // content_data bleibt bewusst draussen: Legacy-BLOBs koennen bis zum
-      // Uploadlimit gross sein, fuer das Loeschen braucht der Storage-Adapter
-      // aber nur Backend und Key.
-      .prepare(`
-        SELECT id, name, storage_backend, storage_key, created_by
-        FROM family_documents
-        WHERE folder_id IN (${folderPlaceholders})
-        ORDER BY id ASC
-      `)
-      .all(folderParams);
-    const visibleDocumentIds = new Set(db.get()
-      .prepare(`
-        SELECT d.id
-        FROM family_documents d
-        WHERE d.folder_id IN (${folderPlaceholders})
-          AND ${documentVisibleSql('d')}
-      `)
-      .all({ ...folderParams, userId: userId(req) })
-      .map((document) => document.id));
+    const documents = visibleFolderDocuments(req, subtree);
     const deleteDocuments = documentAction === 'delete';
 
     if (deleteDocuments && expectedSnapshot === null) {
@@ -825,18 +971,23 @@ router.delete('/folders/:id', async (req, res) => {
       });
     }
 
-    // Der Dialog bestaetigt konkrete Zahlen UND Identitaeten. Hat sich der
-    // Zweig seit seinem Impact-GET veraendert, darf der folgende Klick nicht
-    // still andere Inhalte loeschen als angezeigt. Der destruktive Modus ist
-    // neu und verlangt den Snapshot; der sichere Unfile-Default bleibt fuer
-    // alte Clients ohne Erwartungswerte kompatibel.
-    const currentLinkedState = folderDeleteLinkedState(documents.map((document) => document.id));
+    // ERST DER VERGLEICH, DANN DIE BESITZPRUEFUNG. Der Dialog bestaetigt
+    // konkrete Zahlen UND Identitaeten. Hat sich der sichtbare Zweig seit
+    // seinem Impact-GET veraendert, darf der folgende Klick nicht still andere
+    // Inhalte loeschen als angezeigt. Der destruktive Modus verlangt den
+    // Snapshot; der sichere Unfile-Default bleibt fuer alte Clients ohne
+    // Erwartungswerte kompatibel. Der Snapshot wird wie im GET nur ueber das
+    // Sichtbare gebildet. Die Reihenfolge ist seit #1355 umgekehrt: dort stand
+    // die Besitzpruefung vorn, damit kein 409 ueber unsichtbare Dokumente
+    // zustande kam - das kann es nicht mehr, und ein veraenderter Zweig
+    // bekommt so zuerst die frische Vorschau statt einer Absage.
+    const visibleIds = documents.map((document) => document.id);
     const currentSnapshot = folderDeleteSnapshot(
       subtree,
-      documents.map((document) => document.id),
-      currentLinkedState,
+      visibleIds,
+      folderDeleteLinkedState(req, visibleIds),
     );
-    if ((expectedDocuments !== null && expectedDocuments !== visibleDocumentIds.size)
+    if ((expectedDocuments !== null && expectedDocuments !== documents.length)
         || (expectedFolders !== null && expectedFolders !== subtree.length)
         || (expectedSnapshot !== null && expectedSnapshot !== currentSnapshot)) {
       return res.status(409).json({
@@ -846,16 +997,32 @@ router.delete('/folders/:id', async (req, res) => {
       });
     }
 
-    // Die Besitzprüfung läuft über den GANZEN Zweig, bevor ein externer
-    // Speicher angefasst wird. Sonst könnte ein Mitglied erst eigene Dateien
-    // löschen und beim ersten fremden Dokument in einem halben Baum stranden.
-    if (deleteDocuments && (visibleDocumentIds.size !== documents.length
-        || !documents.every((document) => mayManage(req, document)))) {
-      return res.status(403).json({ error: 'Not authorized to delete every document in this folder.', code: 403 });
+    // Die Besitzpruefung laeuft ueber jedes sichtbare Dokument des Zweigs,
+    // bevor ein externer Speicher angefasst wird - sonst koennte ein Mitglied
+    // erst eigene Dateien loeschen und beim ersten fremden Dokument in einem
+    // halben Baum stranden. Sie sieht nur Sichtbares, die Absage verraet also
+    // nichts, was die Vorschau nicht schon zeigt (`can_delete_documents`).
+    if (deleteDocuments && !documents.every((document) => mayManage(req, document))) {
+      return res.status(403).json({
+        error: 'Not authorized to delete every document in this folder.',
+        code: 403,
+        reason: 'FOLDER_DOCUMENTS_NOT_MANAGEABLE',
+      });
     }
 
+    // Die Dokumentsperre gilt nur fuer das destruktive Loeschen (#1355).
+    // Entordnen loescht allein die Ordnerzeile, folder_id faellt per
+    // ON DELETE SET NULL - ein Dokument, dessen Einzel-Loeschung gerade
+    // laeuft, verliert dabei nur seinen Ordner und verschwindet danach wie
+    // geplant. Auf dessen Sperre zu warten hiess, an einer fremden Loeschung
+    // zu scheitern, die das Entordnen gar nicht beruehrt, und bei einem
+    // unsichtbaren Dokument verriet das 409 fremde Aktivitaet. Die
+    // Ordnersperre bleibt fuer beide Modi: ein Zweig im destruktiven Loeschen
+    // wird nicht nebenher entordnet. Im destruktiven Modus zaehlen nur die
+    // sichtbaren Dokumente, die er loescht - ein unsichtbares wird ohnehin
+    // nur entordnet. Pruefung und Schreiben laufen ohne await dazwischen.
     const overlapsActiveDeletion = subtree.some((folderId) => activeFolderTreeDeletes.has(folderId))
-      || documents.some((document) => documentDeleteIsActive(document.id));
+      || (deleteDocuments && documents.some((document) => documentDeleteIsActive(document.id)));
     if (overlapsActiveDeletion) return deletionInProgress(res);
 
     if (deleteDocuments) {
@@ -894,6 +1061,7 @@ router.delete('/folders/:id', async (req, res) => {
       for (const document of storageDeletedDocuments) {
         try {
           db.get().prepare('DELETE FROM family_documents WHERE id = ?').run(document.id);
+          removeDocumentExpiryReminder(document.id);
           deletedDocuments += 1;
         } catch (err) {
           log.error(`DELETE /folders/:id document ${document.id} database error:`, err);
@@ -911,17 +1079,13 @@ router.delete('/folders/:id', async (req, res) => {
       // hinzugekommen sind. Der neu hinzugekommene Inhalt war nicht Teil der
       // bestätigten Vorschau und darf weder mitgelöscht noch durch das folgende
       // ON DELETE SET NULL überraschend entordnet werden.
+      //
+      // Auch hier nur das Sichtbare: die Antwort nannte jedes neue Dokument
+      // mit ID und Namen, auch ein fremdes privates. Ein unsichtbares
+      // Neuankoemmling aendert nichts, was die Person sieht, und wird wie jedes
+      // unsichtbare Dokument im Zweig nur entordnet.
       const currentSubtree = [...subtreeIds(allFolders(), id)];
-      const currentFolderParams = Object.fromEntries(currentSubtree.map((value, i) => [`f${i}`, value]));
-      const currentFolderPlaceholders = currentSubtree.map((_v, i) => `@f${i}`).join(',');
-      const remainingDocuments = db.get()
-        .prepare(`
-          SELECT id, name
-          FROM family_documents
-          WHERE folder_id IN (${currentFolderPlaceholders})
-          ORDER BY id ASC
-        `)
-        .all(currentFolderParams);
+      const remainingDocuments = visibleFolderDocuments(req, currentSubtree);
       const originalFolderIds = new Set(subtree);
       const originalDocumentIds = new Set(documents.map((document) => document.id));
       const contentsChanged = currentSubtree.length !== subtree.length
@@ -959,7 +1123,7 @@ router.delete('/folders/:id', async (req, res) => {
     res.json({ data: {
       id,
       removed_folders: subtree.length,
-      unfiled_documents: deleteDocuments ? 0 : visibleDocumentIds.size,
+      unfiled_documents: deleteDocuments ? 0 : documents.length,
       deleted_documents: deleteDocuments ? documents.length : 0,
       failed_documents: [],
       folder_deleted: true,
@@ -980,6 +1144,16 @@ router.get('/', (req, res) => {
     const folderId = req.query.folder_id !== undefined && req.query.folder_id !== ''
       ? Number(req.query.folder_id)
       : null;
+    // `?expiring=<days>` - Dokumente, deren Ablauf innerhalb der naechsten N Tage
+    // liegt oder bereits vergangen ist (dieselbe "faellig ODER ueberfaellig"-
+    // Lesart wie der Chip von public/utils/date-status.js). Ein ungueltiger Wert
+    // wird still uebersprungen (Filter bleibt aus, volle Liste) statt mit 400
+    // abgelehnt - derselbe Umgang wie beim Rest dieser Route (`status`/`category`
+    // fallen ebenso auf "kein Filter" zurueck statt einen Request abzulehnen).
+    const expiringDays = req.query.expiring !== undefined && req.query.expiring !== ''
+      ? Number(req.query.expiring)
+      : null;
+    const expiringWithinDays = Number.isInteger(expiringDays) && expiringDays >= 0 ? expiringDays : null;
 
     /* EIN ORDNER ZEIGT AUCH, WAS UNTER IHM LIEGT (#785).
      *
@@ -1007,13 +1181,26 @@ router.get('/', (req, res) => {
     const folderClause = subtree
       ? `AND d.folder_id IN (${subtree.map((_v, i) => `@f${i}`).join(',')})`
       : '';
-    const params = { userId: userId(req), status, category, ...folderParams };
+    const params = {
+      userId: userId(req), status, category, expiringWithinDays,
+      // `expires_at` ist ein lokal eingegebener Kalendertag, kein Instant -
+      // `date('now')` waere der UTC-Tag und oestlich von UTC am fruehen Abend,
+      // westlich davon am fruehen Morgen der falsche (server/services/
+      // task-scope.js hat dieselbe Falle). `todayKey()` bindet stattdessen den
+      // Haushalts-Tagesschluessel als Parameter.
+      today: todayKey(db.get()),
+      ...folderParams,
+    };
+    const expiringClause = expiringWithinDays !== null
+      ? "AND d.expires_at IS NOT NULL AND date(d.expires_at) <= date(@today, '+' || @expiringWithinDays || ' days')"
+      : '';
     const rows = db.get().prepare(`
       ${documentSelect()}
       WHERE ${canSeeSql('d')}
         AND d.status = @status
         AND (@category IS NULL OR d.category = @category)
         ${folderClause}
+        ${expiringClause}
       GROUP BY d.id
       ORDER BY d.updated_at DESC
     `).all(params);
@@ -1031,7 +1218,9 @@ router.post('/', async (req, res) => {
     const vDescription = str(req.body.description, 'Description', { max: MAX_TEXT, required: false });
     const vOriginalName = str(req.body.original_name, 'Original filename', { max: MAX_TITLE });
     const vFolderName = str(req.body.folder_name, 'Folder name', { max: MAX_TITLE, required: false });
-    const errors = collectErrors([vName, vDescription, vOriginalName, vFolderName]);
+    const vExpiresAtField = vExpiresAt(req.body.expires_at);
+    const vExpiryReminderDaysField = vExpiryReminderDays(req.body.expiry_reminder_days);
+    const errors = collectErrors([vName, vDescription, vOriginalName, vFolderName, vExpiresAtField, vExpiryReminderDaysField]);
     if (errors.length) return res.status(400).json({ error: errors.join(' '), code: 400 });
 
     // `folder_key` benennt den Systemordner eines Moduls, `folder_name` nur
@@ -1066,12 +1255,14 @@ router.post('/', async (req, res) => {
     const database = db.get();
     const row = database.transaction(() => {
       const folderId = vFolderId.value ?? ensureFolder(folderKey, vFolderName.value, userId(req));
+      const expiresAt = vExpiresAtField.value ?? null;
+      const expiryReminderDays = vExpiryReminderDaysField.value ?? null;
       const result = database.prepare(`
         INSERT INTO family_documents (
           name, description, category, visibility, folder_id, original_name,
           mime_type, file_size, content_data, storage_provider, storage_backend,
-          storage_key, created_by
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          storage_key, created_by, expires_at, expiry_reminder_days
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         vName.value,
         vDescription.value,
@@ -1085,9 +1276,17 @@ router.post('/', async (req, res) => {
         stagedUpload.storage_provider,
         stagedUpload.storage_backend,
         stagedUpload.storage_key,
-        userId(req)
+        userId(req),
+        expiresAt,
+        expiryReminderDays
       );
       if (visibility === 'restricted') replaceAccess(result.lastInsertRowid, allowedIds);
+      syncDocumentExpiryReminder({
+        id: result.lastInsertRowid,
+        expires_at: expiresAt,
+        expiry_reminder_days: expiryReminderDays,
+        created_by: userId(req),
+      });
       return database.prepare(`
         ${documentSelect()}
         WHERE d.id = ?
@@ -1127,7 +1326,9 @@ router.put('/:id', (req, res) => {
 
     const vName = req.body.name !== undefined ? str(req.body.name, 'Name', { max: MAX_TITLE }) : { value: null };
     const vDescription = req.body.description !== undefined ? str(req.body.description, 'Description', { max: MAX_TEXT, required: false }) : { value: null };
-    const errors = collectErrors([vName, vDescription]);
+    const vExpiresAtField = vExpiresAt(req.body.expires_at);
+    const vExpiryReminderDaysField = vExpiryReminderDays(req.body.expiry_reminder_days);
+    const errors = collectErrors([vName, vDescription, vExpiresAtField, vExpiryReminderDaysField]);
     if (errors.length) return res.status(400).json({ error: errors.join(' '), code: 400 });
 
     const category = req.body.category !== undefined && CATEGORIES.includes(req.body.category) ? req.body.category : null;
@@ -1149,6 +1350,8 @@ router.put('/:id', (req, res) => {
       .all(id).map((row) => row.user_id);
     const strangers = newNonMembers(allowedIds, { stored: storedAccess });
     if (strangers.length) return res.status(400).json({ error: nonMemberMessage(strangers), code: 400 });
+    const expiresAt = req.body.expires_at !== undefined ? vExpiresAtField.value : existing.expires_at;
+    const expiryReminderDays = req.body.expiry_reminder_days !== undefined ? vExpiryReminderDaysField.value : existing.expiry_reminder_days;
     db.get().prepare(`
       UPDATE family_documents
       SET name = COALESCE(?, name),
@@ -1156,7 +1359,9 @@ router.put('/:id', (req, res) => {
           category = COALESCE(?, category),
           visibility = COALESCE(?, visibility),
           status = COALESCE(?, status),
-          folder_id = ?
+          folder_id = ?,
+          expires_at = ?,
+          expiry_reminder_days = ?
       WHERE id = ?
     `).run(
       req.body.name !== undefined ? vName.value : null,
@@ -1165,9 +1370,20 @@ router.put('/:id', (req, res) => {
       visibility,
       status,
       req.body.folder_id !== undefined ? vFolderId.value : existing.folder_id,
+      expiresAt,
+      expiryReminderDays,
       id
     );
     replaceAccess(id, allowedIds);
+
+    // Ein archiviertes Dokument darf nicht mehr nagen (ein archiviertes
+    // Passfoto etwa) - dieselbe Teardown-Regel wie DELETE/Ordner-Loeschen.
+    const finalStatus = status ?? existing.status;
+    if (finalStatus === 'archived') {
+      removeDocumentExpiryReminder(id);
+    } else {
+      syncDocumentExpiryReminder({ id, expires_at: expiresAt, expiry_reminder_days: expiryReminderDays, created_by: existing.created_by });
+    }
 
     const row = db.get().prepare(`${documentSelect()} WHERE d.id = ? GROUP BY d.id`).get(id);
     res.json({ data: normalizeDocument(row) });
@@ -1186,6 +1402,16 @@ router.patch('/:id/archive', (req, res) => {
     if (documentDeleteIsActive(id)) return documentDeletionInProgress(res);
     const status = req.body.archived === false ? 'active' : 'archived';
     db.get().prepare('UPDATE family_documents SET status = ? WHERE id = ?').run(status, id);
+    // Ein archiviertes Dokument darf nicht mehr nagen (ein archiviertes
+    // Passfoto etwa). Reaktivieren stellt die Erinnerung wieder her, falls die
+    // Ablauf-Angaben noch stehen.
+    if (status === 'archived') {
+      removeDocumentExpiryReminder(id);
+    } else {
+      syncDocumentExpiryReminder({
+        id, expires_at: existing.expires_at, expiry_reminder_days: existing.expiry_reminder_days, created_by: existing.created_by,
+      });
+    }
     res.json({ data: { id, status } });
   } catch (err) {
     log.error('PATCH /:id/archive error:', err);
@@ -1204,7 +1430,7 @@ router.get('/:id/thumbnail', async (req, res) => {
     const account = loadDmsAccount(doc.dms_account_id);
     if (!account) return res.status(404).json({ error: 'Linked DMS account is gone.', code: 404 });
     const thumb = await resolveDmsThumbnail(account, doc.storage_key);
-    sendThumbnail(res, thumb, 300);
+    sendThumbnail(res, thumb);
   } catch (err) {
     if (err instanceof ThumbnailUnavailableError) {
       return res.status(415).json({ error: 'Thumbnail not available for this document.', code: 415 });
@@ -1214,7 +1440,10 @@ router.get('/:id/thumbnail', async (req, res) => {
   }
 });
 
-router.get('/:id/preview', async (req, res) => {
+// Preview und Download lesen ein Drive-Dokument ueber den Google-Client, dessen
+// `tokens`-Listener ein erneuertes Token nach dem Warten speichert: waehrend
+// eines Restores 503, sonst festgehalten wie eine schreibende Anfrage (#1551).
+router.get('/:id/preview', refuseWhileRestoring, async (req, res) => {
   try {
     const id = Number(req.params.id);
     const doc = getVisibleDocument(id, req, true);
@@ -1230,9 +1459,10 @@ router.get('/:id/preview', async (req, res) => {
     res.setHeader('Content-Type', rawMime);
     res.setHeader('Content-Length', String(content.buffer.length));
     res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
-    res.setHeader('Cache-Control', doc.storage_backend === 'dms'
-      ? 'private, max-age=60'
-      : 'private, max-age=300');
+    // no-store statt private, max-age: der Viewer zeigt Arztbriefe und Ausweise,
+    // und der Browser-Cache ueberlebt das Abmelden. Ein Dokument soll nach dem
+    // Schliessen nicht als Kopie auf dem Geraet liegen bleiben.
+    res.setHeader('Cache-Control', 'no-store');
     // Defense-in-Depth: MIME-Sniffing unterbinden und jegliche Skriptausführung im
     // Antwortdokument verbieten, falls ein Inhalt je fehlklassifiziert würde.
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -1256,7 +1486,7 @@ router.get('/:id/preview', async (req, res) => {
   }
 });
 
-router.get('/:id/download', async (req, res) => {
+router.get('/:id/download', refuseWhileRestoring, async (req, res) => {
   try {
     const id = Number(req.params.id);
     const doc = getVisibleDocument(id, req, true);
@@ -1291,6 +1521,7 @@ router.delete('/:id', async (req, res) => {
     lockedId = id;
     await deleteDocumentContent(existing);
     db.get().prepare('DELETE FROM family_documents WHERE id = ?').run(id);
+    removeDocumentExpiryReminder(id);
     res.status(204).end();
   } catch (err) {
     log.error('DELETE /:id error:', err);

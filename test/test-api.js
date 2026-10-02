@@ -330,3 +330,52 @@ test('auth.updateUser holt danach /auth/me, damit othersCanRead in derselben Sit
   assert.ok(patch >= 0, `PATCH fehlt: ${calls.join(', ')}`);
   assert.ok(me > patch, `nach dem PATCH fehlt GET /auth/me: ${calls.join(', ')}`);
 });
+
+// ─── #1431: 503 waehrend eines Restores ─────────────────────────────────────
+
+test('503 mit reason restore_in_progress: uebersetzte Meldung statt englischem Servertext', async () => {
+  setup();
+  _mockFetch = () => mockResponse(503, {
+    error: 'A backup is being restored right now. This change was not saved - try again in a minute.',
+    code: 503,
+    reason: 'restore_in_progress',
+  });
+  await assert.rejects(
+    () => api.post('/tasks', { title: 'x' }),
+    (err) => {
+      assert.equal(err.status, 503);
+      assert.equal(err.message, 'common.errorRestoreInProgress');
+      assert.equal(err.data.reason, 'restore_in_progress');
+      return true;
+    },
+  );
+});
+
+// ─── Setup: die Sprache der Setup-Seite reist mit ───────────────────────────
+
+test('auth.setup: schickt language mit, und laesst das Feld ohne Angabe weg', async () => {
+  setup();
+  const bodies = [];
+  _mockFetch = (url, opts) => {
+    bodies.push({ url: String(url), body: JSON.parse(opts.body) });
+    return mockResponse(201, { user: { id: 1 } });
+  };
+
+  await auth.setup('admin', 'Admin', 'password123', 'de');
+  await auth.setup('admin', 'Admin', 'password123');
+
+  assert.match(bodies[0].url, /\/auth\/setup$/);
+  assert.equal(bodies[0].body.language, 'de');
+  // Ohne Angabe darf der Schluessel gar nicht erst im Body stehen: ein
+  // Server vor der Erweiterung sieht dann exakt den alten Body.
+  assert.equal(Object.hasOwn(bodies[1].body, 'language'), false);
+  assert.deepEqual(Object.keys(bodies[1].body).sort(), ['display_name', 'password', 'username']);
+});
+
+test('OpenAPI beschreibt language und timezone als optionale Setup-Felder', () => {
+  const schema = openApi.components.schemas.SetupRequest;
+  assert.equal(schema.properties.language?.type, 'string');
+  assert.equal(schema.properties.timezone?.type, 'string');
+  assert.deepEqual(schema.required, ['username', 'display_name', 'password']);
+  assert.ok(openApi.paths['/api/v1/auth/setup'].post.responses[400]);
+});

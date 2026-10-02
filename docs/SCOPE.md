@@ -186,6 +186,36 @@ deletions cannot be learned at all. Tracked as #1002.
   that looks like an answer is worse than no table. The price on a shopping item is the
   part that fits, and that part is wanted.
 
+  **What this does not decline, since #1293:** nutrition itself. A figure a household types
+  about its own recipe - this pot serves four, one portion is roughly this much - is a
+  statement about their own thing and not a fact about a product, and so are a daily target
+  per person and a meal somebody logs. Those are agreed and ticketed (#1326 to #1329), not
+  yet built, and they carry a fixed set of eight values: the seven the EU requires on a
+  package, plus fibre. What stays declined is the step
+  between them, deriving a total from what the ingredients *are*, which is the catalogue
+  again and nothing else. The line and its reasons are entry 8 in
+  [DECISIONS.md](DECISIONS.md).
+- **One event in several CalDAV calendars** (#1297) is declined for now, and this one is *not this
+  way* rather than *not at all*. An event has one CalDAV target (`target_caldav_account_id` and
+  `target_caldav_calendar_url` on `calendar_events`); for an event with several people on it the
+  dialog says since #1346 that the assignment picks no calendar, and which one is used instead.
+  Several targets do exist for Outlook (`outlook_event_links`, one row per event and account), and
+  only because nothing ever comes back from Outlook. CalDAV reads back, and the return path
+  recognises an event by its UID alone, without the calendar it came from
+  (`server/services/caldav-sync.js`, the lookup on `external_calendar_id`, the column that holds
+  the UID): three copies would fall onto one row, and whichever calendar was read last would win.
+  Several targets would be a rebuild at the core of the sync, and every one of its conflict cases -
+  moving an event, deleting it, editing it in two calendars at once - multiplies with the number of
+  copies.
+
+  **The route that works today** is the usual one in CalDAV: a shared family calendar that everybody
+  subscribes to, set as the target for such events. That also matches how Yuvomi reads an event
+  with several people on it, as a family event. Two routes stay out even if this comes back:
+  matching copies by date, time and title, which stores a guessed identity (entry 7 in
+  [DECISIONS.md](DECISIONS.md)), and a fingerprint in the notes field, because `description` is a
+  mirrored field and would travel as visible text with every edit. *Opens with:* a return path that
+  knows which calendar an event came from.
+
 ---
 
 ## 3. Dependencies
@@ -262,7 +292,7 @@ argument.
   ([CONTRIBUTING.md](../CONTRIBUTING.md#what-a-human-guarantees)); two automated reviewers
   comment on every pull request and merge nothing. A required second approval with one person
   holding the key would be theatre. *Opens with:* the same second maintainer.
-- **No translation platform.** The 24 locales live in the repository as JSON, and a guard
+- **No translation platform.** The 26 locales live in the repository as JSON, and a guard
   (`test:i18n-translated`) refuses a locale that regresses toward untranslated English. A hosted
   platform would not run that guard, so a pull request from it could turn a translated file back
   into a copy of the reference without anyone seeing it. Translations arrive as pull requests

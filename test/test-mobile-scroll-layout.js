@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import test from 'node:test';
 
+import { eachRule } from './css-rules.js';
 import {
   rememberScrollPosition,
   scrollPositionFor,
@@ -19,10 +20,15 @@ const layoutCss = readFileSync(new URL('../public/styles/layout.css', import.met
 const glassCss = readFileSync(new URL('../public/styles/glass.css', import.meta.url), 'utf8');
 const tokensCss = readFileSync(new URL('../public/styles/tokens.css', import.meta.url), 'utf8');
 
+/* Der Rumpf der ersten Regel, deren Selektorliste GENAU diesen Selektor
+ * fuehrt. Frueher ein Regex auf `<selektor> {` - das fand auch das Ende eines
+ * laengeren Selektors: seit `html.page-swapping .nav-bottom` (Re-Critique
+ * 2026-09-28, G1) las der Safe-Area-Guard den Uebergangsnamen statt der Bar. */
 function cssRuleBody(css, selector) {
-  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const match = css.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`, 'm'));
-  return match?.[1] ?? '';
+  for (const rule of eachRule(css)) {
+    if (rule.selector.split(',').some((part) => part.trim() === selector)) return rule.body;
+  }
+  return '';
 }
 
 test('mobile scrolling keeps navigation and fixed layers stable', () => {
@@ -72,7 +78,12 @@ test('mobile bottom navigation reserves safe-area space without scroll-time root
     /padding(-bottom)?:[^;]*var\(--safe-area-inset-bottom\)/,
     'die Bar muss die Safe-Area selbst reservieren',
   );
-  assert.match(tokensCss, /--nav-bottom-height:\s*calc\(var\(--nav-height-mobile\)[^;]*var\(--safe-area-inset-bottom\)\)/);
+  // Die Zone rechnet mit der gemessenen Kapselhoehe und der Token-Hoehe als
+  // Rueckfall (Review zu #1475, test:mobile-chrome); die Zusage hier ist nur,
+  // dass die Safe-Area in der Zone steckt.
+  const zone = tokensCss.match(/--nav-bottom-height:\s*([^;]+);/)?.[1] ?? '';
+  assert.match(zone, /var\(--nav-height-mobile\)/);
+  assert.match(zone, /var\(--safe-area-inset-bottom\)\)$/);
   assert.equal(rootRule.includes('nav-bottom--hidden'), false);
 });
 
@@ -117,10 +128,18 @@ test('cold dashboard load does not transform the scroll surface', () => {
     /const shouldAnimate = Boolean\(previousPath\);/,
     'the router must distinguish a cold load from an in-app navigation',
   );
+  // Seit 2026-09-26 blendet der Wechsel per View Transition; nur der Rueckfall
+  // ohne API setzt noch eine Klasse, und auch die nur nach einer bestehenden
+  // Route. Eine Blende ohne Versatz transformiert ohnehin nichts (test-motion.js).
   assert.match(
     routerJs,
-    /if \(shouldAnimate\) \{\s*pageWrapper\.classList\.add\(inClass\);/,
-    'the slide class must only be applied after an existing route',
+    /animate: shouldAnimate,/,
+    'the view transition must only run after an existing route',
+  );
+  assert.match(
+    routerJs,
+    /if \(shouldAnimate && !transition\) \{\s*pageWrapper\.classList\.add\('page-transition--in'\);/,
+    'the fallback fade must only be applied after an existing route',
   );
 });
 
@@ -207,13 +226,13 @@ test('the router resets the surviving scrollport on every navigation', () => {
  * Grenze (siehe utils/scroll-restore.js und SPEC, Responsive Composition), keine
  * versehentliche.
  *
- * Dieser Guard hält die Liste ehrlich: kommt ein neuntes Modul dazu oder
+ * Dieser Guard hält die Liste ehrlich: kommt ein zehntes Modul dazu oder
  * verliert eines seinen inneren Scroller, verschiebt sich die Reichweite der
  * Zusage - und Kommentar wie Spezifikation müssen mitziehen, statt still falsch
  * zu werden. Geprüft wird die REGEL über alle Modul-Stylesheets, nicht eine
  * Handvoll bekannter Dateien.
  */
-test('the modules with an inner scroll container are the documented eight', () => {
+test('the modules with an inner scroll container are the documented nine', () => {
   const styleDir = new URL('../public/styles/', import.meta.url);
   const found = [];
 
@@ -229,7 +248,10 @@ test('the modules with an inner scroll container are the documented eight', () =
   assert.deepEqual(
     [...new Set(found)].sort(),
     [
-      '.budget-page', '.calendar-page', '.contacts-page', '.meals-page',
+      // .health-page seit R10: Liste + Detail wie Kontakte und Rezepte - ab der
+      // Split-Schwelle scrollen Liste und Bereich je fuer sich, darunter EIN
+      // Port (.health-browse, ein .page-scrollport mit Nachlauf).
+      '.budget-page', '.calendar-page', '.contacts-page', '.health-page', '.meals-page',
       '.notes-page', '.pantry-page', '.recipes-page', '.shopping-page',
     ],
     'Die Module mit innerem Scroller haben sich geändert. Sie sind genau die, in '
@@ -256,4 +278,49 @@ test('closed dashboard speed dial cannot capture first-scroll gestures', () => {
   assert.match(dashboardCss, /\.fab-actions--visible\s*\{[^}]*pointer-events:\s*auto/s);
   assert.doesNotMatch(cssRuleBody(layoutCss, '.page-fab-group'), /pointer-events/,
     'die Gruppe braucht keinen Pointer-Freibrief mehr - ihr Kasten ist der FAB');
+});
+
+/* EIN PAN-VERBOT DARF DEN ZWEI-FINGER-WEG NICHT MITNEHMEN (#1276).
+ *
+ * `touch-action: pan-y` erlaubt den senkrechten Bildlauf mit EINEM Finger -
+ * und verbietet stillschweigend `pinch-zoom`. Chromium behandelt jeden
+ * Bildlauf, der mit zwei oder mehr Fingern beginnt, als Zoom-Geste
+ * (`TouchActionFilter::ShouldSuppressScrolling`, crbug.com/632525) und
+ * verwirft ihn ganz, wo pinch-zoom fehlt. Seit #294 stand genau das an
+ * `.app-content`. Gemeldet wurde es von einem Chromebook mit Touchscreen:
+ * Hauptinhalt starr, die Seitenleiste daneben (ohne touch-action) nicht,
+ * Touchpad und Maus auch nicht. Nachgestellt in Chromium mit Touch-Eingabe
+ * bei 1366px: zwei Finger auf dem Hauptinhalt 0px Bildlauf, auf der
+ * Seitenleiste 150px, ein Finger ueberall rund 200px. Am Telefon zoomte
+ * ausserdem das Aufziehen im Hauptinhalt nicht, obwohl der Viewport
+ * `maximum-scale=5` zusagt (WCAG 1.4.4).
+ *
+ * Die Regel gilt fuer jede Fläche, nicht nur fuer den Scrollport: die
+ * Dashboard-Zeilen tragen ihr eigenes `pan-y`, und eine dort begonnene Geste
+ * rechnet mit IHREM Wert. `none` bleibt erlaubt - ein Sortiergriff besitzt
+ * die Geste ganz und braucht keinen Zoom.
+ */
+test('a touch-action that restricts panning keeps pinch-zoom', () => {
+  const styleDir = new URL('../public/styles/', import.meta.url);
+  const offenders = [];
+
+  for (const file of readdirSync(styleDir).filter((f) => f.endsWith('.css'))) {
+    const css = readFileSync(new URL(file, styleDir), 'utf8');
+    for (const rule of eachRule(css)) {
+      for (const [, value] of rule.body.matchAll(/(?:^|[;{\s])touch-action\s*:\s*([^;]+)/g)) {
+        const tokens = value.trim().toLowerCase().split(/\s+/);
+        const restrictsPan = tokens.some((t) => /^pan-(?:x|y|left|right|up|down)$/.test(t));
+        if (restrictsPan && !tokens.includes('pinch-zoom')) {
+          offenders.push(`${file}: ${rule.selector} { touch-action: ${value.trim()} }`);
+        }
+      }
+    }
+  }
+
+  assert.deepEqual(
+    offenders,
+    [],
+    'pan-x/pan-y ohne pinch-zoom verwirft jeden Zwei-Finger-Bildlauf und das '
+    + 'Aufziehen zum Zoomen (#1276) - `pinch-zoom` ergaenzen, z.B. `pan-y pinch-zoom`',
+  );
 });

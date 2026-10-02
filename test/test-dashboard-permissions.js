@@ -143,6 +143,12 @@ db.prepare(`
   VALUES (?, '08:00', NULL, 1)
 `).run(medId);
 
+// Vorrat „läuft bald ab": eine Charge, die heute abläuft - im Horizont, egal
+// in welcher Zone der Testlauf steht (heute ist immer ≤ heute + 7).
+db.prepare(`
+  INSERT INTO pantry_items (name, quantity, unit, expires_on, created_by) VALUES ('Sahne', 1, 'pcs', ?, ?)
+`).run(todayLocal, PARENT);
+
 const helperUser = seedUser('maria', 'member', 'other');
 const workerId = db.prepare('INSERT INTO housekeeping_workers (user_id, daily_rate) VALUES (?, 40)')
   .run(helperUser).lastInsertRowid;
@@ -150,6 +156,22 @@ db.prepare(`
   INSERT INTO housekeeping_work_sessions (check_in, check_out, daily_rate, extras, worker_id, created_by)
   VALUES (?, NULL, 40, 0, ?, ?)
 `).run(`${todayLocal}T09:00:00`, workerId, PARENT);
+
+// Abfuhr und Schichtplan fuehrt die Antwort erst seit dem Heute-Blatt mit
+// (Befund P1 der Dashboard-Critique vom 23.09.2026): die Tonne, die heute
+// rausmuss, und die eigene Schicht. Beide gehoeren einem Modul und muessen mit
+// ihm verschwinden.
+const wasteTypeId = db.prepare(`
+  INSERT INTO waste_types (name, icon, color, created_by) VALUES ('Restmuell', 'trash-2', '#6B7280', ?)
+`).run(PARENT).lastInsertRowid;
+db.prepare('INSERT INTO waste_one_off_pickups (type_id, date, created_by) VALUES (?, ?, ?)')
+  .run(wasteTypeId, todayLocal, PARENT);
+const shiftTypeId = db.prepare(`
+  INSERT INTO schedule_shift_types (name, short_code, start_time, end_time, color, created_by)
+  VALUES ('Fruehdienst', 'F', '06:00', '14:00', '#00668F', ?)
+`).run(PARENT).lastInsertRowid;
+db.prepare('INSERT INTO schedule_extra_shifts (user_id, date_key, shift_type_id, created_by) VALUES (?, ?, ?, ?)')
+  .run(KID, todayLocal, shiftTypeId, PARENT);
 
 // --------------------------------------------------------------------------
 // Server: die Auth-Schicht wird nachgestellt wie in server/auth.js
@@ -232,6 +254,26 @@ test('Vorbedingung: ohne Einschränkung liefert der Endpoint dem Mitglied jeden 
   assert.equal(body.health.dosesTotal, 1);
   assert.equal(body.housekeeping.present, true);
   assert.equal(body.countdownTotal, 2, 'ein Termin- und ein Aufgaben-Countdown (#647)');
+  assert.equal(body.wastePickups[0]?.type_name, 'Restmuell', 'die Abholung von heute steht in der Antwort');
+  assert.equal(body.myShiftsToday[0]?.shift_type?.name, 'Fruehdienst', 'die eigene Schicht von heute');
+});
+
+test('Heute-Blatt: Abfuhr nur fuer heute und morgen, die Schicht nur die eigene', async () => {
+  clearModuleDenials(KID);
+  const later = db.prepare('INSERT INTO waste_one_off_pickups (type_id, date, created_by) VALUES (?, ?, ?)')
+    .run(wasteTypeId, inThreeDays, PARENT).lastInsertRowid;
+  try {
+    const kid = await dashboardAs(KID);
+    assert.deepEqual(kid.wastePickups.map((p) => p.date_key), [todayLocal],
+      'eine Abholung in drei Tagen gehoert nicht ins Heute-Blatt');
+    assert.equal(kid.wastePickups[0].type_color, '#6B7280');
+
+    const parent = await dashboardAs(PARENT);
+    assert.deepEqual(parent.myShiftsToday, [], 'die Schicht des Kindes ist nicht die Schicht der Eltern');
+    assert.equal(parent.wastePickups.length, 1, 'die Abfuhr ist haushaltsweit');
+  } finally {
+    db.prepare('DELETE FROM waste_one_off_pickups WHERE id = ?').run(later);
+  }
 });
 
 // --------------------------------------------------------------------------
@@ -270,6 +312,7 @@ test('Kalender auf `none`: kein Termintitel und kein Geburtstag mehr in der Antw
   const wire = JSON.stringify(body);
 
   assert.deepEqual(body.upcomingEvents, [], 'gesperrter Kalender liefert keine Termine');
+  assert.deepEqual(body.familyEvents, [], 'auch die Termine der Familienkarte (#1449) nicht');
   assert.deepEqual(body.birthdays, [], 'Geburtstage hängen am Kalender-Modul (PERMISSION_MODULES navIds)');
   assert.equal(body.birthdayCount, 0, 'auch die Zahl daneben, sonst verrät sie den Bestand');
   assert.ok(!wire.includes('Elterngespräch Schule'), 'der Titel darf nirgendwo in der Antwort stehen');
@@ -298,15 +341,18 @@ test('Aufgaben auf `none`: weder Liste noch Zählstände noch die Pro-Mitglied-L
 // Je Modul eine Zahl, die nur dann größer null ist, wenn sein Teil der Antwort
 // etwas trägt. Geteilt von der Rollen- und der Token-Achse weiter unten.
 const MODULE_PROBES = {
-  calendar: (b) => b.upcomingEvents.length + b.birthdays.length + b.birthdayCount,
+  calendar: (b) => b.upcomingEvents.length + b.familyEvents.length + b.birthdays.length + b.birthdayCount + b.birthdayTotal,
   tasks: (b) => b.urgentTasks.length + b.openTaskCount + b.overdueTaskCount + b.tasksDoneToday,
   meals: (b) => b.todayMeals.length,
-  notes: (b) => b.pinnedNotes.length + b.pinnedNotesCount,
+  notes: (b) => b.pinnedNotes.length + b.pinnedNotesCount + b.notesTotal,
   shopping: (b) => b.shoppingLists.length + b.shoppingOpenCount + b.shoppingOpenLists,
   budget: (b) => b.budget.income + b.budget.expenses + b.budget.entryCount,
   rewards: (b) => b.rewards.standings.length + b.rewards.participantCount,
   health: (b) => (b.health.hasMeds ? 1 : 0) + b.health.dosesTotal + b.health.lowStockCount,
   housekeeping: (b) => (b.housekeeping.configured ? 1 : 0) + (b.housekeeping.present ? 1 : 0),
+  waste: (b) => b.wastePickups.length,
+  schedule: (b) => b.myShiftsToday.length,
+  pantry: (b) => b.pantryExpiring.items.length + b.pantryExpiring.total + b.pantryExpiring.todayItems.length,
 };
 
 test('Jedes gesperrte Modul verschwindet, und keins nimmt ein anderes mit', async () => {
@@ -406,6 +452,14 @@ const NONEMPTY_ERLAUBT = new Set([
   'users',
   // Der beschriftete Zeitraum, keine Budgetzahl.
   'budget.month',
+  // Zwei feste Darstellungsvorgaben (`clock_mode: 'auto'`, `zone_mode: 'timer'`),
+  // wörtlich aus `emptyFastingWidget()` und für jeden Betrachter dieselben - kein
+  // gelesener Wert, keine Gesundheitsangabe. Sie stehen hier und nicht auf `null`,
+  // weil die leere FORM Absicht ist: `fasting: null` hat die Oberfläche brechen
+  // lassen, deshalb liefert die Sperre die Form mit leeren Feldern (#1180).
+  // `fasting.active` und `fasting.lastCompleted` sind bewusst NICHT erlaubt - dort
+  // stünden echte Daten, und dort muss der Guard weiter anschlagen.
+  'fasting.settings',
 ]);
 
 /** Trägt dieser Wert etwas? Zahlen, Strings, Listen, verschachtelte Objekte. */
@@ -533,4 +587,35 @@ test('`write` schließt `read` ein, und ein Scope erweitert keine Rollensperre',
   assert.deepEqual(gesperrt.upcomingEvents, [], 'die Rolle sperrt den Kalender, der Scope öffnet ihn nicht');
   assert.ok(gesperrt.urgentTasks.length > 0, 'was beide Achsen erlauben, bleibt');
   clearModuleDenials(KID);
+});
+
+test('Termin-Anhang auf dem Dashboard folgt dem Dokumentenrecht (#1358)', async () => {
+  const docId = db.prepare(`
+    INSERT INTO family_documents (name, category, visibility, original_name, mime_type, file_size, content_data, created_by)
+    VALUES ('Einladung', 'other', 'family', 'einladung.pdf', 'application/pdf', 3, 'x', ?)
+  `).run(PARENT).lastInsertRowid;
+  db.prepare("UPDATE calendar_events SET attachment_document_id = ?, attachment_name = 'einladung.pdf' WHERE id = ?")
+    .run(docId, eventId);
+  const attachmentOf = async (userId) => {
+    const body = await dashboardAs(userId);
+    const event = body.upcomingEvents.find((e) => e.id === eventId);
+    assert.ok(event, 'der Termin steht in den anstehenden');
+    return { id: event.attachment_document_id, name: event.attachment_name, url: event.attachment_preview_url };
+  };
+  const shown = { id: docId, name: 'einladung.pdf', url: `/api/v1/documents/${docId}/preview` };
+  const hidden = { id: null, name: null, url: null };
+  try {
+    assert.deepEqual(await attachmentOf(PARENT), shown, 'mit Dokumentenrecht');
+    denyModules(KID, ['documents']);
+    assert.deepEqual(await attachmentOf(KID), hidden, 'documents: none sieht den Anhang nicht');
+    clearModuleDenials(KID);
+    tokenScopes = ['dashboard:read', 'calendar:read'];
+    assert.deepEqual(await attachmentOf(PARENT), hidden, 'ein Token ohne documents:read ebenso');
+    tokenScopes = ['dashboard:read', 'calendar:read', 'documents:read'];
+    assert.deepEqual(await attachmentOf(PARENT), shown, 'mit documents:read wieder da');
+  } finally {
+    tokenScopes = null;
+    clearModuleDenials(KID);
+    db.prepare('UPDATE calendar_events SET attachment_document_id = NULL, attachment_name = NULL WHERE id = ?').run(eventId);
+  }
 });

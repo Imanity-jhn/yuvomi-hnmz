@@ -35,6 +35,7 @@ import {
 import {
   expandRecurringEvents, MAX_EXPANSION_ITERATIONS,
 } from '../server/services/calendar-events.js';
+import { utcToWall } from '../server/utils/timezone.js';
 import {
   BODY_FREE_EVENT_COLUMNS, expandAndResolveEventRows, eventProjectionSql,
 } from '../server/services/calendar-event-reader.js';
@@ -170,7 +171,25 @@ function createDatabase() {
            (2, 'member', 'Member', 'x', 'member'),
            (3, 'other', 'Other', 'x', 'member')
   `).run();
+  setHouseholdTimeZone(database, 'Europe/Berlin');
   return database;
+}
+
+/**
+ * Die Zone des Haushalts gehoert in die Fixture, nicht an die Maschine.
+ *
+ * Seit #1291 wird `reminders.remind_at` hier als UTC-Zeitpunkt geschrieben, und
+ * `householdTimeZone()` faellt ohne gesetzte Zone auf `TZ` oder die Systemzone
+ * zurueck - dieselben erwarteten Zeilen waeren dann in Berlin gruen und in
+ * Chicago rot. Die Vorgabe ist bewusst Europe/Berlin und NICHT UTC: ein Offset
+ * von 0 versteckt genau den Fehler, um den es geht.
+ */
+function setHouseholdTimeZone(database, zone) {
+  database.exec('CREATE TABLE IF NOT EXISTS sync_config (key TEXT PRIMARY KEY, value TEXT)');
+  database.prepare(`
+    INSERT INTO sync_config (key, value) VALUES ('household_timezone', ?)
+    ON CONFLICT (key) DO UPDATE SET value = excluded.value
+  `).run(zone);
 }
 
 function insertEvent(database, values = {}) {
@@ -1328,10 +1347,10 @@ test('occurrence ownership markers control assignments reminders and attachments
     SELECT remind_at, created_by FROM reminders
     WHERE entity_type = 'event' AND entity_id = ?
   `).all(childId).map((row) => ({ ...row })), [{
-    remind_at: '2026-10-02T08:00:00',
+    remind_at: '2026-10-02T06:00:00',
     created_by: 1,
   }, {
-    remind_at: '2026-10-02T08:00:00',
+    remind_at: '2026-10-02T06:00:00',
     created_by: 2,
   }]);
   assert.equal(result.event.assignment_owner_id, childId);
@@ -1351,9 +1370,13 @@ test('restoring owned fields to series defaults removes child reminder rows', ()
     .run(seriesId);
   database.prepare('INSERT INTO event_assignments (event_id, user_id) VALUES (?, 1)')
     .run(seriesId);
+  // Ein Tag Vorlauf auf 2026-10-01 09:00 Europe/Berlin, als UTC-Zeitpunkt
+  // geschrieben: 2026-09-30 09:00 Ortszeit = 07:00 UTC (#1291). Der Vorlauf der
+  // Serie muss dem des Vorkommens entsprechen, sonst faellt das Vorkommen nicht
+  // auf die Serie zurueck.
   database.prepare(`
     INSERT INTO reminders (entity_type, entity_id, remind_at, created_by)
-    VALUES ('event', ?, '2026-09-30T09:00:00', 1)
+    VALUES ('event', ?, '2026-09-30T07:00:00', 1)
   `).run(seriesId);
   const options = {
     seriesId,
@@ -1410,9 +1433,623 @@ test('occurrence reminder ownership keeps inherited assignment projection and fa
     SELECT created_by, assigned_from, remind_at FROM reminders
     WHERE entity_type = 'event' AND entity_id = ? ORDER BY created_by
   `).all(childId).map((row) => ({ ...row })), [
-    { created_by: 1, assigned_from: null, remind_at: '2026-10-02T08:00:00' },
-    { created_by: 2, assigned_from: 1, remind_at: '2026-10-02T08:00:00' },
+    { created_by: 1, assigned_from: null, remind_at: '2026-10-02T06:00:00' },
+    { created_by: 2, assigned_from: 1, remind_at: '2026-10-02T06:00:00' },
   ]);
+});
+
+/**
+ * #1291: Der Anker einer Vorkommens-Erinnerung ist ein ZEITPUNKT.
+ *
+ * `start_datetime` einer lokalen Serie ist zonenlose Wanduhrzeit. Wer sie als
+ * UTC liest und den Vorlauf davon abzieht, legt die Erinnerung um den
+ * Zonenoffset daneben - oestlich von UTC NACH dem Beginn, westlich davon zu
+ * frueh. Deshalb misst dieser Test in drei Zonenlagen und in KEINER davon in
+ * UTC: bei Offset 0 stimmt auch die kaputte Rechnung.
+ *
+ * Gemessen wird der echte Schreibweg (`upsertOccurrenceOverride`) und danach
+ * die Zustellung: die Auswahl der faelligen Zeilen ist dieselbe
+ * String-Ordnung, mit der `processDueNotifications()` in
+ * server/services/notifications.js `remind_at <= <jetzt als ISO>` prueft.
+ */
+test('an occurrence reminder anchors on the household instant, east and west of UTC', () => {
+  // ALLE DREI LAGEN IN EINEM VERGLEICH. Je Zone eine eigene Zusicherung liesse
+  // den Lauf schon an Berlin abbrechen, und die Richtung des Versatzes westlich
+  // von UTC - der zweite halbe Befund - waere nie gemessen worden.
+  const observed = [];
+  const fixtures = [
+    {
+      label: 'Europe/Berlin, Sommerzeit (UTC+2)',
+      zone: 'Europe/Berlin',
+      seriesStart: '2026-10-01T09:00:00',
+      recurrenceId: '2026-10-02',
+      // 09:00 Ortszeit = 07:00 UTC, eine Stunde Vorlauf = 06:00 UTC.
+      expected: '2026-10-02T06:00:00',
+      dueAt: '2026-10-02T06:00:00.000Z',
+      notYetAt: '2026-10-02T05:59:00.000Z',
+    },
+    {
+      label: 'Europe/Berlin, Winterzeit (UTC+1)',
+      zone: 'Europe/Berlin',
+      // Nach dem Zeitumstellungswochenende: derselbe Ort, ein anderer Offset.
+      // Ein fest verdrahteter Offset statt einer echten Zonenrechnung waere
+      // hier rot.
+      seriesStart: '2026-11-01T09:00:00',
+      recurrenceId: '2026-11-02',
+      // 09:00 Ortszeit = 08:00 UTC, eine Stunde Vorlauf = 07:00 UTC.
+      expected: '2026-11-02T07:00:00',
+      dueAt: '2026-11-02T07:00:00.000Z',
+      notYetAt: '2026-11-02T06:59:00.000Z',
+    },
+    {
+      label: 'America/New_York (UTC-4)',
+      zone: 'America/New_York',
+      seriesStart: '2026-10-01T09:00:00',
+      recurrenceId: '2026-10-02',
+      // 09:00 Ortszeit = 13:00 UTC, eine Stunde Vorlauf = 12:00 UTC. Westlich
+      // von UTC liegt der gespeicherte Wert also SPAETER als die Wanduhrzeit,
+      // oestlich davon frueher - die Richtung des Versatzes steht damit fest.
+      expected: '2026-10-02T12:00:00',
+      dueAt: '2026-10-02T12:00:00.000Z',
+      notYetAt: '2026-10-02T11:59:00.000Z',
+    },
+  ];
+  for (const fixture of fixtures) {
+    const database = createDatabase();
+    setHouseholdTimeZone(database, fixture.zone);
+    const seriesId = Number(insertSeries(database, {
+      title: 'Occurrence reminder anchor',
+      start_datetime: fixture.seriesStart,
+      recurrence_rule: 'FREQ=DAILY',
+    }));
+    const childId = Number(upsertOccurrenceOverride(database, {
+      seriesId,
+      recurrenceId: fixture.recurrenceId,
+      actorId: 1,
+      reminderOffsets: [60],
+    }).event.id);
+
+    const due = database.prepare(`
+      SELECT COUNT(*) AS count FROM reminders
+      WHERE entity_type = 'event' AND entity_id = ? AND remind_at <= ?
+    `);
+    observed.push({
+      label: fixture.label,
+      remindAt: database.prepare(`
+        SELECT remind_at FROM reminders WHERE entity_type = 'event' AND entity_id = ?
+      `).all(childId).map((row) => row.remind_at),
+      dueOneMinuteEarlier: due.get(childId, fixture.notYetAt).count,
+      dueAtTheLeadTime: due.get(childId, fixture.dueAt).count,
+    });
+  }
+
+  assert.deepEqual(observed, fixtures.map((fixture) => ({
+    label: fixture.label,
+    remindAt: [fixture.expected],
+    dueOneMinuteEarlier: 0,
+    dueAtTheLeadTime: 1,
+  })));
+});
+
+/**
+ * #1291, die LESENDE Seite: `reminderState()` vergleicht Vorlaeufe.
+ *
+ * Seit der Anker dieses PRs ein Zeitpunkt ist, darf ihn der Vergleich nicht
+ * mehr als Wanduhrzeit lesen. Tat er es, stand in `offsetMs` nicht der Vorlauf,
+ * sondern `Vorlauf + Zonenoffset` - und der Zonenoffset wechselt an der
+ * DST-Grenze. Zwei Vorkommen beidseits des 25.10.2026 heben den Unterschied
+ * damit genau auf: 60 Minuten Vorlauf in der Sommerzeit und 120 Minuten in der
+ * Winterzeit ergeben beide 180.
+ *
+ * `sameReminderState()` meldet die beiden dann als gleich, und der Aufrufer
+ * nimmt das woertlich: er loescht die Erinnerungen des Kindes, streicht
+ * `reminders` aus `overridden_fields` und raeumt, wenn nichts uebrig bleibt,
+ * das Kind-Ereignis samt Ausnahmezeile ab. Die abweichende Erinnerung des
+ * Nutzers verschwindet still.
+ *
+ * BEIDE RICHTUNGEN IN EINEM VERGLEICH. Ein Test nur auf „bleibt erhalten" waere
+ * auch von einem Vergleich gruen, der nie wieder etwas gleich findet; die
+ * zweite Lage haelt fest, dass ein wirklich gleicher Vorlauf weiterhin auf die
+ * Serie zurueckfaellt. Gemessen wird der Datenbankzustand nach dem Schreiben,
+ * nicht der Rueckgabewert allein.
+ */
+test('an occurrence reminder lead survives the DST boundary its zone offset would cancel', () => {
+  const fixtures = [
+    {
+      label: 'abweichender Vorlauf (120 statt 60) bleibt ein Override',
+      occurrenceOffset: 120,
+      // 2026-11-02 09:00 Europe/Berlin ist Winterzeit (UTC+1) = 08:00 UTC,
+      // 120 Minuten Vorlauf = 06:00 UTC. Die Serie steht auf 06:00 UTC mit 60
+      // Minuten Vorlauf aus der Sommerzeit - DIESELBE Uhrzeit, ein anderer
+      // Vorlauf. Auf der Wanduhr-Achse gelesen sind beide 180 Minuten.
+      expected: {
+        restored: false,
+        childReminders: ['2026-11-02T06:00:00'],
+        overriddenFields: '["reminders"]',
+        exceptionRows: 1,
+      },
+    },
+    {
+      label: 'gleicher Vorlauf (60) faellt weiterhin auf die Serie zurueck',
+      occurrenceOffset: 60,
+      // 08:00 UTC minus 60 Minuten = 07:00 UTC. Derselbe Vorlauf wie die Serie,
+      // also kein Override - das Kind-Ereignis und seine Ausnahmezeile gehen.
+      expected: {
+        restored: true,
+        childReminders: [],
+        overriddenFields: null,
+        exceptionRows: 0,
+      },
+    },
+  ];
+  const observed = fixtures.map((fixture) => {
+    const database = createDatabase();
+    setHouseholdTimeZone(database, 'Europe/Berlin');
+    const seriesId = Number(insertSeries(database, {
+      title: 'Reminder lead across the DST boundary',
+      start_datetime: '2026-10-01T09:00:00',
+      recurrence_rule: 'FREQ=DAILY',
+    }));
+    // Die Erinnerung der Serie, so wie der Dialog sie schreibt: naiv-UTC.
+    // 2026-10-01 09:00 Europe/Berlin ist Sommerzeit (UTC+2) = 07:00 UTC,
+    // 60 Minuten Vorlauf = 06:00 UTC.
+    database.prepare(`
+      INSERT INTO reminders (entity_type, entity_id, remind_at, created_by)
+      VALUES ('event', ?, '2026-10-01T06:00:00', 1)
+    `).run(seriesId);
+
+    const result = upsertOccurrenceOverride(database, {
+      seriesId,
+      recurrenceId: '2026-11-02',
+      actorId: 1,
+      reminderOffsets: [fixture.occurrenceOffset],
+    });
+    const child = database.prepare(`
+      SELECT id, overridden_fields FROM calendar_events
+      WHERE recurrence_parent_id = ? AND recurrence_id = ?
+    `).get(seriesId, '2026-11-02');
+    return {
+      label: fixture.label,
+      restored: result.restored === true,
+      childReminders: child ? database.prepare(`
+        SELECT remind_at FROM reminders WHERE entity_type = 'event' AND entity_id = ?
+        ORDER BY remind_at
+      `).all(child.id).map((row) => row.remind_at) : [],
+      overriddenFields: child ? child.overridden_fields : null,
+      exceptionRows: database.prepare(`
+        SELECT COUNT(*) AS count FROM calendar_event_exceptions
+        WHERE event_id = ? AND exception_date = ?
+      `).get(seriesId, '2026-11-02').count,
+      // Die Erinnerung der Serie bleibt in beiden Lagen unangetastet.
+      seriesReminders: database.prepare(`
+        SELECT remind_at FROM reminders WHERE entity_type = 'event' AND entity_id = ?
+      `).all(seriesId).map((row) => row.remind_at),
+    };
+  });
+
+  assert.deepEqual(observed, fixtures.map((fixture) => ({
+    label: fixture.label,
+    ...fixture.expected,
+    seriesReminders: ['2026-10-01T06:00:00'],
+  })));
+});
+
+/**
+ * #1300: Wird ein Termin verschoben, nimmt seine Erinnerung den VORLAUF mit -
+ * nicht ihre Uhrzeit.
+ *
+ * Die drei Verschiebe-Stellen dieses Moduls (`shiftOwnedReminders()`,
+ * `copyReminderState()`, `copyResolvedReminderState()`) bildeten den Abstand
+ * zwischen altem und neuem Anker auf der WANDUHR-Achse und addierten ihn auf
+ * `reminders.remind_at` - eine Spalte, die einen ZEITPUNKT meint. Innerhalb
+ * derselben Zonenlage geht das auf, ueber eine DST-Grenze nicht: zwischen
+ * 2026-03-20T09:00 und 2026-07-20T09:00 Europe/Berlin liegen 122 Wanduhr-Tage,
+ * aber nur 121 Tage und 23 Stunden echte Zeit. Diese Stunde wanderte in die
+ * Erinnerung, und bei 60 Minuten Vorlauf landete sie exakt auf dem
+ * Terminbeginn. Weil "zum Startzeitpunkt" ein gueltiges Preset ist, sieht
+ * Vorlauf 0 gewollt aus und meldet sich nie.
+ *
+ * #1291/#1302 haben die schreibende und die lesende Seite auf die
+ * Zeitpunkt-Achse geholt (`reminderAnchorInstantMs()`/`remindAtInstantMs()`);
+ * die drei Verschiebe-Stellen wurden damals nicht mitgezogen.
+ *
+ * GEMESSEN WIRD DER WECKER, NICHT NUR DIE ZEILE. `2026-07-20T07:00:00` sagt
+ * niemandem etwas; erst in der Haushaltszone zurueckgerechnet steht dort
+ * 09:00 - der Terminbeginn. Jede Lage traegt deshalb beide Werte.
+ *
+ * Die dritte Lage jeder Tabelle ueberquert KEINE Grenze: sie haelt fest, dass
+ * eine gewoehnliche Verschiebung unveraendert bleibt.
+ */
+
+/** Die Erinnerungen eines Termins als gespeicherte Zeile UND als Ortszeit-Wecker. */
+function reminderWallTimes(database, eventId, zone) {
+  return database.prepare(`
+    SELECT remind_at FROM reminders
+    WHERE entity_type = 'event' AND entity_id = ?
+    ORDER BY remind_at, created_by
+  `).all(eventId).map((row) => ({
+    stored: row.remind_at,
+    // Die Spalte ist naiv-UTC: das angehaengte "Z" benennt die Zone, in der die
+    // Zeile wirklich steht - anders als in `wallTimeMs()`, wo es eine Notluege
+    // ist, damit sich zwei Wanduhrzeiten abziehen lassen.
+    local: utcToWall(`${row.remind_at}Z`, zone),
+  }));
+}
+
+test('a moved series keeps its reminder lead across a DST boundary', () => {
+  const fixtures = [
+    {
+      label: 'nach vorn ueber die Grenze: Maerz (UTC+1) -> Juli (UTC+2)',
+      start: '2026-03-20T09:00:00',
+      // 09:00 Europe/Berlin ist am 20.03. Winterzeit (UTC+1) = 08:00 UTC,
+      // 60 Minuten Vorlauf = 07:00 UTC.
+      reminder: '2026-03-20T07:00:00',
+      moved: '2026-07-20T09:00:00',
+      // 09:00 Ortszeit ist am 20.07. Sommerzeit (UTC+2) = 07:00 UTC, der
+      // Vorlauf also 06:00 UTC. Die Wanduhr-Rechnung addierte 122 volle Tage
+      // und kam auf 07:00 UTC - den Terminbeginn selbst, Vorlauf 0.
+      expected: [{ stored: '2026-07-20T06:00:00', local: { date: '2026-07-20', time: '08:00:00' } }],
+    },
+    {
+      label: 'zurueck ueber die Grenze: Juli (UTC+2) -> Maerz (UTC+1)',
+      start: '2026-07-20T09:00:00',
+      reminder: '2026-07-20T06:00:00',
+      moved: '2026-03-20T09:00:00',
+      // Gegenrichtung: die Wanduhr-Rechnung lieferte hier 06:00 UTC und damit
+      // 120 Minuten Vorlauf statt 60. Eine Grenze, die nur in EINE Richtung
+      // geprueft wird, laesst den halben Fehler stehen.
+      expected: [{ stored: '2026-03-20T07:00:00', local: { date: '2026-03-20', time: '08:00:00' } }],
+    },
+    {
+      label: 'ohne Grenze: derselbe Zonenversatz auf beiden Seiten',
+      start: '2026-07-20T09:00:00',
+      reminder: '2026-07-20T06:00:00',
+      moved: '2026-07-27T10:30:00',
+      // Nicht-Regression: ohne Grenzueberquerung sind Wanduhr- und
+      // Zeitpunkt-Abstand gleich, das Ergebnis darf sich nicht aendern.
+      expected: [{ stored: '2026-07-27T07:30:00', local: { date: '2026-07-27', time: '09:30:00' } }],
+    },
+    {
+      label: 'ganztaegig ueber die Grenze: reines Datum als Anker',
+      start: '2026-03-20',
+      reminder: '2026-03-20T07:00:00',
+      moved: '2026-07-20',
+      // Ein ganztaegiges Vorkommen hat keine Uhrzeit; `reminderAnchorInstantMs()`
+      // setzt es auf 09:00 Ortszeit - dieselbe Annahme, die der Dialog trifft.
+      // Der Anker wandert damit von 08:00 auf 07:00 UTC, der Vorlauf bleibt.
+      expected: [{ stored: '2026-07-20T06:00:00', local: { date: '2026-07-20', time: '08:00:00' } }],
+    },
+  ];
+  const observed = fixtures.map((fixture) => {
+    const database = createDatabase();
+    const seriesId = Number(insertSeries(database, {
+      title: 'Moved across the boundary',
+      start_datetime: fixture.start,
+      recurrence_rule: 'FREQ=MONTHLY',
+    }));
+    database.prepare(`
+      INSERT INTO reminders (entity_type, entity_id, remind_at, created_by)
+      VALUES ('event', ?, ?, 1)
+    `).run(seriesId, fixture.reminder);
+    updateSeriesWithOverrides(database, {
+      seriesId,
+      actorId: 1,
+      changes: { start_datetime: fixture.moved },
+    });
+    return {
+      label: fixture.label,
+      start: database.prepare('SELECT start_datetime FROM calendar_events WHERE id = ?')
+        .get(seriesId).start_datetime,
+      reminders: reminderWallTimes(database, seriesId, 'Europe/Berlin'),
+    };
+  });
+  assert.deepEqual(observed, fixtures.map((fixture) => ({
+    label: fixture.label,
+    start: fixture.moved,
+    reminders: fixture.expected,
+  })));
+});
+
+/**
+ * Dieselbe Achse an `copyReminderState()`, ueber ihren echten Aufrufweg.
+ *
+ * Erreicht wird sie, wenn ein Vorkommen seine Erinnerungen NICHT besitzt und
+ * trotzdem eigene bekommt - hier ueber eine abweichende Zuweisung. Die
+ * Erinnerung der Serie wird dann auf den Anker des Vorkommens kopiert, und
+ * `fanOutEventReminders()` verteilt sie an die Zugewiesenen. Ein Aufruf des
+ * Helfers von aussen wuerde genau diese Verdrahtung nicht messen.
+ */
+test('an occurrence inheriting series reminders copies the lead, not the clock time', () => {
+  const fixtures = [
+    {
+      label: 'nach vorn ueber die Grenze',
+      start: '2026-03-20T09:00:00',
+      reminder: '2026-03-20T07:00:00',
+      recurrenceId: '2026-07-20',
+      stored: '2026-07-20T06:00:00',
+      local: { date: '2026-07-20', time: '08:00:00' },
+    },
+    {
+      label: 'zurueck ueber die Grenze',
+      start: '2026-07-20T09:00:00',
+      reminder: '2026-07-20T06:00:00',
+      recurrenceId: '2026-11-20',
+      stored: '2026-11-20T07:00:00',
+      local: { date: '2026-11-20', time: '08:00:00' },
+    },
+    {
+      label: 'ohne Grenze',
+      start: '2026-07-20T09:00:00',
+      reminder: '2026-07-20T06:00:00',
+      recurrenceId: '2026-08-20',
+      stored: '2026-08-20T06:00:00',
+      local: { date: '2026-08-20', time: '08:00:00' },
+    },
+  ];
+  const observed = fixtures.map((fixture) => {
+    const database = createDatabase();
+    const seriesId = Number(insertSeries(database, {
+      title: 'Inherited occurrence reminder',
+      start_datetime: fixture.start,
+      recurrence_rule: 'FREQ=MONTHLY',
+      assigned_to: 2,
+    }));
+    database.prepare('INSERT INTO event_assignments (event_id, user_id) VALUES (?, 2)')
+      .run(seriesId);
+    database.prepare(`
+      INSERT INTO reminders (entity_type, entity_id, remind_at, created_by)
+      VALUES ('event', ?, ?, 1)
+    `).run(seriesId, fixture.reminder);
+
+    const child = upsertOccurrenceOverride(database, {
+      seriesId,
+      recurrenceId: fixture.recurrenceId,
+      actorId: 1,
+      assignments: [2, 3],
+    }).event;
+    return {
+      label: fixture.label,
+      reminders: reminderWallTimes(database, Number(child.id), 'Europe/Berlin'),
+      // Die Serie behaelt ihre eigene Zeile unveraendert.
+      seriesReminders: reminderWallTimes(database, seriesId, 'Europe/Berlin')
+        .map((row) => row.stored),
+    };
+  });
+  assert.deepEqual(observed, fixtures.map((fixture) => ({
+    label: fixture.label,
+    // Die kopierte Zeile der Erstellerin plus die zwei verteilten Kopien -
+    // alle drei auf demselben Zeitpunkt.
+    reminders: [
+      { stored: fixture.stored, local: fixture.local },
+      { stored: fixture.stored, local: fixture.local },
+      { stored: fixture.stored, local: fixture.local },
+    ],
+    seriesReminders: [fixture.reminder],
+  })));
+});
+
+/**
+ * Und dieselbe Achse an `copyResolvedReminderState()`, ueber den Schnitt
+ * "dieser und alle folgenden": die Erinnerungen der alten Serie ziehen auf die
+ * Nachfolgerin um, deren Anker der Schnitttag ist.
+ */
+test('a following split carries the reminder lead across a DST boundary', () => {
+  const fixtures = [
+    {
+      label: 'nach vorn ueber die Grenze',
+      start: '2026-03-20T09:00:00',
+      reminder: '2026-03-20T07:00:00',
+      splitAt: '2026-07-20',
+      stored: '2026-07-20T06:00:00',
+      local: { date: '2026-07-20', time: '08:00:00' },
+    },
+    {
+      label: 'zurueck ueber die Grenze',
+      start: '2026-07-20T09:00:00',
+      reminder: '2026-07-20T06:00:00',
+      splitAt: '2026-11-20',
+      stored: '2026-11-20T07:00:00',
+      local: { date: '2026-11-20', time: '08:00:00' },
+    },
+    {
+      label: 'ohne Grenze',
+      start: '2026-07-20T09:00:00',
+      reminder: '2026-07-20T06:00:00',
+      splitAt: '2026-08-20',
+      stored: '2026-08-20T06:00:00',
+      local: { date: '2026-08-20', time: '08:00:00' },
+    },
+  ];
+  const observed = fixtures.map((fixture) => {
+    const database = createDatabase();
+    const seriesId = Number(insertSeries(database, {
+      title: 'Split across the boundary',
+      start_datetime: fixture.start,
+      recurrence_rule: 'FREQ=MONTHLY',
+    }));
+    database.prepare(`
+      INSERT INTO reminders (entity_type, entity_id, remind_at, created_by)
+      VALUES ('event', ?, ?, 1)
+    `).run(seriesId, fixture.reminder);
+
+    const successorId = Number(splitSeries(database, {
+      seriesId,
+      recurrenceId: fixture.splitAt,
+      actorId: 1,
+      changes: { title: 'Successor' },
+    }).series.id);
+    return {
+      label: fixture.label,
+      reminders: reminderWallTimes(database, successorId, 'Europe/Berlin'),
+      // Die abgeschnittene Serie behaelt ihre eigene Erinnerung.
+      seriesReminders: reminderWallTimes(database, seriesId, 'Europe/Berlin')
+        .map((row) => row.stored),
+    };
+  });
+  assert.deepEqual(observed, fixtures.map((fixture) => ({
+    label: fixture.label,
+    reminders: [{ stored: fixture.stored, local: fixture.local }],
+    seriesReminders: [fixture.reminder],
+  })));
+});
+
+/**
+ * #1300, zweite Runde: die Umrechnung selbst muss eindeutig sein.
+ *
+ * Die erste Fassung rechnete den Anker ueber `storedToInstantMs()` und damit
+ * ueber `localToUTC()` - die Ein-Durchgang-Fassung. Die liest die lokalen
+ * Ziffern als UTC, bestimmt den Zonen-Offset AN DIESEM falschen Punkt und
+ * wendet ihn einmal an. Rund um eine DST-Grenze bildet das ein ganzes
+ * Wanduhr-Band auf DENSELBEN Zeitpunkt ab; gemessen in Europe/Berlin
+ * (`localToUTC` -> `utcToWall`, Rundlauf):
+ *
+ *   2026-03-29T00:30 -> 2026-03-28T23:30:00Z -> zurueck 2026-03-29T00:30  ok
+ *   2026-03-29T01:30 -> 2026-03-28T23:30:00Z -> zurueck 2026-03-29T00:30  daneben
+ *   2026-03-29T02:30 -> 2026-03-29T00:30:00Z -> zurueck 2026-03-29T01:30  daneben
+ *   2026-10-25T01:30 -> 2026-10-25T00:30:00Z -> zurueck 2026-10-25T02:30  daneben
+ *
+ * 00:30 und 01:30 ergeben denselben Zeitpunkt. Betroffen ist nicht nur die
+ * Luecken- oder die doppelte Stunde, sondern jede Wanduhrzeit von 01:00 bis
+ * 01:59 am Umstelltag. Auf dieser Achse wurde die Differenz zweier Anker
+ * gebildet - eine Verschiebung von 00:30 auf 01:30 kam als NULL heraus, eine
+ * Verschiebung aus dem Februar in dieses Band um eine Stunde zu kurz. Der
+ * Anker laeuft deshalb seit dieser Runde ueber `storedToInstantMsPrecise()`
+ * und damit ueber die Zwei-Pass-Fixpunkt-Fassung `localToUTCPrecise()`.
+ *
+ * GEMESSEN WIRD DER VORLAUF, NICHT DIE UHRZEIT. Der erwartete Zeitpunkt des
+ * Terminbeginns steht als handabgeleitete UTC-Konstante in der Vorgabe, der
+ * Vorlauf faellt aus ihr und der beobachteten Zeile. Ein Vergleich gegen die
+ * Ortszeit taugt hier nicht: in der doppelten Stunde ist die Wanduhrzeit
+ * zweideutig, sie kann die Antwort also gar nicht ausdruecken.
+ *
+ * FUENF DER SECHS LAGEN WAREN ROT, DIE SECHSTE NICHT. Die doppelte Stunde
+ * (25.10. 02:30) rechneten beide Fassungen gleich; sie steht hier nicht als
+ * Regressionswaechter, sondern weil es dort ZWEI richtige Antworten gibt und
+ * eine Zusicherung, die offenliesse welche, nichts hielte. Welche es ist und
+ * warum, steht an der Lage selbst.
+ *
+ * Die 2026er Grenzen von Europe/Berlin: 2026-03-29T01:00:00Z springt die Uhr
+ * von 02:00 CET (+01:00) auf 03:00 CEST (+02:00), 2026-10-25T01:00:00Z faellt
+ * sie von 03:00 CEST auf 02:00 CET zurueck.
+ */
+test('a moved series keeps its reminder lead inside the hour the conversion could not tell apart', () => {
+  const fixtures = [
+    {
+      label: 'von ausserhalb ins Band: Februar -> 29.03. 01:30 (noch CET)',
+      // 09:00 am 20.02. ist CET (+01:00) = 08:00Z, 60 Minuten Vorlauf = 07:00Z.
+      start: '2026-02-20T09:00:00',
+      reminder: '2026-02-20T07:00:00',
+      // 01:30 am 29.03. liegt VOR dem Sprung um 01:00Z, ist also noch CET
+      // (+01:00) = 2026-03-29T00:30:00Z.
+      moved: '2026-03-29T01:30:00',
+      movedUtc: '2026-03-29T00:30:00Z',
+      // Die Ein-Durchgang-Fassung las den Zielanker als 2026-03-28T23:30:00Z,
+      // eine Stunde zu frueh; der Vorlauf wuchs damit auf 120 Minuten. Diese
+      // Lage ist zugleich ein Regressionswaechter: vor #1300 rechnete die
+      // Stelle auf der Wanduhr-Achse und lag hier RICHTIG.
+      stored: '2026-03-28T23:30:00',
+    },
+    {
+      label: 'innerhalb des Tages ueber den Sprung: 01:30 (CET) -> 03:30 (CEST)',
+      start: '2026-03-29T01:30:00',
+      reminder: '2026-03-28T23:30:00',
+      // 03:30 liegt NACH dem Sprung, ist CEST (+02:00) = 2026-03-29T01:30:00Z.
+      moved: '2026-03-29T03:30:00',
+      movedUtc: '2026-03-29T01:30:00Z',
+      // Der Quellanker war um eine Stunde zu frueh gelesen, die Verschiebung
+      // damit um eine Stunde zu gross: die Erinnerung landete exakt auf dem
+      // Terminbeginn, Vorlauf 0 - genau das Symptom, das #1300 beseitigt.
+      stored: '2026-03-29T00:30:00',
+    },
+    {
+      label: 'aus dem Band heraus: 29.03. 01:30 -> April',
+      start: '2026-03-29T01:30:00',
+      reminder: '2026-03-28T23:30:00',
+      moved: '2026-04-20T09:00:00',
+      movedUtc: '2026-04-20T07:00:00Z',
+      stored: '2026-04-20T06:00:00',
+    },
+    {
+      label: 'eine Stunde innerhalb des Bandes: 00:30 -> 01:30, beide CET',
+      // Beide Uhrzeiten gibt es wirklich, und sie liegen eine echte Stunde
+      // auseinander. Die Ein-Durchgang-Fassung bildete beide auf
+      // 2026-03-28T23:30:00Z ab: die Verschiebung kam als 0 heraus, der
+      // Fruehausstieg auf `shift === 0` liess `remind_at` stehen, und der
+      // Vorlauf wuchs still von 60 auf 120 Minuten. Der Termin bewegte sich,
+      // die Erinnerung nicht, und nichts meldete es.
+      start: '2026-03-29T00:30:00',
+      reminder: '2026-03-28T22:30:00',
+      moved: '2026-03-29T01:30:00',
+      movedUtc: '2026-03-29T00:30:00Z',
+      stored: '2026-03-28T23:30:00',
+    },
+    {
+      label: 'ins Herbstband: September -> 25.10. 01:30 (noch CEST)',
+      // 09:00 am 20.09. ist CEST (+02:00) = 07:00Z, Vorlauf 60 = 06:00Z.
+      start: '2026-09-20T09:00:00',
+      reminder: '2026-09-20T06:00:00',
+      // 01:30 am 25.10. liegt VOR dem Ruecksprung um 01:00Z und ist damit
+      // eindeutig CEST (+02:00) = 2026-10-24T23:30:00Z. Die
+      // Ein-Durchgang-Fassung las 2026-10-25T00:30:00Z, eine Stunde zu spaet.
+      moved: '2026-10-25T01:30:00',
+      movedUtc: '2026-10-24T23:30:00Z',
+      stored: '2026-10-24T22:30:00',
+    },
+    {
+      label: 'in die doppelte Stunde: September -> 25.10. 02:30',
+      start: '2026-09-20T09:00:00',
+      reminder: '2026-09-20T06:00:00',
+      // 02:30 am 25.10. gibt es ZWEIMAL: einmal als CEST (+02:00,
+      // 2026-10-25T00:30:00Z) und einmal als CET (+01:00,
+      // 2026-10-25T01:30:00Z). Beide waeren richtig, und eine Zusicherung, die
+      // offenliesse welche, wuerde nichts halten.
+      //
+      // Gewaehlt ist die SPAETERE, also die Lage nach der Umstellung (CET).
+      // Das ist keine Vorliebe, sondern das dokumentierte Ergebnis von
+      // `localToUTCPrecise()`: der erste Durchgang liest den Offset an
+      // 2026-10-25T02:30:00Z ab, das ist CET, und findet mit ihm bei
+      // 01:30:00Z sofort seinen Fixpunkt. Dieselbe Regel gilt im
+      // Schichtplan-Sync, der denselben Helfer benutzt.
+      moved: '2026-10-25T02:30:00',
+      movedUtc: '2026-10-25T01:30:00Z',
+      stored: '2026-10-25T00:30:00',
+    },
+  ];
+  const observed = fixtures.map((fixture) => {
+    const database = createDatabase();
+    const seriesId = Number(insertSeries(database, {
+      title: 'Moved inside the ambiguous band',
+      start_datetime: fixture.start,
+      recurrence_rule: 'FREQ=MONTHLY',
+    }));
+    database.prepare(`
+      INSERT INTO reminders (entity_type, entity_id, remind_at, created_by)
+      VALUES ('event', ?, ?, 1)
+    `).run(seriesId, fixture.reminder);
+    updateSeriesWithOverrides(database, {
+      seriesId,
+      actorId: 1,
+      changes: { start_datetime: fixture.moved },
+    });
+    const rows = database.prepare(`
+      SELECT remind_at FROM reminders
+      WHERE entity_type = 'event' AND entity_id = ?
+      ORDER BY remind_at
+    `).all(seriesId);
+    return {
+      label: fixture.label,
+      reminders: rows.map((row) => ({
+        stored: row.remind_at,
+        // Der Vorlauf faellt aus dem handabgeleiteten Zielzeitpunkt und der
+        // beobachteten Zeile - kein Helfer aus dem Modul unter Test.
+        leadMinutes: (Date.parse(fixture.movedUtc) - Date.parse(`${row.remind_at}Z`)) / 60000,
+      })),
+    };
+  });
+  assert.deepEqual(observed, fixtures.map((fixture) => ({
+    label: fixture.label,
+    reminders: [{ stored: fixture.stored, leadMinutes: 60 }],
+  })));
 });
 
 test('restoring the actor reminder keeps every other owner state reachable', () => {
@@ -1836,7 +2473,7 @@ test('following edit absorbs the selected replacement even when its new defaults
   `).get(successorId).count, 0);
   assert.deepEqual(database.prepare(`
     SELECT remind_at FROM reminders WHERE entity_type = 'event' AND entity_id = ?
-  `).all(successorId).map((row) => row.remind_at), ['2026-10-02T08:30:00']);
+  `).all(successorId).map((row) => row.remind_at), ['2026-10-02T06:30:00']);
 });
 
 test('following split recomputes a stale exact count before detaching anchor-incompatible children', () => {
@@ -1962,7 +2599,7 @@ test('confirmed following split detaches only incompatible children with attachm
     SELECT remind_at, created_by FROM reminders
     WHERE entity_type = 'event' AND entity_id = ? ORDER BY created_by
   `).all(incompatible.id).map((row) => ({ ...row })), [{
-    remind_at: '2026-10-03T08:15:00',
+    remind_at: '2026-10-03T06:15:00',
     created_by: 1,
   }]);
   assert.equal(database.prepare('SELECT recurrence_parent_id FROM calendar_events WHERE id = ?')
@@ -2084,6 +2721,9 @@ test('confirmed split gives every inherited orphan an independent attachment ACL
     confirmedOrphanCount: 3,
     cloneAttachment: (sourceId) => cloneDocument('successor', sourceId),
     cloneDetachedAttachment: (childId, sourceId) => cloneDocument(`orphan-${childId}`, sourceId),
+    // Die Route reicht das nur mit Dokumente-Schreibrecht und Sicht auf das
+    // Dokument herein (#1358); ohne es bleibt das Dokument unangetastet (#1443).
+    mayWidenAttachment: () => true,
   });
 
   const attachmentIdFor = (eventId) => Number(database.prepare(`
@@ -2105,6 +2745,8 @@ test('confirmed split gives every inherited orphan an independent attachment ACL
     childOwnedDocumentId,
   ]).size, 5);
 
+  // Each copy now belongs to an event whose audience differs from the master's,
+  // whose audience the source followed - so the owner's copy follows its event (#1443).
   assert.deepEqual(database.prepare(`
     SELECT id, visibility FROM family_documents
     WHERE id IN (?, ?, ?) ORDER BY id
@@ -2128,6 +2770,64 @@ test('confirmed split gives every inherited orphan an independent attachment ACL
   ]) {
     assert.equal(attachmentIdFor(eventId), expectedDocumentId);
   }
+});
+
+test('split copies of an inherited attachment follow a narrower occurrence, not the master (#1443, review)', () => {
+  // Die Quelle folgt dem Publikum des Serienkopfs (fuer alle, also family). Ein
+  // privater Serientermin, der den Anhang nur erbt, bekommt beim Teilen oder
+  // Abloesen eine Kopie - die muss seinem Publikum folgen, sonst entstuende aus
+  // einem privaten Termin ein neues Familien-Dokument.
+  const database = createDatabase();
+  const insertDocument = (name, visibility) => Number(database.prepare(`
+    INSERT INTO family_documents
+      (name, visibility, original_name, mime_type, file_size, content_data, created_by)
+    VALUES (?, ?, ?, 'text/plain', 4, 'body', 1)
+  `).run(name, visibility, `${name}.txt`).lastInsertRowid);
+  const sourceDocumentId = insertDocument('family source', 'family');
+  const seriesId = Number(insertSeries(database, {
+    title: 'Family series',
+    start_datetime: '2026-10-01T09:00:00',
+    recurrence_rule: 'FREQ=DAILY',
+    assigned_to: 1,
+    visibility: 'all',
+  }));
+  database.prepare(`
+    UPDATE calendar_events
+    SET attachment_name = 'source.txt', attachment_mime = 'text/plain',
+        attachment_size = 4, attachment_document_id = ?
+    WHERE id = ?
+  `).run(sourceDocumentId, seriesId);
+  database.prepare('INSERT INTO event_assignments (event_id, user_id) VALUES (?, 1)').run(seriesId);
+  for (const recurrenceId of ['2026-10-02', '2026-10-04']) {
+    upsertOccurrenceOverride(database, {
+      seriesId, recurrenceId, actorId: 1, changes: { title: `Private ${recurrenceId}`, visibility: 'private' },
+    });
+  }
+  const clones = new Map();
+  const clone = (owner, sourceId) => {
+    const source = database.prepare('SELECT visibility FROM family_documents WHERE id = ?').get(sourceId);
+    const documentId = insertDocument(`${owner} clone`, source.visibility);
+    clones.set(owner, documentId);
+    return {
+      attachment_name: 'source.txt', attachment_mime: 'text/plain', attachment_size: 4,
+      attachment_data: null, attachment_document_id: documentId,
+    };
+  };
+  splitSeries(database, {
+    seriesId,
+    recurrenceId: '2026-10-02',
+    actorId: 1,
+    changes: { recurrence_rule: 'FREQ=WEEKLY;BYDAY=FR' },
+    confirmedOrphanCount: 1,
+    cloneAttachment: (sourceId) => clone('successor', sourceId),
+    cloneDetachedAttachment: (childId, sourceId) => clone('detached', sourceId),
+    mayWidenAttachment: () => true,
+  });
+  const visibility = (id) => database.prepare('SELECT visibility FROM family_documents WHERE id = ?').get(id).visibility;
+  assert.equal(clones.size, 2, 'successor and detached orphan each got a copy');
+  assert.equal(visibility(sourceDocumentId), 'family', 'the source stays as it was');
+  assert.equal(visibility(clones.get('successor')), 'private', 'the successor copy follows the private occurrence');
+  assert.equal(visibility(clones.get('detached')), 'private', 'the detached copy follows the private occurrence');
 });
 
 test('confirmed following detachment rolls back orphan materialization and EXDATE cleanup atomically', () => {
@@ -2432,7 +3132,7 @@ test('following edit preserves selected and future occurrence-owned attachments 
   });
   assert.deepEqual(database.prepare(`
     SELECT remind_at FROM reminders WHERE entity_type = 'event' AND entity_id = ?
-  `).all(successorId).map((row) => row.remind_at), ['2026-10-02T08:30:00']);
+  `).all(successorId).map((row) => row.remind_at), ['2026-10-02T06:30:00']);
   assert.deepEqual({ ...database.prepare(`
     SELECT recurrence_parent_id, attachment_document_id, overridden_fields
     FROM calendar_events WHERE id = ?
@@ -2443,7 +3143,7 @@ test('following edit preserves selected and future occurrence-owned attachments 
   });
   assert.deepEqual(database.prepare(`
     SELECT remind_at FROM reminders WHERE entity_type = 'event' AND entity_id = ?
-  `).all(future.id).map((row) => row.remind_at), ['2026-10-03T08:45:00']);
+  `).all(future.id).map((row) => row.remind_at), ['2026-10-03T06:45:00']);
 });
 
 test('following edit refreshes future inherited projections and shifts owned reminders', () => {
@@ -2499,7 +3199,7 @@ test('following edit refreshes future inherited projections and shifts owned rem
   assert.deepEqual(database.prepare(`
     SELECT remind_at FROM reminders
     WHERE entity_type = 'event' AND entity_id = ? AND assigned_from IS NULL
-  `).all(future.id).map((row) => row.remind_at), ['2026-10-03T09:30:00']);
+  `).all(future.id).map((row) => row.remind_at), ['2026-10-03T07:30:00']);
 });
 
 test('following split clones inherited attachment ownership for divergent ACLs and lifecycle', () => {
@@ -2576,6 +3276,7 @@ test('following split clones inherited attachment ownership for divergent ACLs a
 
     let clonedDocumentId = null;
     const result = splitSeries(database, {
+      mayWidenAttachment: () => true, // Aufrufer mit Dokumente-Schreibrecht und Sicht (#1358)
       seriesId,
       recurrenceId: '2026-10-02',
       actorId: 1,
@@ -2692,8 +3393,8 @@ test('following edit from the first slot applies whole-series owned fields', () 
     SELECT created_by, assigned_from, remind_at FROM reminders
     WHERE entity_type = 'event' AND entity_id = ? ORDER BY created_by
   `).all(seriesId).map((row) => ({ ...row })), [
-    { created_by: 1, assigned_from: null, remind_at: '2026-10-01T08:30:00' },
-    { created_by: 2, assigned_from: 1, remind_at: '2026-10-01T08:30:00' },
+    { created_by: 1, assigned_from: null, remind_at: '2026-10-01T06:30:00' },
+    { created_by: 2, assigned_from: 1, remind_at: '2026-10-01T06:30:00' },
   ]);
 });
 
@@ -2864,11 +3565,16 @@ test('occurrence assignment changes own only the effective reminder recipients',
     database.prepare(`
       INSERT INTO event_assignments (event_id, user_id) VALUES (?, 1), (?, 2)
     `).run(seriesId, seriesId);
+    // 06:00 UTC ist 08:00 in Europe/Berlin und damit die Stunde vor dem Beginn -
+    // so schreibt der Dialog die Erinnerung des ganzen Termins (naiv-UTC,
+    // public/pages/calendar.js#reminderTimesFromOffsets). Stuende hier die
+    // Wanduhrzeit, traefe die geerbte Zeile den neu gerechneten Vorlauf nicht
+    // mehr und verloere ihr `dismissed` (#1291).
     database.prepare(`
       INSERT INTO reminders
         (entity_type, entity_id, remind_at, dismissed, created_by, assigned_from)
-      VALUES ('event', ?, '2026-10-01T08:00:00', 0, 1, NULL),
-             ('event', ?, '2026-10-01T08:00:00', 1, 2, 1)
+      VALUES ('event', ?, '2026-10-01T06:00:00', 0, 1, NULL),
+             ('event', ?, '2026-10-01T06:00:00', 1, 2, 1)
     `).run(seriesId, seriesId);
     const result = upsertOccurrenceOverride(database, {
       seriesId,
@@ -3274,7 +3980,7 @@ test('following split compares reminder inheritance for every owner before dropp
     WHERE entity_type = 'event' AND entity_id = ?
     ORDER BY created_by, assigned_from
   `).all(future.id).map((row) => ({ ...row })), [
-    { created_by: 1, assigned_from: null, remind_at: '2026-10-03T10:30:00', dismissed: 0 },
+    { created_by: 1, assigned_from: null, remind_at: '2026-10-03T08:30:00', dismissed: 0 },
     { created_by: 2, assigned_from: null, remind_at: '2026-10-03T10:00:00', dismissed: 0 },
     { created_by: 3, assigned_from: 2, remind_at: '2026-10-03T10:00:00', dismissed: 1 },
   ]);
@@ -3399,8 +4105,8 @@ test('whole-series updates refresh inherited child projections and assignments a
     SELECT created_by, assigned_from, remind_at FROM reminders
     WHERE entity_type = 'event' AND entity_id = ? ORDER BY created_by
   `).all(child.id).map((row) => ({ ...row })), [
-    { created_by: 1, assigned_from: null, remind_at: '2026-10-02T09:30:00' },
-    { created_by: 2, assigned_from: 1, remind_at: '2026-10-02T09:30:00' },
+    { created_by: 1, assigned_from: null, remind_at: '2026-10-02T07:30:00' },
+    { created_by: 2, assigned_from: 1, remind_at: '2026-10-02T07:30:00' },
   ]);
 });
 
@@ -3421,6 +4127,7 @@ test('whole-series projection refresh synchronizes occurrence-owned attachment A
     VALUES ('Occurrence attachment', 'family', 'occurrence.txt', 'text/plain', 4, 'body', 1)
   `).run().lastInsertRowid);
   const child = upsertOccurrenceOverride(database, {
+    mayWidenAttachment: () => true, // Aufrufer mit Dokumente-Schreibrecht und Sicht (#1358)
     seriesId,
     recurrenceId: '2026-10-02',
     actorId: 1,
@@ -3441,6 +4148,7 @@ test('whole-series projection refresh synchronizes occurrence-owned attachment A
     'SELECT visibility FROM family_documents WHERE id = ?'
   ).get(documentId).visibility;
   const update = (eventVisibility, assignments) => updateSeriesWithOverrides(database, {
+    mayWidenAttachment: () => true, // Aufrufer mit Dokumente-Schreibrecht und Sicht (#1358)
     seriesId,
     actorId: 1,
     changes: { visibility: eventVisibility },
@@ -3469,4 +4177,121 @@ test('whole-series projection refresh synchronizes occurrence-owned attachment A
   update('assignees', [3]);
   assert.equal(visibility(), 'restricted');
   assert.deepEqual(access(), [3]);
+});
+
+test('whole-series refresh leaves an occurrence attachment untouched without the right to manage it (#1443)', () => {
+  // Ohne `mayWidenAttachment` (kein Dokumente-Schreibrecht, keine Sicht oder
+  // nicht die Besitzerin) aendert das Speichern die Rechte des Dokuments nicht:
+  // weder Sichtbarkeit noch die Freigaben, die die Besitzerin gesetzt hat.
+  const database = createDatabase();
+  const seriesId = Number(insertSeries(database, {
+    title: 'Attachment ACL keeper',
+    start_datetime: '2026-10-01T09:00:00',
+    recurrence_rule: 'FREQ=DAILY',
+    assigned_to: 1,
+    visibility: 'assignees',
+  }));
+  database.prepare('INSERT INTO event_assignments (event_id, user_id) VALUES (?, 1)')
+    .run(seriesId);
+  const documentId = Number(database.prepare(`
+    INSERT INTO family_documents
+      (name, visibility, original_name, mime_type, file_size, content_data, created_by)
+    VALUES ('Owner shares', 'restricted', 'owner.txt', 'text/plain', 4, 'body', 1)
+  `).run().lastInsertRowid);
+  upsertOccurrenceOverride(database, {
+    mayWidenAttachment: () => true, // die Besitzerin haengt an
+    seriesId,
+    recurrenceId: '2026-10-02',
+    actorId: 1,
+    changes: { title: 'Attachment-owning occurrence' },
+    attachment: {
+      attachment_name: 'owner.txt',
+      attachment_mime: 'text/plain',
+      attachment_size: 4,
+      attachment_data: null,
+      attachment_document_id: documentId,
+    },
+  });
+  // Danach setzt die Besitzerin im Dokumente-Modul ihre eigenen Freigaben: 2 und 3.
+  database.prepare("UPDATE family_documents SET visibility = 'restricted' WHERE id = ?").run(documentId);
+  database.prepare('DELETE FROM family_document_access WHERE document_id = ?').run(documentId);
+  const grant = database.prepare('INSERT INTO family_document_access (document_id, user_id) VALUES (?, ?)');
+  grant.run(documentId, 2);
+  grant.run(documentId, 3);
+  const state = () => ({
+    visibility: database.prepare('SELECT visibility FROM family_documents WHERE id = ?').get(documentId).visibility,
+    access: database.prepare('SELECT user_id FROM family_document_access WHERE document_id = ? ORDER BY user_id')
+      .all(documentId).map((row) => Number(row.user_id)),
+  });
+  const owned = state();
+  assert.deepEqual(owned, { visibility: 'restricted', access: [2, 3] });
+
+  for (const [eventVisibility, assignments] of [['assignees', [2]], ['private', [2]], ['assignees', [1]]]) {
+    updateSeriesWithOverrides(database, {
+      seriesId,
+      actorId: 1,
+      changes: { visibility: eventVisibility },
+      assignments,
+    });
+    assert.deepEqual(state(), owned, `${eventVisibility} ${assignments}: the owner's rights stay`);
+  }
+});
+
+test('whole-series refresh re-syncs an owner\'s occurrence attachment only when its audience changes (#1443)', () => {
+  // Auch mit Verwaltungsrecht: ein Speichern, das nur Titel oder Zeit aendert,
+  // laesst die Freigaben stehen, die die Besitzerin im Dokumente-Modul gesetzt hat.
+  const database = createDatabase();
+  const seriesId = Number(insertSeries(database, {
+    title: 'Attachment audience',
+    start_datetime: '2026-10-01T09:00:00',
+    recurrence_rule: 'FREQ=DAILY',
+    assigned_to: 2,
+    visibility: 'assignees',
+  }));
+  database.prepare('INSERT INTO event_assignments (event_id, user_id) VALUES (?, 2)').run(seriesId);
+  const documentId = Number(database.prepare(`
+    INSERT INTO family_documents
+      (name, visibility, original_name, mime_type, file_size, content_data, created_by)
+    VALUES ('Audience doc', 'family', 'audience.txt', 'text/plain', 4, 'body', 1)
+  `).run().lastInsertRowid);
+  const owner = () => true;
+  upsertOccurrenceOverride(database, {
+    mayWidenAttachment: owner,
+    seriesId,
+    recurrenceId: '2026-10-02',
+    actorId: 1,
+    changes: { title: 'Attachment-owning occurrence' },
+    attachment: {
+      attachment_name: 'audience.txt',
+      attachment_mime: 'text/plain',
+      attachment_size: 4,
+      attachment_data: null,
+      attachment_document_id: documentId,
+    },
+  });
+  const state = () => ({
+    visibility: database.prepare('SELECT visibility FROM family_documents WHERE id = ?').get(documentId).visibility,
+    access: database.prepare('SELECT user_id FROM family_document_access WHERE document_id = ? ORDER BY user_id')
+      .all(documentId).map((row) => Number(row.user_id)),
+  });
+  assert.deepEqual(state(), { visibility: 'restricted', access: [2] });
+  database.prepare('INSERT INTO family_document_access (document_id, user_id) VALUES (?, 3)').run(documentId);
+
+  const update = (changes, assignments) => updateSeriesWithOverrides(database, {
+    mayWidenAttachment: owner, seriesId, actorId: 1, changes, assignments,
+  });
+  update({ title: 'Renamed series' });
+  assert.deepEqual(state(), { visibility: 'restricted', access: [2, 3] }, 'a title change keeps the share');
+  update({ start_datetime: '2026-10-01T10:00:00' });
+  assert.deepEqual(state(), { visibility: 'restricted', access: [2, 3] }, 'a time change keeps the share');
+  upsertOccurrenceOverride(database, {
+    mayWidenAttachment: owner,
+    seriesId,
+    recurrenceId: '2026-10-02',
+    actorId: 1,
+    changes: { title: 'Renamed occurrence' },
+  });
+  assert.deepEqual(state(), { visibility: 'restricted', access: [2, 3] }, 'an occurrence title change keeps the share');
+  update({}, [2, 1]);
+  assert.deepEqual(state(), { visibility: 'restricted', access: [1, 2] }, 'new assignees: the document follows');
 });

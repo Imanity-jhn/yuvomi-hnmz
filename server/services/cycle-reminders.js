@@ -41,6 +41,7 @@ import { predictCycle } from '../../public/utils/health-cycle.js';
 import { healthCycleViews } from '../routes/preferences.js';
 import { isHouseholdMember } from './household-members.js';
 import { listHouseholdMembers } from './member-email.js';
+import { householdDisabledModules } from './household-modules.js';
 
 // Einzige Familienrolle, die als Kind gilt (server/auth.js FAMILY_ROLES:
 // dad/mom/parent/child/grandparent/relative/other) - eine Konstante statt
@@ -61,8 +62,13 @@ function cycleTabEnabled(database, userId) {
   return healthCycleViews(userId).health_cycle_effective;
 }
 
-/** Fehlt diesem Nutzer der Zugriff auf das Health-Modul überhaupt? */
-function lacksHealth(database, userId) {
+/**
+ * Fehlt diesem Nutzer der Zugriff auf das Health-Modul überhaupt?
+ * Exportiert, weil server/services/prevention-reminders.js dieselbe Frage
+ * stellt (Betreuungs-Fan-out, D6) - eine zweite Abschrift dieser Regel wäre
+ * eine zweite Wahrheit (DECISIONS #2).
+ */
+export function lacksHealth(database, userId) {
   const user = database.prepare('SELECT id, role, family_role FROM users WHERE id = ?').get(userId);
   if (!user) return true;
   return resolvePermissions(database, user).modules.health === 'none';
@@ -284,7 +290,13 @@ export function syncCycleRemindersForUser(database, userId, now = new Date()) {
   // Abbruch zwischen Lesen und Schreiben liesse sonst einen zweiten Anker
   // zurueck, den kein spaeterer Lauf mehr sieht (er sucht ja nur "den einen").
   database.transaction(() => {
-    if (lacksHealth(database, userId) || !cycleTabEnabled(database, userId)) {
+    // Drei Wege ins Abraeumen, eine Wirkung: Health fuer den ganzen Haushalt
+    // abgeschaltet (#1279 - bis dahin kam die Meldung weiter, und ihr Tipp
+    // oeffnete eine Seite, die der Routen-Guard abweist), Health fuer dieses
+    // Mitglied entzogen, oder der Zyklus-Tab aus. Der erste Lauf nach dem
+    // Wiedereinschalten legt Anker und Erinnerung neu an.
+    if (householdDisabledModules(database).has('health')
+      || lacksHealth(database, userId) || !cycleTabEnabled(database, userId)) {
       dropAnchorAndReminder(database, userId, 'period_predicted', 'cycle_period');
       dropAnchorAndReminder(database, userId, 'log_nudge', 'cycle_log_nudge');
       dropAnchorAndReminder(database, userId, 'partner_period', 'cycle_period');

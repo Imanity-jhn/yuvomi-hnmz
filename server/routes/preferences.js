@@ -11,12 +11,15 @@ import * as db from '../db.js';
 import * as holidays from '../services/holidays.js';
 import { str, MAX_SHORT } from '../middleware/validate.js';
 import { isAdminRequest } from '../middleware/require-admin.js';
-import { getSupportedLocales, isSupportedLocale, resolveHouseholdLocale } from '../utils/i18n.js';
+import { getSupportedLocales, isRegionTag, isSupportedLocale, resolveHouseholdLocale } from '../utils/i18n.js';
 import { householdTimeZone, isValidTimeZone } from '../utils/timezone.js';
 import { retitleBirthdayEvents } from '../services/birthdays.js';
+import { resolveWeatherSource } from '../services/weather-source.js';
 import { DEFAULT_OVERDUE_GRACE_DAYS } from '../services/countdowns.js';
 import { isWidgetId } from '../services/module-capabilities.js';
 import { listVisibleCategories } from '../services/note-categories.js';
+import { syncPreventionRemindersForSubject } from '../services/prevention-reminders.js';
+import { syncAllFastingReminders } from '../services/fasting-reminders.js';
 // Geteilte isomorphe Util (#620, Allowlist in test/test-layer-boundary.js):
 // dasselbe Kennungsformat, das Event-Modal und Einstellungen verwenden.
 import { parseSyncTargetValue } from '../../public/utils/sync-target.js';
@@ -97,10 +100,15 @@ const VALID_LANGUAGES = getSupportedLocales();
 // Der Client fällt bei unbekanntem Wert ohnehin auf detectRegion() zurück, daher
 // genügt eine Formprüfung statt einer festen Liste.
 //
-// Der Sprachteil darf zwei oder drei Buchstaben haben: BCP-47 kennt beides und
-// "fil-PH" (Filipino) wäre mit der alten {2}-Prüfung als ungültige Region
-// abgewiesen worden, obwohl der Client sie anbietet.
-const VALID_REGION = /^(custom|[a-z]{2,3}-[A-Z]{2})$/;
+// Die Form kommt aus `isRegionTag` in utils/i18n.js und steht nicht mehr als
+// eigenes Literal hier: dieselbe Form wird beim Ableiten der Datensprache, beim
+// Zahlenformat und bei der Regionsabfrage GELESEN. Ein Muster, das nur hier
+// weiter wird, lässt einen Wert in die Datenbank, den keiner dieser Leser
+// wiedererkennt - er wäre gespeichert und zugleich wirkungslos.
+//
+// `custom` steht daneben und nicht darin: es ist kein Regions-Tag, sondern die
+// Abwesenheit einer Region, und genau deshalb liest es keiner der drei Leser.
+const isValidRegionValue = (value) => value === 'custom' || isRegionTag(value);
 const DEFAULT_TIME_FORMAT = '24h';
 
 // Zeitzone des Haushalts (#829, haushaltweit). Bis hierher war die einzige
@@ -227,7 +235,10 @@ const SCHEDULE_TEMPLATE_KEYS = ['work', 'school', 'university'];
 
 // Modul-Slugs, die per Settings deaktiviert werden können.
 // Dashboard und Settings sind absichtlich nicht enthalten — sie sind essentiell.
-const TOGGLEABLE_MODULES = [
+// Exportiert fuer test/test-disabled-module-reminders.js: jede Erinnerungs-
+// Herkunft muss auf einen dieser Schluessel zeigen, sonst erreicht der
+// Haushaltsschalter sie nie (#1279).
+export const TOGGLEABLE_MODULES = [
   'tasks', 'calendar', 'meals', 'recipes', 'shopping', 'pantry', 'inventory',
   'birthdays', 'notes', 'contacts', 'budget', 'documents',
   'housekeeping', 'waste', 'rewards', 'health', 'schedule',
@@ -379,6 +390,22 @@ function weatherUserOverride(userId) {
     units: cfgUserGet('weather_units', userId),
     auto_locate: autoRaw === null ? null : autoRaw === '1',
   };
+}
+
+// Woher das Wetter des HAUSHALTS kommt: 'db' (hier gespeichert), 'env'
+// (`WEATHER_*`/`OPENWEATHER_*` aus der `.env`, z. B. vom Web-Installer) oder
+// 'none'. Dieselbe Regel wie im Wetter-Proxy, damit die Admin-Seite nicht
+// "Nicht konfiguriert" sagt, waehrend das Dashboard Wetter zeigt. Der
+// Standort je Mitglied bleibt bewusst aussen vor - er ist keine
+// Haushaltseinstellung. Ein API-Key steht nie in der Antwort.
+function householdWeatherSource() {
+  return resolveWeatherSource({
+    provider: cfgGet('weather_provider'),
+    lat:      cfgGet('weather_lat'),
+    lon:      cfgGet('weather_lon'),
+    city:     cfgGet('weather_city'),
+    units:    cfgGet('weather_units'),
+  });
 }
 
 // --------------------------------------------------------
@@ -608,6 +635,10 @@ router.get('/', (req, res) => {
         // Modul-Feature-Schalter (haushaltweit). Default an: fehlender Wert =>
         // Feature aktiv, damit Bestandshaushalte ihr Verhalten behalten.
         ...healthCycleViews(req.authUserId),
+        // Betreuungs-Fan-out fuer Vorsorge-Erinnerungen (D6/Review #1256) -
+        // Opt-in wie cycle_settings.notify_partner_user_id: der Eigentuemer
+        // veroeffentlicht bewusst, es teilt nichts von selbst.
+        health_prevention_notify_caregivers: cfgUserGet('health_prevention_notify_caregivers', req.authUserId) === '1',
         rewards_require_approval: cfgGet('rewards_require_approval') !== '0',
         tasks_subtasks_expanded: cfgGet('tasks_subtasks_expanded') === '1',
         tasks_default_points: parseTaskDefaultPoints(cfgGet('tasks_default_points')),
@@ -624,6 +655,7 @@ router.get('/', (req, res) => {
         weather_units:    cfgGet('weather_units')    ?? 'metric',
         weather_auto_locate: cfgGet('weather_auto_locate') === '1',
         weather_user: weatherUserOverride(req.authUserId),
+        weather_source: householdWeatherSource(),
         holiday_country:       cfgGet('holiday_country')       ?? null,
         holiday_subdivision:   cfgGet('holiday_subdivision')   ?? null,
         holiday_group:         cfgGet('holiday_group')         ?? null,
@@ -654,7 +686,7 @@ router.get('/', (req, res) => {
 
 router.put('/', (req, res) => {
   try {
-    const { visible_meal_types, meal_type_names, currency, date_format, time_format, week_start, region, timezone, language, app_name, dashboard_widgets, dashboard_today_glance, dashboard_widgets_default, dashboard_today_glance_default, disabled_modules, hidden_modules, module_order, mobile_nav_order, housekeeping_payment_tasks, budget_mode, calendar_default_duration, calendar_default_reminders, calendar_default_assign_me, calendar_default_target, health_cycle_enabled, health_cycle_enabled_user, rewards_require_approval, tasks_subtasks_expanded, tasks_default_points, tasks_default_target, schedule_hidden_templates, countdown_grace_days, weather_provider, weather_lat, weather_lon, weather_city, weather_units, weather_auto_locate, weather_user, holiday_country, holiday_subdivision, holiday_group, holiday_show_public, holiday_show_school, holiday_public_color, holiday_school_color } = req.body;
+    const { visible_meal_types, meal_type_names, currency, date_format, time_format, week_start, region, timezone, language, app_name, dashboard_widgets, dashboard_today_glance, dashboard_widgets_default, dashboard_today_glance_default, disabled_modules, hidden_modules, module_order, mobile_nav_order, housekeeping_payment_tasks, budget_mode, calendar_default_duration, calendar_default_reminders, calendar_default_assign_me, calendar_default_target, health_cycle_enabled, health_cycle_enabled_user, health_prevention_notify_caregivers, rewards_require_approval, tasks_subtasks_expanded, tasks_default_points, tasks_default_target, schedule_hidden_templates, countdown_grace_days, weather_provider, weather_lat, weather_lon, weather_city, weather_units, weather_auto_locate, weather_user, holiday_country, holiday_subdivision, holiday_group, holiday_show_public, holiday_show_school, holiday_public_color, holiday_school_color } = req.body;
 
     // Welche Quickstart-Vorlagen der Schichtplan-Schnellstart zeigt - wie
     // disabled_modules haushaltweit und admin-only, nicht wie hidden_modules
@@ -764,7 +796,7 @@ router.put('/', (req, res) => {
       if (!isAdminRequest(req)) {
         return res.status(403).json({ error: 'Admin access required.', code: 403 });
       }
-      if (region !== null && (typeof region !== 'string' || !VALID_REGION.test(region))) {
+      if (region !== null && !isValidRegionValue(region)) {
         return res.status(400).json({ error: 'Ungültige Region.', code: 400 });
       }
       cfgSet('region', region ?? '');
@@ -909,7 +941,12 @@ router.put('/', (req, res) => {
       const filtered = disabled_modules
         .filter((m) => typeof m === 'string' && TOGGLEABLE_MODULES.includes(m));
       const unique = [...new Set(filtered)];
-      cfgSet('disabled_modules', JSON.stringify(unique));
+      const healthChanged = parseDisabledModules(cfgGet('disabled_modules')).includes('health')
+        !== unique.includes('health');
+      db.transaction(() => {
+        cfgSet('disabled_modules', JSON.stringify(unique));
+        if (healthChanged) syncAllFastingReminders(db.get());
+      });
     }
 
     // Persoenlich ausgeblendete Module (#673) - bewusst OHNE Admin-Check, das ist
@@ -1050,6 +1087,19 @@ router.put('/', (req, res) => {
       cfgUserSet('health_cycle_enabled', req.authUserId, health_cycle_enabled_user ? '1' : '0');
     }
 
+    // Betreuungs-Fan-out fuer Vorsorge-Erinnerungen (D6/Review #1256) - Opt-in,
+    // Standard aus. Wirkt sofort: derselbe Sync, den caregivers.js nach einer
+    // Betreuungs-Aenderung anstoesst, nicht erst der naechste periodische Lauf.
+    if (health_prevention_notify_caregivers !== undefined) {
+      if (typeof health_prevention_notify_caregivers !== 'boolean') {
+        return res.status(400).json({ error: 'health_prevention_notify_caregivers must be a boolean', code: 400 });
+      }
+      cfgUserSet('health_prevention_notify_caregivers', req.authUserId, health_prevention_notify_caregivers ? '1' : '0');
+      try { syncPreventionRemindersForSubject(db.get(), req.authUserId); } catch (err) {
+        log.error('Error syncing prevention reminders after notify_caregivers change:', err.message);
+      }
+    }
+
     if (rewards_require_approval !== undefined) {
       if (!isAdminRequest(req)) {
         return res.status(403).json({ error: 'Admin access required.', code: 403 });
@@ -1113,14 +1163,21 @@ router.put('/', (req, res) => {
         if (weather_provider === null) cfgDelete('weather_provider');
         else cfgSet('weather_provider', weather_provider);
       }
-      if (weather_lat !== undefined) {
+      // `null` loescht die Koordinaten des Haushalts. Ohne das blieben sie beim
+      // Entfernen des Anbieters liegen, und der Proxy nahm sie weiter - die
+      // `.env`-Werte kamen nie wieder zum Zug.
+      if (weather_lat === null) {
+        cfgDelete('weather_lat');
+      } else if (weather_lat !== undefined) {
         const v = parseFloat(weather_lat);
         if (isNaN(v) || v < -90 || v > 90) {
           return res.status(400).json({ error: 'Ungültiger Breitengrad (–90 bis 90).', code: 400 });
         }
         cfgSet('weather_lat', String(v));
       }
-      if (weather_lon !== undefined) {
+      if (weather_lon === null) {
+        cfgDelete('weather_lon');
+      } else if (weather_lon !== undefined) {
         const v = parseFloat(weather_lon);
         if (isNaN(v) || v < -180 || v > 180) {
           return res.status(400).json({ error: 'Ungültiger Längengrad (–180 bis 180).', code: 400 });
@@ -1326,6 +1383,10 @@ router.put('/', (req, res) => {
         calendar_default_assign_me: cfgUserGet('calendar_default_assign_me', req.authUserId) === '1',
         calendar_default_target: cfgUserGet('calendar_default_target', req.authUserId) || '',
         ...healthCycleViews(req.authUserId),
+        // Betreuungs-Fan-out fuer Vorsorge-Erinnerungen (D6/Review #1256) -
+        // Opt-in wie cycle_settings.notify_partner_user_id: der Eigentuemer
+        // veroeffentlicht bewusst, es teilt nichts von selbst.
+        health_prevention_notify_caregivers: cfgUserGet('health_prevention_notify_caregivers', req.authUserId) === '1',
         rewards_require_approval: cfgGet('rewards_require_approval') !== '0',
         tasks_subtasks_expanded: cfgGet('tasks_subtasks_expanded') === '1',
         tasks_default_points: parseTaskDefaultPoints(cfgGet('tasks_default_points')),

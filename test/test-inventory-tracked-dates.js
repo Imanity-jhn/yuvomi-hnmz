@@ -23,6 +23,10 @@ const dbmod = await import('../server/db.js');
 const { default: itemsRouter } = await import('../server/routes/inventory/items.js');
 const { default: remindersRouter } = await import('../server/routes/reminders.js');
 const db = dbmod.get();
+// Das Inventar ist standardmaessig abgeschaltet (Migration 145), und seit #1279
+// liefert GET /reminders/pending keine Zeile eines abgeschalteten Moduls mehr aus.
+// Diese Suite prueft ein Inventar, das der Haushalt benutzt - also ist es an.
+db.prepare("INSERT INTO sync_config (key, value) VALUES ('disabled_modules', '[]') ON CONFLICT(key) DO UPDATE SET value = excluded.value").run();
 
 const A = db.prepare("INSERT INTO users (username, display_name, password_hash, role) VALUES ('a','A','x','member')").run().lastInsertRowid;
 
@@ -147,6 +151,25 @@ test('DELETE /items/:id räumt Fristen und ihre Erinnerungen ab', async () => {
   assert.equal(deleted.status, 204);
   assert.equal(trackedDateReminders(dateId).length, 0);
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM inventory_item_dates WHERE item_id = ?').get(created.body.data.id).c, 0);
+});
+
+test('POST mit interval_months/interval_distance legt beide Felder mit an, weggelassen bleiben sie NULL', async () => {
+  const r = await call('POST', '/items', {
+    body: {
+      name: 'Auto', category: 'vehicles',
+      tracked_dates: [
+        { label: 'HU/TÜV', date: FUTURE_DATE, interval_months: 24, interval_distance: 15000 },
+        { label: 'Einmalig', date: FUTURE_DATE },
+      ],
+    },
+  });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  const tuv = r.body.data.tracked_dates.find((d) => d.label === 'HU/TÜV');
+  const once = r.body.data.tracked_dates.find((d) => d.label === 'Einmalig');
+  assert.equal(tuv.interval_months, 24);
+  assert.equal(tuv.interval_distance, 15000);
+  assert.equal(once.interval_months, null, 'ohne Angabe bleibt es das heutige Einmal-Verhalten');
+  assert.equal(once.interval_distance, null);
 });
 
 test('GET /reminders/pending löst den Titel für inventory_tracked_date über den Join auf', async () => {

@@ -39,6 +39,7 @@ const STUBS = {
       put: async (...a) => viaStub('put', a, { data: null }),
       patch: async (...a) => viaStub('patch', a, { data: null }),
       delete: async (...a) => viaStub('delete', a, { data: null }),
+      rawPost: async (...a) => viaStub('rawPost', a, { data: null }),
     };
     export const auth = {
       me: async () => ({ user: null }),
@@ -81,12 +82,42 @@ const STUBS = {
     export const getFormatLocale = () => globalThis.__formatLocale ?? 'de';
     export const getNumberFormat = (options = {}) =>
       new Intl.NumberFormat(globalThis.__formatLocale ?? 'de', options);
+    // Wert mit Einheit: das Wort aus der UI-Sprache (__locale), die Zahl aus der
+    // Region (__formatLocale) - dieselbe Rechnung wie formatUnit() in
+    // public/i18n.js. Ein Nachbau, weil das Original die Sprache aus seinem
+    // eigenen Modulzustand liest und nicht aus __locale. Damit er nicht still
+    // auseinanderlaeuft, fuehrt test:region-presets Original und Stub ueber
+    // dieselben Sprach- und Regionspaare.
+    export const formatUnit = (value, unit, options = {}) => {
+      const { unitDisplay, ...digits } = options;
+      const parts = new Intl.NumberFormat(globalThis.__locale ?? 'de', {
+        ...digits, style: 'unit', unit, unitDisplay,
+      }).formatToParts(value);
+      const numeric = (part) => ['minusSign', 'plusSign', 'integer', 'group', 'decimal', 'fraction'].includes(part.type);
+      let first = parts.findIndex(numeric);
+      if (first === -1) return parts.map((part) => part.value).join('');
+      const last = parts.findLastIndex(numeric);
+      while (first > 0 && parts[first - 1].type === 'literal'
+        && /^[\\u061c\\u200e\\u200f]+$/.test(parts[first - 1].value)) first--;
+      return [
+        ...parts.slice(0, first).map((part) => part.value),
+        new Intl.NumberFormat(globalThis.__formatLocale ?? 'de', digits).format(value),
+        ...parts.slice(last + 1).map((part) => part.value),
+      ].join('');
+    };
     export const getSupportedLocales = () => ['de', 'en'];
     export const formatDate = (d) => String(d);
-    export const formatDayMonth = (d) => String(d);
+    // Tag+Monat und volles Datum sehen im Stub gleich aus. Wer pruefen will,
+    // WELCHES von beiden gerufen wurde (relativeDateLabel), setzt
+    // globalThis.__formatDayMonth - dasselbe Muster wie __locale.
+    export const formatDayMonth = (d) => (globalThis.__formatDayMonth ?? String)(d);
     export const formatTime = (d) => String(d);
     export const getTimeFormat = () => '24h';
-    export const timeSuffix = () => '';
+    // Das Uhrzeit-Suffix der Locale („Uhr"): leer wie in den meisten Sprachen,
+    // ausser ein Test setzt globalThis.__timeSuffix - dasselbe Muster wie
+    // __locale. So laesst sich pruefen, WO es steht, nicht nur, dass nichts
+    // steht.
+    export const timeSuffix = () => globalThis.__timeSuffix ?? '';
     export const dateInputPlaceholder = () => 'YYYY-MM-DD';
     export const formatDateInput = (d) => String(d ?? '');
     export const parseDateInput = (d) => String(d ?? '');
@@ -97,21 +128,60 @@ const STUBS = {
   `,
   '/rrule-ui.js': `
     export const renderRRuleFields = () => '';
-    export const bindRRuleEvents = () => {};
-    export const getRRuleValues = () => ({});
+    // Dieselbe Form wie das Original, das immer { refreshMonthdayHint }
+    // zurueckgibt: der Kalender-Dialog haengt es an sein Startdatum, und ein
+    // leerer Rueckgabewert liess jede Suite sterben, die wireEventForm FAEHRT.
+    export const bindRRuleEvents = () => ({ refreshMonthdayHint: () => {} });
+    // Das leere Objekt ist fuer jede Suite richtig, die nur das MARKUP prueft -
+    // aber es hat kein 'valid_until', und jeder Formular-Handler, der die
+    // Wiederholung mitliest, bricht damit sofort mit "invalidDate" ab. Suiten,
+    // die einen Handler wirklich FAHREN, setzen globalThis.__rruleValues -
+    // dasselbe Muster wie __apiStub in /api.js.
+    export const getRRuleValues = () => globalThis.__rruleValues ?? ({});
     export const describeRRule = () => '';
     export const recurrenceRow = () => ({ icon: 'repeat', label: '', value: '' });
     export const intervalUnitLabel = () => '';
   `,
   '/components/modal.js': `
     export const openModal = (...args) => globalThis.__openModal?.(...args);
-    export const closeModal = () => {};
-    export const confirmModal = async () => true;
+    // Suiten, die pruefen wollen, OB und WANN ein Handler schliesst (das
+    // Formular bleibt nach einem Abbrechen offen), setzen globalThis.__closeModal.
+    // Liefert, was der Haken liefert: das Original sagt mit false, dass das
+    // Verwerfen abgelehnt wurde und der Dialog stehen bleibt.
+    export const closeModal = async (...args) => globalThis.__closeModal?.(...args);
+    // Wer die Rueckfrage selbst sehen will (Titel, Optionen, Antwort), setzt
+    // globalThis.__confirmModal - dasselbe Muster wie __apiStub in /api.js.
+    export const confirmModal = async (...args) => (
+      typeof globalThis.__confirmModal === 'function' ? globalThis.__confirmModal(...args) : true
+    );
     export const confirmOverModal = async (...args) => globalThis.__confirmOverModal?.(...args) ?? true;
+    // Wer ein VERZOEGERTES Schliessen nachstellt (mobil: Animation bis 400 ms),
+    // setzt globalThis.__whenModalClosed; ohne das ist das Modal sofort zu.
+    export const whenModalClosed = async (...args) => globalThis.__whenModalClosed?.(...args);
+    // Wie das Original ohne offenes Modal: ask() oeffnet den Dialog (ueber
+    // openModal, also __openModal) und liefert die Antwort. Wer sehen will,
+    // DASS eine Frage ueber dem Formular gestellt wird statt es zu ersetzen,
+    // setzt globalThis.__askOverModal und bekommt ask in die Hand.
+    export const askOverModal = async (ask) => (
+      typeof globalThis.__askOverModal === 'function' ? globalThis.__askOverModal(ask) : ask()
+    );
     export const selectModal = async () => null;
-    export const advancedSection = (inner = '') => String(inner);
+    // Wer wissen will, OB ein Abschnitt aufgeklappt aufgeht, setzt
+    // globalThis.__advancedSection und bekommt Inhalt UND Optionen - die
+    // Entscheidung trifft der Aufrufer, und hier kaeme sie sonst nie an.
+    export const advancedSection = (inner = '', options = {}) => (
+      typeof globalThis.__advancedSection === 'function'
+        ? globalThis.__advancedSection(inner, options)
+        : String(inner)
+    );
     export const wireBlurValidation = () => {};
-    export const reportFieldError = () => false;
+    // Suiten, die pruefen wollen, WO ein Handler einen Fehler meldet (statt zu
+    // speichern), setzen globalThis.__reportFieldError - dasselbe Muster wie
+    // __apiStub in /api.js. Ohne das bleibt es beim stummen false.
+    export const reportFieldError = (...args) => {
+      globalThis.__reportFieldError?.(...args);
+      return false;
+    };
     export const mountFooter = () => null;
     export const refreshDirtySnapshot = () => {};
     export const captureModalContext = () => globalThis.__modalContextId?.() ?? 'test-modal-context';
@@ -124,15 +194,33 @@ const STUBS = {
     export const updateHeaderAction = () => null;
     export const validateAll = () => true;
     export const promptModal = async (...args) => globalThis.__promptModal?.(...args) ?? null;
-    export const btnLoading = () => {};
+    // Gibt eine FUNKTION zurueck wie das Original - der Aufrufer haelt sie als
+    // stop() fest und ruft sie im Fehlerpfad. Ein leeres Objekt hier liess jeden
+    // Test sterben, der genau diesen Pfad faehrt, und zwar an einem TypeError
+    // statt an der Sache, die er messen wollte. Den Knopfzustand baut der Stub
+    // bewusst NICHT nach: wer ihn pruefen will, wuerde sonst den Stub messen.
+    export const btnLoading = () => () => {};
     export const btnSuccess = () => {};
     export const btnError = () => {};
     export const refocusAfterRender = () => {};
     export const renderKeepingFocus = (render) => { render(); return null; };
     export const forgetRestore = () => {};
+    // Die Fokus-Merker der Detailansicht (Popover): ohne Browser nichts zu merken.
+    export const rememberFocus = () => null;
+    export const restoreFocusAfterClose = () => {};
   `,
   '/components/detail-view.js': `
-    export const openDetailView = () => ({ update: () => true, isOpen: () => true });
+    // Tests, die pruefen wollen, WELCHE Bedienelemente ein Aufrufer anbietet -
+    // die Statusknoepfe der Aufgaben-Leseansicht etwa -, setzen
+    // globalThis.__openDetailView und bekommen die Optionen in die Hand,
+    // dasselbe Muster wie __apiStub in /api.js. Ohne das bleibt es beim stummen
+    // Rueckgabewert wie bisher. Ein Guard ueber den QUELLTEXT der Ansicht
+    // taete es hier nicht: er sieht eine Aktionsliste, die gebaut wird, nicht
+    // eine, die auch bei diesem Status herauskommt.
+    export const openDetailView = (options) => {
+      globalThis.__openDetailView?.(options);
+      return { update: () => true, isOpen: () => true };
+    };
     export const closeDetailView = () => {};
     export const detailRowEl = () => null;
     export const visibilityRow = () => ({ icon: 'users', label: '', value: '' });
@@ -149,6 +237,13 @@ const STUBS = {
     // Im Test gibt es keine Animation, die ausspielen koennte - der Aufrufer
     // awaitet das Ergebnis, also loest der Stub sofort auf.
     export const animationSettled = () => Promise.resolve();
+    // Austritt und Aufziehen (Abhaken, Gruppen) - ohne Layout gibt es nichts
+    // zu bewegen, der Aufrufer wartet nur auf das Ende.
+    export const collapseOut = () => Promise.resolve();
+    export const expandIn = () => Promise.resolve();
+    // Token-Leser ohne Stylesheet: der Rueckfall ist der Wert (utils/flip.js).
+    export const durationToken = (name, fallback) => fallback;
+    export const easingToken = (name, fallback = 'ease-out') => fallback;
   `,
   '/utils/html.js': `
     export const esc = (value) => String(value ?? '')
@@ -158,7 +253,31 @@ const STUBS = {
       .replaceAll('"', '&quot;')
       .replaceAll("'", '&#039;');
     export const fmtLocation = (value) => String(value ?? '');
-    export const renderMarkdownLight = (value) => String(value ?? '');
+    // Wie __renderUserMultiSelect weiter unten: Suiten, die pruefen wollen, WAS
+    // ein Aufrufer dem Markdown-Renderer uebergibt (die Checklisten-Optionen
+    // etwa), setzen globalThis.__renderMarkdownLight. Ohne das bleibt es beim
+    // durchgereichten Text wie bisher - der Stub soll nicht die halbe
+    // Markdown-Umschrift nachbauen.
+    export const renderMarkdownLight = (value, options) => (
+      typeof globalThis.__renderMarkdownLight === 'function'
+        ? globalThis.__renderMarkdownLight(value, options)
+        : String(value ?? '')
+    );
+  `,
+  '/utils/sortable.js': `
+    // Suiten, die pruefen wollen, WORAUF eine Seite das Ziehen ueberhaupt
+    // einhaengt, setzen globalThis.__sortableCalls auf ein Array und bekommen
+    // je Aufruf das Element und die Optionen - dasselbe Muster wie __apiStub in
+    // /api.js. Der Riegel, den das misst, ist nicht im Markup zu sehen: eine
+    // Ablegezone, die gar nicht erst verdrahtet wird, sieht im HTML aus wie
+    // jede andere.
+    export const isDragActive = () => false;
+    export const makeSortable = async (listEl, opts) => {
+      if (Array.isArray(globalThis.__sortableCalls)) {
+        globalThis.__sortableCalls.push({ el: listEl, opts });
+      }
+      return { destroy() {} };
+    };
   `,
   '/reminders.js': `
     export const refresh = async () => {};
@@ -167,7 +286,9 @@ const STUBS = {
     // Tests, die das Markup einer Personen-Auswahl pruefen, setzen
     // globalThis.__renderUserMultiSelect (etwa auf die echte Komponente).
     export const renderUserMultiSelect = (...args) => globalThis.__renderUserMultiSelect?.(...args) ?? '';
-    export const getSelectedUserIds = () => [];
+    // Suiten, die einen Formular-Handler mit gewaehlten Personen FAHREN, setzen
+    // globalThis.__getSelectedUserIds; ohne das bleibt es bei niemandem.
+    export const getSelectedUserIds = (...args) => globalThis.__getSelectedUserIds?.(...args) ?? [];
     export const bindUserMultiSelect = () => {};
     export const renderAvatarStack = () => '';
   `,

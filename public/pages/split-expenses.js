@@ -5,16 +5,23 @@
 
 import { api } from '/api.js';
 import { openModal as openSharedModal, closeModal, confirmModal, confirmOverModal, reportFieldError, refocusAfterRender } from '/components/modal.js';
-import { renderDocumentAttachField, bindDocumentAttachField } from '/components/document-attach.js';
-import { t, formatDate, getLocale, dateInputPlaceholder, parseDateInput, isDateInputValid } from '/i18n.js';
+import { renderDocumentAttachField, bindDocumentAttachField, attachmentLinksNode } from '/components/document-attach.js';
+import { openDetailView } from '/components/detail-view.js';
+import { t, formatDate, getLocale, getNumberFormat, dateInputPlaceholder, parseDateInput, isDateInputValid } from '/i18n.js';
 import { esc } from '/utils/html.js';
+import { installPopoverMenus } from '/utils/popover-menu.js';
+import { renderPageSearch, wirePageSearch } from '/utils/page-search.js';
 import { stagger } from '/utils/ux.js';
 import { renderSkeletonList } from '/utils/skeleton.js';
 import { formatMoney, amountPlaceholder, toDecimalString, amountIsSavable, smallestUnitLabel } from '/utils/money.js';
 import { todayKey } from '/utils/date.js';
+import { zonedDateKey } from '/utils/timezone.js';
 import { wireTablist } from '/utils/tablist.js';
+import { attachSegmentIndicator } from '/utils/segment-indicator.js';
 import { findPageFab } from '/utils/fab.js';
 import { emptyStateHTML } from '/utils/empty-state.js';
+import { metricGlanceHtml, wireMetricGlance } from '/utils/metric-glance.js';
+import { isNavModuleReadOnly } from '/permissions.js';
 
 let state = {
   meta: null,
@@ -27,6 +34,13 @@ let state = {
   expenses: [],
   balances: { balances: [], simplified_debts: [] },
   activity: [],
+  // Verlauf seitenweise (#1309): der Cursor der naechsten Seite, wie ihn der
+  // Server in `pagination.next_cursor` liefert (null = alles geladen), und die
+  // Gruppe, zu der `activity` gehoert - nur innerhalb DERSELBEN Gruppe bleibt
+  // die geladene Tiefe bei einem Neuladen erhalten.
+  activityCursor: null,
+  activityGroupId: null,
+  activityLoadingMore: false,
   query: '',
   category: '',
   // Statusfilter der Gruppenliste (#574): 'archived' zeigt das Archiv
@@ -59,6 +73,28 @@ export function prefillSplitExpense(data) {
   _pendingPrefill = data ?? null;
 }
 let _statusTablist = null;   // wireTablist-Handle des Statusfilters (sync ohne onChange)
+// Eingebettet meldet die Seite dem Budget-Kopf, wenn sich aendert, ob eine neue
+// Ausgabe gerade moeglich ist (Archiv an/aus) - der Kopfknopf gehoert budget.js.
+let _onAddableChange = null;
+
+/**
+ * Darf dieser Nutzer hier schreiben? (#467, #1265 P7)
+ *
+ * `budget`, nicht ein eigenes Modul: `server/scopes.js` fuehrt
+ * `split-expenses` als zweiten Praefix von `budget`, und die Rechte kennen
+ * keinen Schluessel `split-expenses` - eine Frage danach fiele still auf
+ * `write` (die Falle, in die `birthdays.js` in P1 lief). Dasselbe gilt fuer
+ * einen Gast: auch seine Schreibwege misst der Server an `budget`.
+ *
+ * NICHT zu verwechseln mit dem Archiv (`isArchivedView()`): das ist eine
+ * Eigenschaft der GRUPPE, dies eine des NUTZERS. Beide fuehren zur selben
+ * Leseansicht, aber aus verschiedenen Gruenden - und nur das Archiv bietet
+ * „Wiederherstellen" an, weil das dort ein Schreibrecht voraussetzt, das
+ * der Nutzer hat.
+ */
+function readOnly() {
+  return isNavModuleReadOnly('budget');
+}
 
 function setHtml(element, html) {
   element.replaceChildren();
@@ -86,9 +122,10 @@ function groupIcon(type) {
   }[type] || 'users';
 }
 
-export async function render(container, { user, embedded = false } = {}) {
+export async function render(container, { user, embedded = false, onAddableChange = null } = {}) {
   _container = container;
   _embedded = embedded;
+  _onAddableChange = onAddableChange;
   state.user = user || null;
   // `split`, nicht `reading`: Kopf und Kennzahlenband stehen ueber einem
   // zweispaltigen .split-layout (Gruppen links, Detail rechts) - das IST die
@@ -97,46 +134,61 @@ export async function render(container, { user, embedded = false } = {}) {
   // das Shell-Raster wirkt nur auf .app-page__body, den es hier nicht gibt.
   //
   // EINGEBETTET (budget.js ruft immer mit embedded:true - es gibt heute keine
-  // eigenstaendige Route) TRAEGT DIE UEBERSCHRIFT KEIN ZWEITES <h1>: der
-  // Modulkopf sagt bereits "Budget" (Cross-Modul-Review). Die Budget-Seiten-
-  // CSS behandelte den Split-Titel dort eingebettet schon laenger als
-  // Bereichs-Ueberschrift (typography.css) - das Element selbst blieb bis
-  // hierher ein <h1> und widersprach damit seiner eigenen Rolle. Aus demselben
-  // Grund traegt der Knopf hier --secondary statt --primary: die Primaeraktion ist der FAB
-  // (#split-fab, siehe unten), nicht zwei violette Knoepfe fuer dieselbe
-  // Handlung. Unveraendert bleibt die (heute nicht erreichte) eigenstaendige
-  // Zukunft: <h1> plus Primaerknopf, falls Split-Ausgaben je eine eigene
-  // Navigationsebene bekommt (DESIGN.md, Q-3).
-  const TitleTag = embedded ? 'h2' : 'h1';
-  const addExpenseBtnVariant = embedded ? 'btn--secondary' : 'btn--primary';
-  setHtml(container, `
-    <div class="split-page app-page app-page--split" data-composition="split">
-      <header class="panel-head split-topbar">
+  // eigenstaendige Route) TRAEGT DAS PANEL KEINEN EIGENEN KOPF MEHR
+  // (Critique 2026-09-25): hier standen ein zweiter Seitentitel („Gemeinsame
+  // Ausgaben"), eine Beschreibung und ein Sekundaerknopf, obwohl der Tab
+  // „Aufteilung" heisst und der Budget-Kopf die Seite schon benennt. Der Tab-
+  // Name bleibt der EINE Begriff; die Ueberschrift steht fuer die Gliederung
+  // als sr-only-<h2> (Budget > Aufteilung > Gruppe > Abschnitt), wie Konten und
+  // Darlehen. „Ausgabe hinzufuegen" ist der FAB des Budgets (#fab-new-budget,
+  // TAB_CAPS) - mobil schwebend, am Desktop in den Budget-Kopf gedockt, statt
+  // dass ein eigener #split-fab ueber „87,50 €" schwebt. Unveraendert bleibt die (heute nicht erreichte)
+  // eigenstaendige Zukunft: <h1>, Beschreibung, Primaerknopf und eigener FAB.
+  const head = embedded
+    ? `<h2 class="sr-only">${t('splitExpenses.tabLabel')}</h2>`
+    : `<header class="panel-head split-topbar">
         <div>
-          <${TitleTag} class="split-title">${t('splitExpenses.title')}</${TitleTag}>
+          <h1 class="split-title">${t('splitExpenses.title')}</h1>
           <p class="split-subtitle">${t('splitExpenses.subtitle')}</p>
         </div>
-        <button class="btn ${addExpenseBtnVariant}" id="split-add-expense">
+        ${readOnly() ? '' : `<button class="btn btn--primary" id="split-add-expense">
           <i data-lucide="plus" class="icon-md" aria-hidden="true"></i>
           ${t('splitExpenses.addExpense')}
-        </button>
-      </header>
-      <section class="metric-grid" id="split-summary"></section>
+        </button>`}
+      </header>`;
+  const fab = embedded ? '' : `
+      <button class="page-fab" id="split-fab" aria-label="${t('splitExpenses.addExpense')}" data-dock-label="${t('newLabel.splitExpenses')}">
+        <i data-lucide="plus" class="icon-xl" aria-hidden="true"></i>
+      </button>`;
+  setHtml(container, `
+    <div class="split-page app-page app-page--split" data-composition="split">
+      ${head}
+      <!-- Mobil EINE Zeile statt drei Karten (R14 P1): die Glance-Zeile
+           klappt die Kennzahl-Zeile auf (metric-glance.js, budget.css). -->
+      <div id="split-glance"></div>
+      <section class="metric-grid budget-glance-details" id="split-summary"></section>
       <div class="split-layout">
         <aside class="split-groups-panel">
-          <div class="split-panel-head">
-            <div class="split-panel-title">${t('splitExpenses.groups')}</div>
-            <button class="btn btn--icon" id="split-add-group" aria-label="${t('splitExpenses.addGroup')}" ${isSplitGuest() ? 'hidden' : ''}>
+          <!-- Das geteilte Suchfeld (gefuellte Kapsel) statt eines eigenen mit
+               sichtbarem Label darueber, das nur den Platzhalter wiederholte
+               (Komponenten-Kanon, Critique 2026-09-26 P1). Es steht IM Kopf
+               der Liste, die es filtert (.section-toolbar wie das Hauptbuch,
+               R14 P1): mobil in seiner Icon-Form statt einer eigenen 48px-Zeile
+               vor der ersten Gruppe. -->
+          <div class="split-panel-head section-toolbar">
+            <div class="split-panel-title">${t('splitExpenses.groups')}<span class="list-group__count split-panel-count" id="split-group-count"></span></div>
+            ${renderPageSearch({
+    id: 'split-group-search',
+    label: t('splitExpenses.searchGroups'),
+    placeholder: t('splitExpenses.searchGroups'),
+    value: state.query,
+    clearLabel: t('common.searchClear'),
+    className: 'split-search',
+  })}
+            ${readOnly() ? '' : `<button class="btn btn--icon" id="split-add-group" aria-label="${t('splitExpenses.addGroup')}" ${isSplitGuest() ? 'hidden' : ''}>
               <i data-lucide="plus" aria-hidden="true"></i>
-            </button>
+            </button>`}
           </div>
-          <label class="split-search" for="split-group-search">
-            <span class="split-search__label">${t('splitExpenses.searchGroups')}</span>
-            <span class="split-search__control">
-              <i data-lucide="search" aria-hidden="true"></i>
-              <input id="split-group-search" type="search" placeholder="${t('splitExpenses.searchGroups')}" autocomplete="off">
-            </span>
-          </label>
           <!-- Geteilter Umschalter-Baustein des Budget-Moduls statt eigener
                Pillen-Optik, und role="radiogroup" statt role="group": eine
                Einfachauswahl, die ihren Zustand ansagt und über die geteilte
@@ -152,13 +204,12 @@ export async function render(container, { user, embedded = false } = {}) {
           <div class="split-groups" id="split-groups"></div>
         </aside>
         <main class="split-main" id="split-main" aria-busy="true">${renderSkeletonList({ rows: 5, lines: 2 })}</main>
-      </div>
-      <button class="page-fab" id="split-fab" aria-label="${t('splitExpenses.addExpense')}" data-dock-label="${t('newLabel.splitExpenses')}">
-        <i data-lucide="plus" class="icon-xl" aria-hidden="true"></i>
-      </button>
+      </div>${fab}
     </div>
   `);
   if (window.lucide) lucide.createIcons({ el: _container });
+  // Eingebettet verdrahtet budget.js die Menues an seiner Seitenwurzel.
+  if (!embedded) installPopoverMenus(_container);
   await loadInitial();
   bindShell();
   renderAll();
@@ -184,8 +235,16 @@ async function loadInitial() {
   state.dashboard = dashboard.data;
   state.groups = groups.data || [];
   state.members = members?.data || [];
-  state.activeGroupId = state.groups[0]?.id || null;
+  // Sprungziel von aussen (Dashboard-Kachel „Ausgleich offen"): ?group= oeffnet
+  // die Gruppe, in der die genannte Position steht - sonst die erste wie bisher.
+  state.activeGroupId = groupFromQuery(window.location.search, state.groups) ?? state.groups[0]?.id ?? null;
   if (state.activeGroupId) await loadGroupData();
+}
+
+/** Gruppe aus `?group=` - nur eine, die in der geladenen Liste steht. */
+function groupFromQuery(search, groups) {
+  const id = Number(new URLSearchParams(search || '').get('group'));
+  return Number.isInteger(id) && id > 0 && groups.some((g) => g.id === id) ? id : null;
 }
 
 function isSplitGuest() {
@@ -200,25 +259,125 @@ async function loadGroups() {
   }
 }
 
+// Seitengroesse des Verlaufs. Die Obergrenze des Servers ist 100; beim
+// Nachholen einer schon geladenen Tiefe fragt fetchActivity so viel auf einmal.
+const ACTIVITY_PAGE = 12;
+const ACTIVITY_MAX_PAGE = 100;
+
+// Zaehlt jedes Laden der Gruppendaten. Eine Antwort, die zu einem aelteren
+// Stand gehoert (Gruppenwechsel, Neuladen nach einem Storno), wird verworfen
+// statt angehaengt - sonst landeten Eintraege der alten Gruppe unter der neuen.
+let _activityGeneration = 0;
+
+function activityPath(groupId, limit, cursor = null) {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (cursor) {
+    params.set('before_at', cursor.before_at);
+    params.set('before_id', String(cursor.before_id));
+  }
+  return `/split-expenses/groups/${groupId}/activity?${params}`;
+}
+
+const nextActivityCursor = (res) => (res?.pagination?.has_more ? res.pagination.next_cursor ?? null : null);
+
+/** Liegt `item` in der Reihenfolge des Servers (created_at absteigend, id aufsteigend) bei oder hinter `tail`? */
+function atOrPast(item, tail) {
+  if (item.created_at !== tail.created_at) return item.created_at < tail.created_at;
+  return item.id >= tail.id;
+}
+
+/**
+ * Laedt den Verlauf von vorn. Mit `tail` (dem bisher letzten geladenen
+ * Eintrag) wird weitergeblaettert, bis er wieder erreicht ist: ein Neuladen in
+ * derselben Gruppe - etwa nach einem Storno weit unten - behaelt die Tiefe, statt
+ * auf die erste Seite zurueckzufallen und den Eintrag, an dem gerade gehandelt
+ * wurde, aus dem Blick zu nehmen. Doppelte IDs fallen heraus, falls sich
+ * zwischen zwei Seiten etwas verschoben hat.
+ */
+async function fetchActivity(groupId, { depth = ACTIVITY_PAGE, tail = null } = {}) {
+  const first = await api.get(activityPath(groupId, Math.min(Math.max(depth, ACTIVITY_PAGE), ACTIVITY_MAX_PAGE)));
+  const items = [...(first.data || [])];
+  let cursor = nextActivityCursor(first);
+  while (tail && cursor && !(items.length && atOrPast(items[items.length - 1], tail))) {
+    // eslint-disable-next-line no-await-in-loop
+    const more = await api.get(activityPath(groupId, ACTIVITY_MAX_PAGE, cursor));
+    const seen = new Set(items.map((item) => item.id));
+    items.push(...(more.data || []).filter((item) => !seen.has(item.id)));
+    cursor = nextActivityCursor(more);
+  }
+  return { items, cursor };
+}
+
 async function loadGroupData() {
+  const generation = ++_activityGeneration;
+  state.activityLoadingMore = false;
   if (!state.activeGroupId) {
     state.expenses = [];
     state.balances = { balances: [], simplified_debts: [] };
     state.activity = [];
+    state.activityCursor = null;
+    state.activityGroupId = null;
     return;
   }
+  const groupId = state.activeGroupId;
+  // Dieselbe Gruppe: die geladene Tiefe bleibt. Eine andere: erste Seite.
+  const sameGroup = state.activityGroupId === groupId && state.activity.length > 0;
+  const activityRequest = sameGroup
+    ? { depth: state.activity.length + 1, tail: state.activity[state.activity.length - 1] }
+    : {};
   const params = new URLSearchParams();
   if (state.category) params.set('category', state.category);
   const [expenses, balances, activity, groupMembers] = await Promise.all([
-    api.get(`/split-expenses/groups/${state.activeGroupId}/expenses?${params.toString()}`),
-    api.get(`/split-expenses/groups/${state.activeGroupId}/balances`),
-    api.get(`/split-expenses/groups/${state.activeGroupId}/activity?limit=12`),
-    api.get(`/split-expenses/groups/${state.activeGroupId}/members`),
+    api.get(`/split-expenses/groups/${groupId}/expenses?${params.toString()}`),
+    api.get(`/split-expenses/groups/${groupId}/balances`),
+    fetchActivity(groupId, activityRequest),
+    api.get(`/split-expenses/groups/${groupId}/members`),
   ]);
+  // Ein spaeteres Laden hat inzwischen begonnen: dessen Stand gilt, nicht dieser.
+  if (generation !== _activityGeneration) return;
   state.expenses = expenses.data || [];
   state.balances = balances.data || { balances: [], simplified_debts: [] };
-  state.activity = activity.data || [];
+  state.activity = activity.items;
+  state.activityCursor = activity.cursor;
+  state.activityGroupId = groupId;
   state.groupMembers = groupMembers.data || [];
+}
+
+/**
+ * "Mehr laden" im Verlauf (#1309): die naechste Seite hinter dem Cursor,
+ * angehaengt an das Geladene. Ein zweiter Klick, waehrend eine Seite unterwegs
+ * ist, tut nichts. Kommt die Antwort erst nach einem Gruppenwechsel oder einem
+ * Neuladen an, gehoert sie zu einem Stand, den es nicht mehr gibt, und wird
+ * verworfen. Lesen ist keine Handlung - der Knopf steht bei jedem Recht und im
+ * Archiv.
+ */
+async function loadMoreActivity() {
+  const cursor = state.activityCursor;
+  const groupId = state.activeGroupId;
+  if (!cursor || !groupId || state.activityLoadingMore) return;
+  const generation = _activityGeneration;
+  state.activityLoadingMore = true;
+  const hadFocus = typeof document !== 'undefined'
+    && document.activeElement?.matches?.('[data-activity-more]');
+  renderActivityBox({ keepFocus: hadFocus });
+  let res;
+  try {
+    res = await api.get(activityPath(groupId, ACTIVITY_PAGE, cursor));
+  } catch (err) {
+    // Der Knopf muss wieder bedienbar sein; die Meldung selbst geht an die
+    // globale Fehleranzeige.
+    if (generation === _activityGeneration) {
+      state.activityLoadingMore = false;
+      renderActivityBox({ keepFocus: hadFocus });
+    }
+    throw err;
+  }
+  if (generation !== _activityGeneration || groupId !== state.activeGroupId) return;
+  state.activityLoadingMore = false;
+  const seen = new Set(state.activity.map((item) => item.id));
+  state.activity = [...state.activity, ...(res?.data || []).filter((item) => !seen.has(item.id))];
+  state.activityCursor = nextActivityCursor(res);
+  renderActivityBox({ keepFocus: hadFocus });
 }
 
 async function loadMemberCandidates() {
@@ -235,16 +394,16 @@ function bindShell() {
   _container.querySelector('#split-add-group')?.addEventListener('click', () => openGroupModal());
   _container.querySelector('#split-add-expense')?.addEventListener('click', () => openExpenseModal());
   findPageFab('split-fab')?.addEventListener('click', () => openExpenseModal());
-  let groupSearchTimer;
-  _container.querySelector('#split-group-search')?.addEventListener('input', (e) => {
-    const value = e.target.value.trim();
-    clearTimeout(groupSearchTimer);
-    groupSearchTimer = setTimeout(async () => {
-      state.query = value;
+  // 250ms wie vorher: die Suche laedt die Gruppen vom Server neu.
+  wirePageSearch(_container, {
+    id: 'split-group-search',
+    delay: 250,
+    onQuery: async (value) => {
+      state.query = value.trim();
       await loadGroups();
       await loadGroupData();
       renderAll();
-    }, 250);
+    },
   });
   _statusTablist = wireTablist(_container.querySelector('#split-status-filter'), {
     activeId: state.groupStatus,
@@ -258,6 +417,9 @@ function bindShell() {
       renderAll();
     },
   });
+  // Gleitende Auswahl-Kapsel wie jede Segmentleiste (Kanon, Runde 7 D8).
+  const statusBar = _container.querySelector('#split-status-filter');
+  if (statusBar) attachSegmentIndicator(statusBar);
   _container.querySelector('#split-groups')?.addEventListener('click', async (e) => {
     const btn = e.target.closest('[data-group-id]');
     if (!btn) return;
@@ -291,6 +453,23 @@ function renderStatusFilter() {
   if (addExpense) addExpense.hidden = isArchivedView();
   const fab = findPageFab('split-fab');
   if (fab) fab.hidden = isArchivedView();
+  _onAddableChange?.();
+}
+
+/**
+ * Darf der Budget-Kopf gerade „Ausgabe hinzufuegen" anbieten? Nicht bei
+ * `budget: read` und nicht im Archiv - eine neue Ausgabe liefe dort in eine
+ * archivierte Gruppe. Dieselbe Regel, die den eigenstaendigen Knopf und FAB
+ * oben ausblendet; budget.js fragt sie, statt sie nachzubauen.
+ */
+export function canAddSplitExpense() {
+  return !readOnly() && !isArchivedView();
+}
+
+/** Der Anlegen-Weg aus dem Budget-FAB (#fab-new-budget, am Desktop im Kopf). */
+export function openNewSplitExpense() {
+  if (!canAddSplitExpense()) return;
+  openExpenseModal();
 }
 
 function renderSummary() {
@@ -302,16 +481,36 @@ function renderSummary() {
   // (Critique 2026-07-30, P0).
   // Rolle `total`: die Richtung steht im Label („Du bekommst" / „Du schuldest"),
   // nicht im Vorzeichen - deshalb der Ton explizit statt aus der Zahl.
+  // Die Zahl der Gruppen steht auch am Kopf der Liste, die sie zaehlt - mobil
+  // ist sie dort die einzige (split-expenses.css, R10 L11).
+  const count = _container.querySelector('#split-group-count');
+  if (count) count.textContent = String(state.groups.length);
+  const owedText = owed.length ? owed.map((r) => money(r.amount, r.currency)).join(' · ') : money(0, state.meta.default_currency);
+  const owingText = owing.length ? owing.map((r) => money(r.amount, r.currency)).join(' · ') : money(0, state.meta.default_currency);
+  const glance = _container.querySelector('#split-glance');
+  if (glance) {
+    const expanded = summary?.classList?.contains('is-expanded') ?? false;
+    setHtml(glance, metricGlanceHtml({
+      id: 'split-glance-more',
+      controls: 'split-summary',
+      expanded,
+      label: t('splitExpenses.youAreOwed'),
+      value: owedText,
+      tone: owed.length ? 'positive' : 'neutral',
+      flows: [{ label: t('splitExpenses.youOwe'), amount: owingText, tone: owing.length ? 'negative' : '' }],
+    }));
+    wireMetricGlance(glance, 'split-glance-more');
+  }
   setHtml(summary, `
     <div class="metric-card metric-card--positive">
       <div class="metric-card__label">${t('splitExpenses.youAreOwed')}</div>
-      <div class="metric-card__value">${owed.length ? owed.map((r) => money(r.amount, r.currency)).join(' · ') : money(0, state.meta.default_currency)}</div>
+      <div class="metric-card__value">${owedText}</div>
     </div>
     <div class="metric-card metric-card--negative">
       <div class="metric-card__label">${t('splitExpenses.youOwe')}</div>
-      <div class="metric-card__value">${owing.length ? owing.map((r) => money(r.amount, r.currency)).join(' · ') : money(0, state.meta.default_currency)}</div>
+      <div class="metric-card__value">${owingText}</div>
     </div>
-    <div class="metric-card">
+    <div class="metric-card split-summary-groups">
       <div class="metric-card__label">${isArchivedView() ? t('splitExpenses.statusArchived') : t('splitExpenses.activeGroups')}</div>
       <div class="metric-card__value">${state.groups.length}</div>
     </div>
@@ -331,7 +530,9 @@ function renderGroups() {
         className: 'split-empty-inline',
         icon: 'receipt-text',
         title: t('splitExpenses.emptyGroupsTitle'),
-        description: t('splitExpenses.emptyGroupsText'),
+        // „Erstelle eine Gruppe" beschreibt bei `budget: read` einen Weg, den es
+        // nicht gibt - der Titel allein ist die Auskunft.
+        description: readOnly() ? '' : t('splitExpenses.emptyGroupsText'),
       }));
     return;
   }
@@ -344,6 +545,39 @@ function renderGroups() {
       </span>
     </button>
   `).join(''));
+}
+
+/**
+ * EIN Werkzeug-Menue fuer die Gruppe (Critique 2026-09-25, Muster „one tools
+ * menu" aus den Dokumenten und der Buchungsliste). Hier standen drei Icon-
+ * Knoepfe (Bearbeiten, Archivieren, Loeschen) und zwei Textknoepfe
+ * (Ausgleichen, Mitglied hinzufuegen) - bei 1440px zwei Zeilen im Gruppenkopf.
+ * Sichtbar bleibt die haeufige Handlung (Ausgleichen); der Rest traegt im Menue
+ * sein Label, Loeschen im Gefahrenton und als letzter Eintrag hinter einem
+ * Trenner. Die ids bleiben, die Verdrahtung in renderMain() haengt an ihnen.
+ * Ein Gast bekommt nur „Ausgleichen": die vier Eintraege hier verwalten die
+ * Gruppe, und das darf er nicht - dann faellt das Menue ganz.
+ */
+function groupToolsMenuHtml() {
+  if (isSplitGuest()) return '';
+  const label = t('common.moreActions');
+  const item = (id, icon, text, danger = false) => `
+      <button type="button" role="menuitem" class="popover-menu__item${danger ? ' popover-menu__item--danger' : ''}" id="${id}">
+        <i data-lucide="${icon}" class="icon-md" aria-hidden="true"></i><span>${esc(text)}</span>
+      </button>`;
+  return `
+    <button type="button" class="btn btn--secondary btn--icon split-group-tools popover-menu__trigger"
+            popovertarget="split-group-tools-menu" aria-haspopup="menu" aria-expanded="false"
+            aria-label="${esc(label)}" title="${esc(label)}">
+      <i data-lucide="ellipsis" class="icon-md" aria-hidden="true"></i>
+    </button>
+    <div class="popover-menu split-group-tools-menu" id="split-group-tools-menu" popover role="menu" aria-label="${esc(label)}">
+      ${item('split-invite', 'user-plus', t('splitExpenses.addMember'))}
+      ${item('split-edit-group', 'pencil', t('splitExpenses.editGroup'))}
+      ${item('split-archive-group', 'archive', t('splitExpenses.archiveGroup'))}
+      <div class="popover-menu__separator" role="separator"></div>
+      ${item('split-delete-group', 'trash-2', t('splitExpenses.deleteGroup'), true)}
+    </div>`;
 }
 
 function renderMain() {
@@ -361,13 +595,14 @@ function renderMain() {
         className: 'split-main-empty',
         icon: 'users-round',
         title: t('splitExpenses.emptyGroupsTitle'),
-        description: t('splitExpenses.emptyGroupsText'),
+        description: readOnly() ? '' : t('splitExpenses.emptyGroupsText'),
       }));
     return;
   }
   // Archiv-Ansicht: Salden, Ausgaben und Verlauf bleiben lesbar, alle
   // schreibenden Aktionen weichen dem Wiederherstellen (#574).
   const archived = isArchivedView();
+  const ro = readOnly();
   const GroupTag = _embedded ? 'h3' : 'h2';
   const SectionTag = _embedded ? 'h4' : 'h3';
   setHtml(main, `
@@ -377,37 +612,23 @@ function renderMain() {
         <p class="split-group-type">${t(`splitExpenses.groupType.${group.type}`)}</p>
         ${archived ? `<p class="split-archived-badge"><i data-lucide="archive" class="icon-md" aria-hidden="true"></i>${t('splitExpenses.statusArchived')}</p>` : ''}
         <p>${esc(group.description || t('splitExpenses.groupDefaultDescription'))}</p>
+        ${ro ? groupMetaHtml(group) : ''}
       </div>
-      <div class="split-header-actions">
+      ${/* Bei `budget: read` faellt die ganze Leiste: Bearbeiten, Archivieren,
+          * Loeschen, Abrechnen, Mitglied einladen und im Archiv Wiederherstellen
+          * schreiben alle. Salden, Ausgaben und Verlauf darunter bleiben. */ ''}
+      ${ro ? '' : `<div class="split-header-actions">
         ${archived ? `
         <button class="btn btn--secondary" id="split-restore-group" ${isSplitGuest() ? 'hidden' : ''}>
           <i data-lucide="archive-restore" class="icon-md" aria-hidden="true"></i>
           ${t('splitExpenses.restoreGroup')}
         </button>` : `
-        ${isSplitGuest() ? '' : `
-        <button class="btn btn--secondary btn--icon" id="split-edit-group" aria-label="${t('splitExpenses.editGroup')}">
-          <i data-lucide="pencil" aria-hidden="true"></i>
-        </button>
-        <button class="btn btn--secondary btn--icon" id="split-archive-group" aria-label="${t('splitExpenses.archiveGroup')}">
-          <i data-lucide="archive" aria-hidden="true"></i>
-        </button>
-        <!-- Loeschen ist unumkehrbar (die Gruppe faellt mitsamt ihrer Ausgaben),
-             Bearbeiten/Archivieren nicht - dieselbe Kapsel fuer alle drei
-             verwischte den Unterschied. --danger-outline hebt sich ab, ohne die
-             Zeile zu dominieren; confirmModal({danger:true}) haengt schon
-             darunter (deleteGroup()). -->
-        <button class="btn btn--icon btn--danger-outline" id="split-delete-group" aria-label="${t('splitExpenses.deleteGroup')}">
-          <i data-lucide="trash-2" aria-hidden="true"></i>
-        </button>`}
         <button class="btn btn--secondary" id="split-settle">
           <i data-lucide="hand-coins" class="icon-md" aria-hidden="true"></i>
           ${t('splitExpenses.settle')}
         </button>
-        <button class="btn btn--secondary" id="split-invite" ${isSplitGuest() ? 'hidden' : ''}>
-          <i data-lucide="user-plus" class="icon-md" aria-hidden="true"></i>
-          ${t('splitExpenses.addMember')}
-        </button>`}
-      </div>
+        ${groupToolsMenuHtml()}`}
+      </div>`}
     </section>
     <div class="split-content-grid">
       <section class="split-card split-card--balances">
@@ -421,7 +642,7 @@ function renderMain() {
         <div class="split-card-head">
           <${SectionTag} class="split-card-title">${t('splitExpenses.recentExpenses')}</${SectionTag}>
         </div>
-        <div id="split-expense-list">${renderExpenses(archived)}</div>
+        <div id="split-expense-list">${renderExpenses(archived || ro)}</div>
       </section>
       <section class="split-card">
         <div class="split-card-head">
@@ -439,15 +660,66 @@ function renderMain() {
   const settleButton = main.querySelector('#split-settle');
   if (settleButton) settleButton.disabled = state.expenses.length === 0;
   main.querySelector('#split-invite')?.addEventListener('click', () => openMemberModal());
-  if (!archived) {
-    main.querySelector('#split-expense-list')?.addEventListener('click', (e) => {
-      const btn = e.target.closest('[data-expense-id]');
-      if (!btn) return;
-      const expense = state.expenses.find((item) => item.id === Number(btn.dataset.expenseId));
-      if (expense) openExpenseModal(expense);
-    });
-  }
-  stagger(main.querySelectorAll('.split-expense, .split-debt, .split-activity-item'));
+  main.querySelector('.split-activity')?.addEventListener('click', onActivityClick);
+  main.querySelector('#split-expense-list')?.addEventListener('click', (e) => {
+    // Zwei Wege, je nach Markup: `data-expense-view` liest (Archiv und
+    // `budget: read`), `data-expense-id` bearbeitet. Den zweiten gibt es bei
+    // `read` gar nicht - und fragt openExpenseModal() trotzdem, verzweigt es
+    // selbst in die Leseansicht.
+    const btn = e.target.closest('[data-expense-view], [data-expense-id]');
+    if (!btn) return;
+    const expense = state.expenses.find((item) => item.id === Number(btn.dataset.expenseView ?? btn.dataset.expenseId));
+    if (!expense) return;
+    if (btn.dataset.expenseView) openExpenseReadView(expense);
+    else openExpenseModal(expense);
+  });
+  stagger(main.querySelectorAll('.split-expense, .split-debt, .split-activity-item'), { host: main });
+}
+
+// So viele Namen stehen in der Kopfzeile einer Gruppe, der Rest als „+N".
+const GROUP_META_NAMES = 5;
+
+/**
+ * Die Angaben des Gruppen-Dialogs, die der Kopf sonst nicht traegt (#1265 P7):
+ * Standardwaehrung, Standardaufteilung samt Vorbelegung je Person, und die
+ * Mitglieder. Nur bei `budget: read` - mit Schreibrecht fuehrt der Stift in den
+ * Dialog, der sie zeigt; bei `read` gibt es den Stift nicht, und die Werte
+ * stehen dort, wo der Blick ohnehin landet, statt hinter einem neuen Knopf.
+ *
+ * EINE Zeile, nicht endlos: bis GROUP_META_NAMES Namen, danach „+N" ueber einen
+ * Plural-Schluessel. Alles geht als Text durch esc() - Namen und Waehrung sind
+ * Daten, und t() liefert kein Markup.
+ */
+function groupMetaHtml(group) {
+  const members = state.groupMembers || [];
+  const method = group.default_split_method || 'equal';
+  const values = defaultSplitValues(group);
+  // Zahlformat der Haushalts-Einstellung, nicht der Sprache (#521, getNumberFormat).
+  // Der Dialog fuehrt die Vorbelegung als rohe Zahl mit hoechstens zwei
+  // Nachkommastellen, die Einheit steht dort in der Methode („Prozent"). Hier,
+  // ohne das Feld daneben, traegt die Zahl ihre Einheit selbst - und zwar so, wie
+  // die Region sie schreibt: Stellung und Abstand des Prozentzeichens kommen aus
+  // Intl („60%" in en-US, „60 %" in de-DE), nicht aus einem festen Literal.
+  const percent = getNumberFormat({ style: 'percent', maximumFractionDigits: 2 });
+  const number = getNumberFormat({ maximumFractionDigits: 2 });
+  const preset = (value) => (method === 'percentage'
+    ? percent.format(Number(value) / 100)
+    : number.format(Number(value)));
+  const presets = members
+    .map((m) => [m.display_name, values[m.user_id ?? m.id]])
+    .filter(([, value]) => value != null && value !== '')
+    .map(([name, value]) => `${name} ${preset(value)}`);
+  const methodLabel = t(`splitExpenses.split${method.charAt(0).toUpperCase()}${method.slice(1)}`);
+  const names = members.slice(0, GROUP_META_NAMES)
+    .map((m) => (m.role === 'guest' ? `${m.display_name} (${t('splitExpenses.roleGuest')})` : m.display_name));
+  const rest = members.length - names.length;
+  if (rest > 0) names.push(t('splitExpenses.moreMembers', { count: rest }));
+  const parts = [
+    group.default_currency ? `${t('splitExpenses.currency')}: ${group.default_currency}` : '',
+    `${t('splitExpenses.defaultSplit')}: ${presets.length ? `${methodLabel} - ${presets.join(', ')}` : methodLabel}`,
+    names.length ? `${t('splitExpenses.members')}: ${names.join(', ')}` : '',
+  ].filter(Boolean);
+  return `<p class="split-group-meta">${esc(parts.join(' · '))}</p>`;
 }
 
 function renderBalances() {
@@ -461,7 +733,10 @@ function renderBalances() {
   `).join('');
 }
 
-function renderExpenses(readOnly = false) {
+// Regel 6 aus utils/module-access.js: der Parameter hiess `readOnly` und meinte
+// die archivierte Gruppe. Er heisst jetzt nach dem, was er bewirkt - der
+// Aufrufer odert Archiv und Modulrecht hinein (renderMain).
+function renderExpenses(asList = false) {
   if (!state.expenses.length) return `<div class="split-muted">${t('splitExpenses.noExpenses')}</div>`;
   return state.expenses.map((expense) => {
     // Beleg-Marke (#583): dass ein Nachweis vorliegt, ist die Information -
@@ -478,9 +753,16 @@ function renderExpenses(readOnly = false) {
       </div>
       <div class="split-expense__amount">${money(expense.amount, expense.currency)}</div>
     `;
-    // Im Archiv bleibt der Eintrag ein reiner Listeneintrag - ein Button würde
-    // eine Bearbeiten-Aktion versprechen, die es dort nicht gibt.
-    if (readOnly) return `<div class="split-expense">${body}</div>`;
+    // Im Archiv und bei `budget: read` oeffnet der Eintrag die LESEANSICHT
+    // (#1265 P7), nicht das Bearbeiten - deshalb nennt sein Name dort keine
+    // Handlung, der Inhalt (Titel, Zahler, Datum, Betrag) sagt, was er ist.
+    if (asList) {
+      return `
+      <button type="button" class="split-expense" data-expense-view="${expense.id}">
+        ${body}
+      </button>
+    `;
+    }
     return `
       <button type="button" class="split-expense" data-expense-id="${expense.id}" aria-label="${esc(expense.title)} - ${t('splitExpenses.editExpense')}">
         ${body}
@@ -489,17 +771,164 @@ function renderExpenses(readOnly = false) {
   }).join('');
 }
 
+/** Die Werte, die Zeile, Knopf und Rueckfrage einer Zahlung nennen (#1309). */
+function paymentParams(settlement) {
+  return {
+    payer: settlement.payer_name || '',
+    payee: settlement.payee_name || '',
+    amount: money(settlement.amount, settlement.currency),
+  };
+}
+
+/**
+ * Verlauf der Gruppe. Eine eingetragene Zahlung nennt, wer wem wie viel
+ * gezahlt hat, und traegt ihren Stand (#1309): storniert ist ein ZEICHEN, das
+ * bei jedem Recht stehen bleibt; „Stornieren" ist eine Handlung und erscheint
+ * nur, wenn der Server `can_reverse` meldet (Verwalter oder wer sie
+ * eingetragen hat - die Regel wohnt dort), das Modul beschreibbar ist und die
+ * Gruppe nicht im Archiv liegt.
+ */
 function renderActivity() {
   if (!state.activity.length) return `<div class="split-muted">${t('splitExpenses.noActivity')}</div>`;
-  return state.activity.map((item) => `
-    <div class="split-activity-item">
+  const actionable = !readOnly() && !isArchivedView();
+  const items = state.activity.map((item) => activityItemHtml(item, actionable)).join('');
+  // "Mehr laden" (#1309) ist Lesen, keine Handlung: er steht bei jedem Recht
+  // und im Archiv, solange der Server eine weitere Seite meldet.
+  // Waehrend eine Seite unterwegs ist: `aria-disabled` statt `disabled`, damit
+  // der Knopf den Fokus behaelt (ein gesperrter Knopf verliert ihn an die
+  // Seite); den zweiten Klick faengt loadMoreActivity() ab.
+  const busy = state.activityLoadingMore;
+  const more = state.activityCursor
+    ? `<button type="button" class="btn btn--secondary split-activity-more" data-activity-more${busy ? ' aria-disabled="true" aria-busy="true"' : ''}>${esc(t('splitExpenses.loadMoreActivity'))}</button>`
+    : '';
+  return `<div class="split-activity-list" tabindex="-1">${items}</div>${more}`;
+}
+
+/**
+ * Welche Ausgabe Migration v226 wiederhergestellt (#1382) oder v227 entfernt
+ * hat (#1445): Titel und gebuchter Betrag, damit mehrere solcher Eintraege
+ * unterscheidbar sind. Eine entfernte Ausgabe steht in keiner Liste mehr -
+ * was der Eintrag nennt, kommt allein aus seinen Metadaten. Den Betrag
+ * rechnet der Server in `amount` um - er kennt die Nachkommastellen je
+ * Waehrung (ISO 4217), der Browser nicht.
+ */
+const LEDGER_REPAIR_ACTIVITY = new Set(['ledger_restored', 'ledger_removed']);
+
+function restoredDetail(item) {
+  if (!LEDGER_REPAIR_ACTIVITY.has(item.type) || !item.metadata?.title) return '';
+  const { title, amount, currency } = item.metadata;
+  const sum = amount != null && currency ? ` · ${money(amount, currency)}` : '';
+  return `<span class="split-activity-payment">${esc(`${title}${sum}`)}</span>`;
+}
+
+/**
+ * WELCHE AUSGABE (Re-Critique 2026-09-27, A5 P2-8 / R10 L11). Der Verlauf las
+ * fuenfmal „Ausgabe erstellt - Alex Johnson - 23.09.2026", ohne zu sagen,
+ * welche - daneben nannte „Letzte Ausgaben" das Objekt. Den Titel legt der
+ * Server beim Schreiben in die Metadaten (expense_*, recurring_created); den
+ * Betrag kennt die geladene Ausgabenliste der Gruppe. Eine geloeschte Ausgabe
+ * steht dort nicht mehr - dann bleibt der Titel allein, ein Betrag waere
+ * geraten. Ein Kommentar traegt keinen Titel; er nennt die Ausgabe, an der er
+ * haengt, sofern sie geladen ist.
+ */
+const EXPENSE_ACTIVITY = new Set(['expense_created', 'expense_edited', 'expense_deleted', 'comment_added', 'recurring_created']);
+
+function expenseDetail(item) {
+  if (!EXPENSE_ACTIVITY.has(item.type)) return '';
+  const expense = item.entity_type === 'expense' && item.entity_id != null
+    ? state.expenses.find((e) => e.id === Number(item.entity_id))
+    : null;
+  const title = item.metadata?.title || expense?.title;
+  if (!title) return '';
+  const sum = expense ? ` · ${money(expense.amount, expense.currency)}` : '';
+  return `<span class="split-activity-payment">${esc(`${title}${sum}`)}</span>`;
+}
+
+/**
+ * Ein Eintrag des Verlaufs. Nachgeladene Seiten laufen durch dieselbe Funktion
+ * und dieselbe Klick-Delegation am Verlauf - ein Storno-Knopf auf Seite drei
+ * ist derselbe Knopf wie auf Seite eins.
+ *
+ * Das Datum ist der Tag in der Haushaltszone: `created_at` ist ein Zeitpunkt in
+ * UTC, und `slice(0, 10)` darauf waere der UTC-Tag - 23:30 UTC in Berlin ist
+ * schon der naechste Tag.
+ */
+function activityItemHtml(item, actionable) {
+  const settlement = item.settlement;
+  const params = settlement ? paymentParams(settlement) : null;
+  const detail = settlement
+    ? `<span class="split-activity-payment">${esc(t('splitExpenses.paymentDetail', params))}</span>`
+    : restoredDetail(item) || expenseDetail(item);
+  const reversed = settlement?.reversed_at
+    ? `<span class="split-activity-reversed">${esc(t('splitExpenses.paymentReversed'))}</span>`
+    : '';
+  const action = settlement?.can_reverse && !settlement.reversed_at && actionable
+    ? `<button type="button" class="btn btn--secondary split-reverse-payment" data-reverse-settlement="${settlement.id}" aria-label="${esc(t('splitExpenses.reversePaymentLabel', params))}">${esc(t('splitExpenses.reversePayment'))}</button>`
+    : '';
+  return `
+    <div class="split-activity-item${settlement?.reversed_at ? ' split-activity-item--reversed' : ''}">
       <span class="split-activity-dot"></span>
       <div>
         <strong>${esc(t(`splitExpenses.activityType.${item.type}`))}</strong>
-        <span>${esc(item.actor_name || t('splitExpenses.system'))} · ${formatDate(item.created_at.slice(0, 10))}</span>
+        ${detail}
+        <span>${esc(item.actor_name || t('splitExpenses.system'))} · ${esc(formatDate(zonedDateKey(item.created_at)))}</span>
+        ${reversed}
       </div>
+      ${action}
     </div>
-  `).join('');
+  `;
+}
+
+/**
+ * Zeichnet nur den Verlauf neu, nicht die ganze Gruppe: der Klick-Lauscher
+ * haengt am Kasten `.split-activity`, der stehen bleibt. Hatte "Mehr laden" den
+ * Fokus, bekommt ihn der neue Knopf - oder, ist alles geladen, die Liste, damit
+ * er nicht auf den Seitenanfang faellt.
+ */
+function renderActivityBox({ keepFocus = false } = {}) {
+  const box = _container?.querySelector('.split-activity');
+  if (!box) return;
+  box.replaceChildren();
+  box.insertAdjacentHTML('beforeend', renderActivity());
+  if (!keepFocus) return;
+  (box.querySelector('[data-activity-more]') || box.querySelector('.split-activity-list'))?.focus?.();
+}
+
+/** Delegierter Klick im Verlauf: "Mehr laden" liest, der einzige Schreibweg dort ist das Storno. */
+function onActivityClick(e) {
+  if (e.target.closest('[data-activity-more]')) return loadMoreActivity();
+  const btn = e.target.closest('[data-reverse-settlement]');
+  if (!btn) return undefined;
+  return reverseSettlement(Number(btn.dataset.reverseSettlement));
+}
+
+/**
+ * Storno einer Zahlung (#1309): Rueckfrage, dann die Gegenbuchung auf dem
+ * Server. Nichts wird geloescht - die Zahlung bleibt im Verlauf, als storniert
+ * markiert. Scheitert der Aufruf (etwa 409, weil jemand anderes schneller war),
+ * wird trotzdem neu geladen, damit der Schirm den wirklichen Stand zeigt; der
+ * Fehler selbst geht an die globale Meldung. Das Neuladen behaelt die geladene
+ * Tiefe des Verlaufs (loadGroupData): wer auf Seite drei storniert, sieht die
+ * Zahlung danach dort als storniert, statt auf die erste Seite zurueckzufallen.
+ */
+async function reverseSettlement(settlementId) {
+  if (readOnly()) return;
+  const settlement = state.activity.find((item) => item.settlement?.id === settlementId)?.settlement;
+  if (!settlement?.can_reverse || settlement.reversed_at) return;
+  const groupId = state.activeGroupId;
+  const confirmed = await confirmModal(t('splitExpenses.reversePaymentConfirm'), {
+    confirmLabel: t('splitExpenses.reversePayment'),
+    detail: t('splitExpenses.reversePaymentConfirmDetail', paymentParams(settlement)),
+  });
+  if (!confirmed) return;
+  try {
+    await api.post(`/split-expenses/groups/${groupId}/settlements/${settlementId}/reverse`, {});
+  } finally {
+    await refreshDashboard();
+    await loadGroupData();
+    renderAll();
+    refocusAfterRender();
+  }
 }
 
 function categoryIcon(category) {
@@ -520,6 +949,7 @@ function categoryIcon(category) {
 }
 
 async function archiveGroup(groupId) {
+  if (readOnly()) return;
   const confirmed = await confirmModal(t('splitExpenses.archiveGroupConfirm'), {
     confirmLabel: t('splitExpenses.archiveGroup'),
   });
@@ -538,6 +968,7 @@ async function archiveGroup(groupId) {
  * jederzeit umkehrbar.
  */
 async function restoreGroup(groupId) {
+  if (readOnly()) return;
   await api.post(`/split-expenses/groups/${groupId}/unarchive`, {});
   state.groupStatus = 'active';
   state.activeGroupId = groupId;
@@ -553,6 +984,7 @@ async function refreshDashboard() {
 }
 
 async function deleteGroup(groupId) {
+  if (readOnly()) return;
   const confirmed = await confirmModal(t('splitExpenses.deleteGroupConfirm'), {
     danger: true,
     confirmLabel: t('splitExpenses.deleteGroup'),
@@ -922,6 +1354,7 @@ async function syncEditedGroupMembers(group, form) {
 }
 
 async function openGroupModal(group = null) {
+  if (readOnly()) return;
   const currency = state.meta?.default_currency || 'EUR';
   const isEdit = Boolean(group);
   const candidates = isEdit ? await loadMemberCandidates() : [];
@@ -935,7 +1368,7 @@ async function openGroupModal(group = null) {
         <label>${t('splitExpenses.currency')}<select class="input" name="default_currency">${state.meta.currencies.map((c) => `<option value="${c}" ${c === (group?.default_currency || currency) ? 'selected' : ''}>${c}</option>`).join('')}</select></label>
         ${isEdit ? renderGroupMemberEditor(candidates) : ''}
         ${isEdit ? renderGroupDefaults(group) : ''}
-        <div class="modal-actions">
+        <div class="modal-panel__footer modal-panel__footer--plain">
           <button class="btn btn--secondary" type="button" id="split-cancel-group">${t('common.cancel')}</button>
           <button class="btn btn--primary" type="submit" id="split-save-group">${t('common.save')}</button>
         </div>
@@ -948,6 +1381,7 @@ async function openGroupModal(group = null) {
       updateGroupDefaults(panel);
       panel.querySelector('#split-group-form')?.addEventListener('submit', async (e) => {
         e.preventDefault();
+        if (readOnly()) return;
         const form = panel.querySelector('#split-group-form');
         const data = Object.fromEntries(new FormData(form));
         collectGroupDefaults(form, data);
@@ -967,7 +1401,50 @@ async function openGroupModal(group = null) {
   });
 }
 
+/**
+ * Die Zeilen der Leseansicht einer Ausgabe (#1265 P7): was der
+ * Bearbeiten-Dialog zeigt - Betrag, Zahler, Datum, die Aufteilung samt Anteil
+ * jeder Person, Notizen und Belege. Die Belege gehoeren dem Dokumente-Modul und
+ * fragen dessen Recht (`attachmentLinksNode`); leere Zeilen fallen weg.
+ */
+function expenseReadSections(expense) {
+  const method = expense.split_method || 'equal';
+  const shares = (expense.splits || [])
+    .map((split) => `${split.display_name || ''}: ${money(split.amount, split.currency || expense.currency)}`)
+    .join('\n');
+  return [
+    { icon: 'banknote', label: t('splitExpenses.amount'), value: money(expense.amount, expense.currency) },
+    { icon: 'user', label: t('splitExpenses.paidBy'), value: expense.payer_name || '' },
+    { icon: 'calendar', label: t('splitExpenses.date'), value: expense.expense_date ? formatDate(expense.expense_date) : '' },
+    { icon: 'split', label: t('splitExpenses.splitMethod'),
+      value: t(`splitExpenses.split${method.charAt(0).toUpperCase()}${method.slice(1)}`) },
+    { icon: 'users', label: t('splitExpenses.participants'), value: shares, multiline: true },
+    { icon: 'sticky-note', label: t('splitExpenses.notes'), value: expense.description || '', multiline: true },
+    { icon: 'receipt', label: t('splitExpenses.receiptsLabel'), node: attachmentLinksNode(expense.attachments) },
+  ];
+}
+
+/**
+ * Die Ausgabe in der Leseansicht: bei `budget: read` und im Archiv. Dieselbe
+ * Bauart wie Buchung und Abo (P1-Muster, geteilte Leseansicht ohne `edit` und
+ * ohne `actions`).
+ */
+function openExpenseReadView(expense) {
+  return openDetailView({
+    title: expense.title,
+    accentColor: 'var(--module-budget)',
+    size: 'sm',
+    sections: expenseReadSections(expense),
+  });
+}
+
 function openExpenseModal(expense = null, prefill = null) {
+  // Der Riegel steht VOR jeder Vorbereitung: der Anlegeweg (auch die Uebergabe
+  // aus dem Budget) entfaellt, eine bestehende Ausgabe geht als Leseansicht auf.
+  if (readOnly()) {
+    if (expense?.id) openExpenseReadView(expense);
+    return;
+  }
   if (!state.activeGroupId) return openGroupModal();
   const group = state.groups.find((g) => g.id === state.activeGroupId);
   const isEdit = Boolean(expense && expense.id);
@@ -1030,10 +1507,14 @@ function openExpenseModal(expense = null, prefill = null) {
           hint: t('splitExpenses.receiptsHint'),
           icon: 'receipt',
         })}
-        <div class="modal-actions">
-          ${isEdit ? `<button class="btn btn--danger" type="button" id="split-delete-expense">${t('common.delete')}</button>` : ''}
-          <button class="btn btn--secondary" type="button" id="split-cancel-expense">${t('common.cancel')}</button>
-          <button class="btn btn--primary" type="submit" id="split-save-expense">${t('common.save')}</button>
+        <div class="modal-panel__footer modal-panel__footer--plain">
+          ${isEdit ? `<button class="btn btn--danger-outline" type="button" id="split-delete-expense" style="margin-inline-end:auto">
+            <i data-lucide="trash-2" class="icon-md" aria-hidden="true"></i>${t('common.delete')}
+          </button>` : ''}
+          <div class="split-form__footer-actions">
+            <button class="btn btn--secondary" type="button" id="split-cancel-expense">${t('common.cancel')}</button>
+            <button class="btn btn--primary" type="submit" id="split-save-expense">${t('common.save')}</button>
+          </div>
         </div>
       </form>
     `,
@@ -1064,6 +1545,7 @@ function openExpenseModal(expense = null, prefill = null) {
       });
       updateSplitInputs(panel);
       panel.querySelector('#split-delete-expense')?.addEventListener('click', async () => {
+        if (readOnly()) return;
         // confirmOverModal statt confirmModal: das Ausgaben-Formular trägt
         // Betrag, Teilnehmer, Aufteilung und wartende Belege - „Abbrechen" gibt
         // es unverändert zurück, statt alles davon zu verdrängen.
@@ -1081,6 +1563,7 @@ function openExpenseModal(expense = null, prefill = null) {
       });
       panel.querySelector('#split-expense-form')?.addEventListener('submit', async (e) => {
         e.preventDefault();
+        if (readOnly()) return;
         if (!validateSplitForm(panel)) return;
         const form = panel.querySelector('#split-expense-form');
         const data = Object.fromEntries(new FormData(form));
@@ -1113,6 +1596,7 @@ function openExpenseModal(expense = null, prefill = null) {
 }
 
 function openSettlementModal() {
+  if (readOnly()) return;
   const group = state.groups.find((g) => g.id === state.activeGroupId);
   // Vorbefüllung aus der offenen Schuld: bevorzugt die, in der ich selbst der
   // Schuldner bin - statt Zahler=Empfänger=erstes Mitglied und leerem Betrag.
@@ -1138,7 +1622,7 @@ function openSettlementModal() {
           icon: 'receipt',
           maxItems: 1,
         })}
-        <div class="modal-actions">
+        <div class="modal-panel__footer modal-panel__footer--plain">
           <button class="btn btn--secondary" type="button" id="split-cancel-settlement">${t('common.cancel')}</button>
           <button class="btn btn--primary" type="submit" id="split-save-settlement">${t('splitExpenses.registerPayment')}</button>
         </div>
@@ -1187,6 +1671,7 @@ function openSettlementModal() {
       panel.querySelector('#split-cancel-settlement')?.addEventListener('click', () => closeModal());
       form?.addEventListener('submit', async (e) => {
         e.preventDefault();
+        if (readOnly()) return;
         if (samePerson()) { syncSameHint(); payeeSel.focus(); return; }
         const data = Object.fromEntries(new FormData(form));
         data.amount = decimalString(data.amount);
@@ -1207,6 +1692,7 @@ function openSettlementModal() {
 }
 
 async function openMemberModal() {
+  if (readOnly()) return;
   const candidates = await loadMemberCandidates();
   openSharedModal({
     title: t('splitExpenses.addMember'),
@@ -1214,10 +1700,12 @@ async function openMemberModal() {
       <form id="split-member-form" class="split-form">
         <label>${t('splitExpenses.member')}<select class="input" name="member_ref">${memberCandidateOptions(candidates)}</select></label>
         <label>${t('splitExpenses.role')}<select class="input" name="role"><option value="guest">${t('splitExpenses.roleGuest')}</option><option value="admin">${t('splitExpenses.roleAdmin')}</option></select></label>
-        <div class="modal-actions">
-          <button class="btn btn--secondary" type="button" id="split-new-guest">${t('splitExpenses.createGuest')}</button>
-          <button class="btn btn--secondary" type="button" id="split-cancel-member">${t('common.cancel')}</button>
-          <button class="btn btn--primary" type="submit" id="split-save-member">${t('common.save')}</button>
+        <div class="modal-panel__footer modal-panel__footer--plain">
+          <button class="btn btn--secondary" type="button" id="split-new-guest" style="margin-inline-end:auto">${t('splitExpenses.createGuest')}</button>
+          <div class="split-form__footer-actions">
+            <button class="btn btn--secondary" type="button" id="split-cancel-member">${t('common.cancel')}</button>
+            <button class="btn btn--primary" type="submit" id="split-save-member">${t('common.save')}</button>
+          </div>
         </div>
       </form>
     `,
@@ -1226,6 +1714,7 @@ async function openMemberModal() {
       panel.querySelector('#split-new-guest')?.addEventListener('click', () => openGuestModal());
       panel.querySelector('#split-member-form')?.addEventListener('submit', async (e) => {
         e.preventDefault();
+        if (readOnly()) return;
         const data = Object.fromEntries(new FormData(panel.querySelector('#split-member-form')));
         const [source, id] = String(data.member_ref || '').split(':');
         delete data.member_ref;
@@ -1243,6 +1732,7 @@ async function openMemberModal() {
 }
 
 function openGuestModal() {
+  if (readOnly()) return;
   openSharedModal({
     title: t('splitExpenses.createGuest'),
     content: `
@@ -1256,7 +1746,7 @@ function openGuestModal() {
         </div>
         <label>${t('splitExpenses.birthDate')}<input class="input" name="birth_date" type="text" placeholder="${dateInputPlaceholder()}" inputmode="numeric"></label>
         <p class="form-hint">${t('splitExpenses.guestSyncHint')}</p>
-        <div class="modal-actions">
+        <div class="modal-panel__footer modal-panel__footer--plain">
           <button class="btn btn--secondary" type="button" id="split-cancel-guest">${t('common.cancel')}</button>
           <button class="btn btn--primary" type="submit" id="split-save-guest">${t('splitExpenses.createAndAddGuest')}</button>
         </div>
@@ -1270,6 +1760,7 @@ function openGuestModal() {
       });
       panel.querySelector('#split-guest-form')?.addEventListener('submit', async (e) => {
         e.preventDefault();
+        if (readOnly()) return;
         const form = panel.querySelector('#split-guest-form');
         const birthDateRaw = form.querySelector('[name="birth_date"]')?.value || '';
         if (!isDateInputValid(birthDateRaw)) return;
@@ -1291,3 +1782,16 @@ function openGuestModal() {
     },
   });
 }
+
+/**
+ * Messflaeche fuer die Nur-lesen-Regel (#1265 P7). `renderMain()` schreibt in
+ * den Seitencontainer; der Griff laesst den echten Pfad laufen.
+ */
+export const __test = {
+  readOnly, canAddSplitExpense, groupToolsMenuHtml, renderExpenses, state, expenseReadSections, openExpenseModal, groupMetaHtml, openGroupModal,
+  renderActivity, onActivityClick, loadGroupData, loadMoreActivity, groupFromQuery,
+  renderMainForTest(container) { _container = container; renderMain(); },
+  renderGroupsForTest(container) { _container = container; renderGroups(); },
+  // R10 L11: die Gruppenzahl steht am Kopf der Liste (test-split-activity-ui.js).
+  renderSummaryForTest(container) { _container = container; renderSummary(); },
+};

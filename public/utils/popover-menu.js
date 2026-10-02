@@ -6,14 +6,14 @@
  * Liste des ganzen Haushalts (Critique 2026-07-30). Ein Überlaufmenü löst beides
  * auf einmal: eine Zeile Chrome statt drei, und jeder Eintrag trägt sein Label.
  *
- * WARUM HIER UND NICHT IN shopping.js: Kontakte (`.contact-more-menu__panel`)
- * und Dokumente (`.documents-context-menu`) haben je eine private Kopie derselben
- * Sache - gleiche Popover-Mechanik, gleiche Positionierungsrechnung, gleiche
+ * WARUM HIER UND NICHT IN shopping.js: Kontakte und Dokumente
+ * (`.documents-context-menu`) hatten je eine private Kopie derselben Sache -
+ * gleiche Popover-Mechanik, gleiche Positionierungsrechnung, gleiche
  * Eintrags-Geometrie, drei Klassennamen. Eine dritte Kopie in der Küche wäre
  * genau der Befund, den dieser Umbau abstellt („inkonsistentes
- * Komponenten-Vokabular"). Die beiden Bestandskopien sind hier bewusst NICHT
- * mitmigriert: das sind zwei fremde Module, und der Auftrag ist die Küche. Wer
- * sie nachzieht, löscht rund 60 Zeilen CSS und diese Datei bleibt unverändert.
+ * Komponenten-Vokabular"). Die Kontakte nutzen seit R16 (Re-Critique
+ * 2026-09-28) dieses Menü; die Kopie der Dokumente steht noch. Wer sie
+ * nachzieht, löscht dort das CSS, und diese Datei bleibt unverändert.
  *
  * WARUM NATIVE POPOVER UND KEIN EIGENES OVERLAY: Top-Layer, Light-Dismiss (Klick
  * daneben) und Esc kommen vom Browser, inklusive Fokusrückgabe an den Trigger.
@@ -39,7 +39,12 @@ import { esc } from '/utils/html.js';
  * @param {object}   opts
  * @param {string}   opts.id             Eindeutige Panel-ID (popovertarget).
  * @param {string}   opts.label          Zugänglicher Name des Triggers.
- * @param {Array<{action: string, label: string, icon: string, id?: string|number, danger?: boolean}>} opts.items
+ * @param {Array<{action: string, label: string, icon: string, id?: string|number, danger?: boolean,
+ *   checked?: boolean, disabled?: boolean} | {separator: true}>} opts.items
+ *        `checked` macht aus dem Eintrag einen Schalter (`menuitemcheckbox`,
+ *        Haken am Ende) - fuer Ansichts-Schalter wie „Verlauf zeigen", die im
+ *        Werkzeugmenue stehen statt als loses Icon im Kopf. `{ separator: true }`
+ *        trennt Gruppen (Ansicht | Verwalten | Destruktiv).
  * @param {string}   [opts.triggerClass] Zusätzliche Klassen für den Trigger.
  * @param {string}   [opts.icon]         Lucide-Name für den Trigger. Standard
  *        `ellipsis` - das Überlaufmenü, für das diese Datei gebaut wurde. Ein
@@ -49,13 +54,22 @@ import { esc } from '/utils/html.js';
  * @returns {string}
  */
 export function popoverMenuHtml({ id, label, items = [], triggerClass = 'btn btn--ghost btn--icon', icon = 'ellipsis' }) {
-  const entries = items.map((item) => `
-    <button type="button" role="menuitem"
+  const entries = items.map((item) => {
+    if (item.separator) return '\n    <div class="popover-menu__separator" role="separator"></div>';
+    const checkable = typeof item.checked === 'boolean';
+    const role = checkable ? 'menuitemcheckbox' : 'menuitem';
+    const checkedAttr = checkable ? ` aria-checked="${item.checked}"` : '';
+    const trail = checkable
+      ? `<i data-lucide="check" class="icon-md popover-menu__item-trail popover-menu__item-check${item.checked ? '' : ' popover-menu__item-check--hidden'}" aria-hidden="true"></i>`
+      : '';
+    return `
+    <button type="button" role="${role}"${checkedAttr}${item.disabled ? ' disabled' : ''}
             class="popover-menu__item${item.danger ? ' popover-menu__item--danger' : ''}"
             data-action="${esc(item.action)}"${item.id == null ? '' : ` data-id="${esc(String(item.id))}"`}>
       <i data-lucide="${esc(item.icon)}" class="icon-md" aria-hidden="true"></i>
-      <span>${esc(item.label)}</span>
-    </button>`).join('');
+      <span>${esc(item.label)}</span>${trail}
+    </button>`;
+  }).join('');
 
   return `
     <button type="button" class="${triggerClass} popover-menu__trigger"
@@ -64,6 +78,54 @@ export function popoverMenuHtml({ id, label, items = [], triggerClass = 'btn btn
       <i data-lucide="${esc(icon)}" class="icon-md" aria-hidden="true"></i>
     </button>
     <div class="popover-menu" id="${esc(id)}" popover role="menu">${entries}</div>`;
+}
+
+/**
+ * Das EINE Werkzeugmenue eines Modulkopfs (Kopfregel mobil, 2026-09-26).
+ *
+ * Zeile 1 eines Modulkopfs traegt Titel, Such-Icon und genau EINEN
+ * „..."-Knopf; alles, was ein Modul verwaltet statt zeigt (Kategorien, Tags,
+ * Lagerorte, Mehrfachauswahl, Import, Verlauf, „Plan zufaellig fuellen"),
+ * steht darin als Eintrag mit Icon UND Text - nie als loses Icon daneben.
+ * Vorbild ist das Kopf-Menue der Dokumente (`documents-tools-btn`).
+ *
+ * Der Trigger ist ein `.btn--secondary.btn--icon` wie dort, mit der
+ * Kennklasse `page-tools-btn`: an ihr erkennt der Guard (test:mobile-chrome)
+ * das Werkzeugmenue, und die Shell muss ihn nicht per Modulname suchen.
+ * Verdrahtung wie jedes popover-menu: `installPopoverMenus(root)` einmal an
+ * der Modulwurzel, die Klicks laufen ueber `data-action` in den delegierten
+ * Handler der Seite. Einen Schalter (`checked`) zieht die Seite nach dem
+ * Umlegen per `syncPopoverMenuItem()` nach, ohne das Menue neu zu bauen.
+ *
+ * @param {object} opts
+ * @param {string} opts.id     Eindeutige Panel-ID, z.B. `tasks-tools-menu`.
+ * @param {string} opts.label  Zugaenglicher Name, meist t('common.moreActions').
+ * @param {Array}  opts.items  Eintraege wie bei popoverMenuHtml.
+ * @returns {string}
+ */
+export function pageToolsMenuHtml({ id, label, items = [] }) {
+  return popoverMenuHtml({
+    id,
+    label,
+    items,
+    triggerClass: 'btn btn--secondary btn--icon page-tools-btn',
+    icon: 'ellipsis',
+  });
+}
+
+/**
+ * Zieht Haken und `aria-checked` eines Schalter-Eintrags nach.
+ *
+ * @param {ParentNode} root
+ * @param {string} action   Der `data-action`-Wert des Eintrags.
+ * @param {boolean} checked
+ */
+export function syncPopoverMenuItem(root, action, checked) {
+  const item = root?.querySelector?.(`.popover-menu__item[data-action="${CSS.escape(action)}"]`);
+  if (!item) return;
+  item.setAttribute('aria-checked', String(Boolean(checked)));
+  item.querySelector('.popover-menu__item-check')
+    ?.classList.toggle('popover-menu__item-check--hidden', !checked);
 }
 
 /** Verhindert das Aufblitzen an der Standardposition, bevor die Rechnung greift. */
@@ -83,23 +145,37 @@ function onToggle(event) {
   const trigger = document.querySelector(`[popovertarget="${panel.id}"]`);
   trigger?.setAttribute('aria-expanded', String(event.newState === 'open'));
 
-  if (event.newState !== 'open') { panel.style.opacity = ''; return; }
+  if (event.newState !== 'open') { panel.style.opacity = ''; panel.style.transform = ''; return; }
 
   if (trigger) {
     const rect = trigger.getBoundingClientRect();
     const width = panel.offsetWidth || 200;
     const height = panel.offsetHeight || 48;
     const gap = 4;
+    // `data-placement="top-start"`: ueber dem Trigger, an seiner LINKEN Kante.
+    // Fuer einen Ausloeser am Fuss einer linken Leiste (Konto-Menue der
+    // Seitenleiste) - rechtsbuendig haenge das Menue sonst halb ueber dem
+    // Inhalt daneben, und nach unten ist dort nie Platz.
+    const topStart = panel.dataset?.placement === 'top-start';
     // Rechtskante am Trigger, aber niemals außerhalb des Viewports.
-    const left = Math.min(Math.max(8, rect.right - width), window.innerWidth - width - 8);
-    let top = rect.bottom + gap;
+    const left = Math.min(Math.max(8, topStart ? rect.left : rect.right - width), window.innerWidth - width - 8);
+    let top = topStart ? rect.top - height - gap : rect.bottom + gap;
     // Nach oben kippen, wenn unten kein Platz ist - der Kopf der Einkaufsliste
-    // sitzt oben, das Zeilenmenü kann überall stehen.
-    if (top + height > window.innerHeight - 8) top = rect.top - height - gap;
+    // sitzt oben, das Zeilenmenü kann überall stehen. Die obere Variante kippt
+    // umgekehrt nach unten, wenn ueber ihr kein Platz ist.
+    if (topStart && top < 8) top = rect.bottom + gap;
+    else if (!topStart && top + height > window.innerHeight - 8) top = rect.top - height - gap;
     panel.style.left = `${Math.round(left)}px`;
     panel.style.top = `${Math.round(Math.max(8, top))}px`;
+    // DAS MENUE WAECHST VOM AUSLOESER AUS (R14, A1 P3-4): der Ursprung der
+    // Skalierung ist die Ecke, die am Ausloeser liegt - oben, wenn es darunter
+    // steht, unten, wenn es darueber steht; rechts beim rechtsbuendigen, links
+    // bei `top-start`. Nur diese Rechnung kennt die Ecke (layout.css `.popover-menu`).
+    const above = top < rect.top;
+    panel.style.transformOrigin = `${above ? 'bottom' : 'top'} ${topStart ? 'left' : 'right'}`;
   }
   panel.style.opacity = '1';
+  panel.style.transform = 'none';
 
   // DER FOKUS ZIEHT MIT INS MENUE. `role="menu"` sagt der assistiven Technik
   // eine Menue-Bedienung zu, und die Popover-API haelt davon nichts: sie
@@ -108,13 +184,31 @@ function onToggle(event) {
   // erreicht - und in einem Menue fuehrt Tab hinaus, nicht hindurch.
   const items = itemsOf(panel);
   if (!items.length) return;
-  const checked = items.findIndex((item) => item.getAttribute('aria-checked') === 'true');
+  // Nur eine EINFACHAUSWAHL zieht den Fokus auf ihren gewaehlten Eintrag -
+  // bei Schaltern (menuitemcheckbox) waere der erste angehakte eine
+  // zufaellige Stelle mitten im Menue.
+  const checked = items.findIndex((item) => item.getAttribute('role') !== 'menuitemcheckbox'
+    && item.getAttribute('aria-checked') === 'true');
   focusItem(items, checked === -1 ? 0 : checked);
 }
 
-/** Die bedienbaren Eintraege eines Panels in DOM-Reihenfolge. */
+/**
+ * Die bedienbaren Eintraege eines Panels in DOM-Reihenfolge - nur die, die
+ * GERENDERT sind (Review zu #1475). Ein Modul darf einen Eintrag per CSS
+ * ausblenden, der unter einer Breite nichts bewirkt (Mahlzeiten: der
+ * Rezeptspalten-Schalter unter 1024px, meals.css). Im DOM steht er weiter,
+ * und als Ziel von End/ArrowUp nahm er den Fokus nicht an - die Tastatur hing
+ * am Menueende. Die Frage gehoert hierher und nicht in jedes Modul: welche
+ * Regel einen Eintrag verbirgt, weiss nur das Rendering.
+ */
 function itemsOf(panel) {
-  return [...panel.querySelectorAll('.popover-menu__item:not([disabled])')];
+  return [...panel.querySelectorAll('.popover-menu__item:not([disabled])')].filter(isRendered);
+}
+
+function isRendered(item) {
+  if (typeof item.checkVisibility === 'function') return item.checkVisibility();
+  if (typeof item.getClientRects === 'function') return item.getClientRects().length > 0;
+  return true;
 }
 
 /**

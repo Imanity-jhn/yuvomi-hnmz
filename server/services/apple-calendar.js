@@ -18,7 +18,7 @@ import { createLogger } from '../logger.js';
 const log = createLogger('Apple');
 
 import * as db from '../db.js';
-import { assignDefaultToEvent } from './sync-assignment.js';
+import { assignDefaultToEvent, reassignDefaultOnCalendarMove } from './sync-assignment.js';
 import { pruneDeletedEvents, countSourceEvents, deleteSourceEvents } from './calendar-prune.js';
 import { readSyncOutcome, withSyncOutcome } from './sync-outcome.js';
 import { runSerialized } from '../utils/sync-lock.js';
@@ -33,6 +33,7 @@ import { householdTimeZone } from '../utils/timezone.js';
 import { createCalDAVClient } from '../utils/caldav-client.js';
 import { nearestIcalColorName } from '../utils/ical-color.js';
 import { outboundEvent } from './outbound-dtstart.js';
+import { followInboundStartChange } from './calendar-occurrence-overrides.js';
 
 const APPLE_COLOR = '#FC3C44';
 
@@ -309,17 +310,21 @@ async function runFlushOutbound({ makeClient } = {}) {
  * Ein Lauf, dessen Ausgang den Lauf überlebt (#820). Um runSync() statt in ihm,
  * damit auch der frühe Ausstieg bei fehlenden Zugangsdaten erfasst wird.
  */
-async function sync() {
-  return runSerialized('apple', 'sync', () => withSyncOutcome(db.get(), 'apple', runSync));
+async function sync({ makeClient } = {}) {
+  return runSerialized('apple', 'sync',
+    () => withSyncOutcome(db.get(), 'apple', () => runSync({ makeClient })));
 }
 
-async function runSync() {
+// `makeClient` wie in runFlushOutbound(): nur Tests setzen es. Ohne einen
+// einsetzbaren Client gibt es keinen Weg, den Inbound als Programm zu fahren -
+// tsdav spricht dann HTTP mit iCloud.
+async function runSync({ makeClient } = {}) {
   const creds = getCredentials();
   if (!creds) {
     throw new Error('[Apple] No credentials configured (neither in DB nor in .env).');
   }
 
-  const client = await createClient(creds);
+  const client = await (makeClient || createClient)(creds);
 
   const calendars = await client.fetchCalendars();
   if (!calendars.length) {
@@ -411,7 +416,7 @@ async function runSync() {
           if (pendingDeletionUids.has(ev.uid)) continue;
 
           const existing = db.get().prepare(
-            `SELECT id, outbound_dirty FROM calendar_events WHERE external_calendar_id = ? AND external_source = 'apple'`
+            `SELECT id, outbound_dirty, calendar_ref_id, start_datetime FROM calendar_events WHERE external_calendar_id = ? AND external_source = 'apple'`
           ).get(ev.uid);
 
           // Eine lokale Bearbeitung, die noch auf ihren Push wartet, darf der
@@ -440,6 +445,15 @@ async function runSync() {
               obj.url ?? null, existing.id
             );
             eventId = existing.id;
+            // In iCloud verschoben (#1377): die Erinnerungen ziehen mit.
+            followInboundStartChange(db.get(), eventId, existing.start_datetime, ev.dtstart);
+            // Von einem Kalender in einen anderen verschoben (#1270): die
+            // unangetastete Standard-Zuweisung zieht mit um.
+            reassignDefaultOnCalendarMove(db.get(), eventId, {
+              fromCalRefId: existing.calendar_ref_id,
+              toCalRefId: calRefId,
+              toDefaultUserId: calDefaultAssignee,
+            });
           } else {
             const inserted = db.get().prepare(`
               INSERT INTO calendar_events

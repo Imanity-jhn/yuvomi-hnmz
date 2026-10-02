@@ -3,6 +3,7 @@ import * as db from '../../db.js';
 import {
   acknowledgeSafety, createFast, finishFast, updateFast, deleteFast,
   getFastingState, updateFastingSettings, FastingError,
+  getFastingStats,
   getFastingHistory, getAllFastingHistory,
 } from '../../services/fasting.js';
 import { fastingToCsv } from '../../services/fasting-export.js';
@@ -58,6 +59,10 @@ function history(req, res) {
 }
 router.get('/fasting/history', history);
 
+router.get('/fasting/stats', (req, res) => {
+  try { return res.json({ data: getFastingStats(db.get(), { id: viewerId(req) }, subject(req)) }); } catch (error) { return sendError(res, error); }
+});
+
 router.get('/fasting', history);
 
 router.post('/fasting', (req, res) => {
@@ -90,6 +95,8 @@ router.put('/fasting/settings', (req, res) => {
     const data = updateFastingSettings(database, { id: viewerId(req) }, definedInput([
         ['defaultGoalMinutes', req.body?.default_goal_minutes],
         ['zoneMode', req.body?.zone_mode],
+        ['remindGoal', req.body?.remind_goal],
+        ['remindNextStart', req.body?.remind_next_start],
         ['acknowledgeSafety', req.body?.acknowledge_safety],
         ['clockMode', req.body?.clock_mode],
         ['activeId', req.body?.active_id],

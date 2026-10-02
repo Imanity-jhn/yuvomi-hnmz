@@ -1,11 +1,42 @@
 /** Pure fasting timer and dial calculations shared by the page and tests. */
-import { getNumberFormat } from '../i18n.js';
+import { formatUnit, t } from '../i18n.js';
 
 const MAX_GOAL_HOURS = 14 * 24;
 const MINUTE = 60 * 1000;
 const DAY_MINUTES = 24 * 60;
 
 export const FASTING_PRESETS = Object.freeze([12, 14, 15, 16, 18, 20, 23]);
+
+function fastingSubjectParams(view) {
+  const params = new URLSearchParams();
+  if (view.subject && view.subject !== view.self) params.set('user_id', view.subject);
+  return params;
+}
+
+export function fastingHistoryQuery(view, cursor = null) {
+  const params = fastingSubjectParams(view);
+  if (view.from) params.set('from', view.from);
+  if (view.to) params.set('to', view.to);
+  if (cursor) {
+    params.set('before_at', cursor.before_at);
+    params.set('before_id', cursor.before_id);
+  }
+  return params.size ? `?${params}` : '';
+}
+
+export function fastingStatsQuery(view) {
+  const params = fastingSubjectParams(view);
+  return params.size ? `?${params}` : '';
+}
+
+export function shouldLoadFastingStats(stats, statsError = false) {
+  return stats === undefined || statsError;
+}
+
+export function fastingCompletionCalendarHint(timeZone) {
+  if (!timeZone) return '';
+  return `${t('health.fasting.completedFrom')} / ${t('health.fasting.completedTo')}: ${t('settings.timezoneLabel')} - ${timeZone}`;
+}
 
 /**
  * Completed-entry forms must use the authoritative server clock. Falling back
@@ -47,6 +78,11 @@ export function fastingClockModel(active, lastCompleted = null, now = Date.now()
     reached: goal > 0 && seconds >= goal,
     progress: active ? Math.min(100, seconds / (goal || 86400) * 100) : 0,
   };
+}
+
+export function fastingNotificationAvailability(goalMinutes) {
+  const goal = Number(goalMinutes) > 0;
+  return { goal, next: goal && Number(goalMinutes) < 1440 };
 }
 
 export function fastingDisplayModel(active, lastCompleted = null, preference = 'auto', now = Date.now()) {
@@ -122,11 +158,31 @@ export function formatFastingDuration(rawMinutes) {
   const hours = Math.floor((total % DAY_MINUTES) / 60);
   const minutes = total % 60;
   const parts = [];
-  const unit = (value, name) => getNumberFormat({
-    style: 'unit', unit: name, unitDisplay: 'short',
-  }).format(value);
+  const unit = (value, name) => formatUnit(value, name, { unitDisplay: 'short' });
   if (days) parts.push(unit(days, 'day'));
   if (hours) parts.push(unit(hours, 'hour'));
   if (minutes || parts.length === 0) parts.push(unit(minutes, 'minute'));
   return parts.join(' ');
+}
+
+/**
+ * Was die Fasten-Seite zeigt (R14 P3, A6 P2-1). Ohne ein einziges
+ * abgeschlossenes Fasten stand eine Statistik aus neun Nullen und sieben
+ * leeren Wochenkaesten da, darunter Filter und Export fuer eine leere Liste.
+ * Jetzt: Statistik erst ab dem ersten Fasten (oder als Fehlerhinweis), Verlauf
+ * mit Filter nur, wenn es etwas zu filtern gibt - sonst EIN Leerzustand.
+ *
+ * @param {{ active: object|null, stats: object|null|undefined, statsError: boolean,
+ *           rows: object[], filtered: boolean }} s
+ * @returns {{ stats: boolean, history: boolean, empty: boolean }}
+ */
+export function fastingSections({ stats, statsError, rows, filtered }) {
+  const count = Number(stats?.allTime?.count ?? 0);
+  const ever = count > 0 || (rows?.length ?? 0) > 0;
+  const history = ever || Boolean(filtered);
+  return {
+    stats: statsError === true || count > 0,
+    history,
+    empty: !history,
+  };
 }
