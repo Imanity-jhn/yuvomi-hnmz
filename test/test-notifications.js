@@ -58,11 +58,14 @@ function makeDb({ withNotificationTables = true } = {}) {
     CREATE TABLE tasks (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       title TEXT NOT NULL,
+      due_date TEXT,
+      due_time TEXT,
       created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE
     );
     CREATE TABLE calendar_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      title TEXT NOT NULL
+      title TEXT NOT NULL,
+      start_datetime TEXT
     );
     CREATE TABLE budget_subscriptions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -739,7 +742,7 @@ test('a notification names its origin in the title, in the household language', 
   await processDueNotifications({ database: db, channelStore: store, pushService, providers, now: new Date() });
 
   const titles = payloads.map((p) => p.title);
-  assert.deepEqual(titles, ['Aufgaben', 'Kalender', 'Abonnements'],
+  assert.deepEqual(titles, ['Erinnerung · Aufgaben', 'Erinnerung · Kalender', 'Abonnements'],
     'Jede Meldung nennt ihr Herkunftsmodul im Titel, uebersetzt in die Datensprache des Haushalts.');
   // Und der Body bleibt die Sache selbst - der Titel ersetzt ihn nicht.
   assert.deepEqual(payloads.map((p) => p.body), ['Müll rausbringen', 'Zahnarzt', 'Netflix']);
@@ -1042,7 +1045,7 @@ test('inventory tracked-date reminders degrade to the bare title without a date'
   assert.equal(payloads[0].body, 'Reminder');
 });
 
-test('task reminders keep their bare title as body (#581)', async () => {
+test('task reminders name the reminder and keep the task title as body (#581)', async () => {
   const { createNotificationChannelStore } = await import('../server/services/notification-channels.js');
   const { processDueNotifications } = await import('../server/services/notifications.js');
   const db = makeDb();
@@ -1059,8 +1062,30 @@ test('task reminders keep their bare title as body (#581)', async () => {
 
   await processDueNotifications({ database: db, channelStore: store, pushService, providers, now: new Date() });
   assert.equal(payloads.length, 1);
+  assert.equal(payloads[0].title, 'Reminder · Tasks');
   assert.equal(payloads[0].body, 'Müll rausbringen');
   assert.equal(payloads[0].url, '/tasks?open=1');
+});
+
+test('task due reminders include the due date in the body', async () => {
+  const { createNotificationChannelStore } = await import('../server/services/notification-channels.js');
+  const { processDueNotifications } = await import('../server/services/notifications.js');
+  const db = makeDb();
+  const store = createNotificationChannelStore({ db });
+  store.createChannel({ provider: 'ntfy', name: 'ntfy', enabled: true, config: { baseUrl: 'https://ntfy.test', topic: 'family' }, secrets: {} });
+  db.prepare("INSERT INTO tasks (id, title, due_date, due_time, created_by) VALUES (1, 'Müll rausbringen', '2026-06-20', '18:00', 1)").run();
+  db.prepare("INSERT INTO reminders (id, entity_type, entity_id, remind_at, created_by, assigned_from) VALUES (1, 'task', 1, ?, 1, 1)")
+    .run('2026-06-19T09:59:00.000Z');
+  const payloads = [];
+  const providers = {
+    ntfy: { id: 'ntfy', send: async ({ payload }) => { payloads.push(payload); return { ok: true, status: 200 }; } },
+  };
+  const pushService = { sendPushToUser: async () => 0 };
+
+  await processDueNotifications({ database: db, channelStore: store, pushService, providers, now: new Date() });
+  assert.equal(payloads.length, 1);
+  assert.equal(payloads[0].title, 'Due · Tasks');
+  assert.equal(payloads[0].body, 'Müll rausbringen\n20.06.2026 · 18:00');
 });
 
 test('event reminders deep-link to the calendar item', async () => {
@@ -1525,4 +1550,27 @@ test('ein haengender SMTP-Server blockiert den Erinnerungslauf nicht (#944)', { 
   });
   controller.abort();
   await assert.rejects(() => pending, /timed out/i);
+});
+
+test('ein leerer Web-Push-Versand gilt als Fehlversuch, nicht als zugestellt', async () => {
+  const { createNotificationChannelStore } = await import('../server/services/notification-channels.js');
+  const { processDueNotifications } = await import('../server/services/notifications.js');
+  const db = makeDb();
+  const store = createNotificationChannelStore({ db });
+  db.prepare("INSERT INTO tasks (id, title, created_by) VALUES (1, 'Müll rausbringen', 1)").run();
+  db.prepare("INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth) VALUES (1, 'https://push/stale', 'p', 'a')").run();
+  db.prepare("INSERT INTO reminders (id, entity_type, entity_id, remind_at, created_by) VALUES (1, 'task', 1, ?, 1)")
+    .run('2026-06-19T09:59:00.000Z');
+  const pushService = { sendPushToUser: async () => 0 };
+
+  const first = await processDueNotifications({
+    database: db, channelStore: store, pushService, providers: {}, now: new Date(),
+  });
+  assert.equal(first.failed, 1);
+  assert.equal(first.skipped, 0);
+  assert.equal(db.prepare('SELECT pushed_at FROM reminders WHERE id = 1').get().pushed_at, null);
+  assert.equal(
+    db.prepare("SELECT status FROM notification_deliveries WHERE reminder_id = 1 AND provider = 'webpush'").get().status,
+    'failed',
+  );
 });

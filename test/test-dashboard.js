@@ -2561,6 +2561,19 @@ async function withWallWindow(fn) {
   }
 }
 
+(function installWallTestStorage() {
+  const make = () => {
+    const mem = new Map();
+    return {
+      getItem: (k) => (mem.has(k) ? mem.get(k) : null),
+      setItem: (k, v) => mem.set(k, String(v)),
+      removeItem: (k) => mem.delete(k),
+    };
+  };
+  if (!global.localStorage) global.localStorage = make();
+  if (!global.sessionStorage) global.sessionStorage = make();
+}());
+
 test('Wand-Modus: die Programmzeilen sind reine Anzeige - kein Link, kein Button', async () => {
   const { __test } = await import('../public/pages/dashboard.js');
   await withWallWindow(() => {
@@ -2572,8 +2585,9 @@ test('Wand-Modus: die Programmzeilen sind reine Anzeige - kein Link, kein Button
     nodeAssert.equal(rows.length, 3, 'drei Programmzeilen gelesen');
     nodeAssert.ok(!/<a\b|href=|data-route=|<button/.test(list),
       'eine Zeile im Wand-Modus navigiert nicht und öffnet kein Modal');
-    // Der EINE Bedienpunkt der Fläche liegt außerhalb der Liste.
+    // Die Bedienpunkte der Fläche liegen außerhalb der Liste.
     nodeAssert.match(html, /id="wall-exit"/, 'der Ausstieg ist da');
+    nodeAssert.match(html, /id="wall-setup"/, 'die Darstellung ist auf der Fläche selbst erreichbar');
   });
 });
 
@@ -2634,58 +2648,27 @@ test('Wand-Modus: der Fehlerzustand trägt keinen Retry-Knopf, aber die Uhr', as
   });
 });
 
-/* EIN LAUFENDER TIMER NIMMT EINE ZEILE (Integration 2026-09-23, Browser-Abnahme
- * bei 1280x800). Der Deckel von vier Zeilen ist fuer eine Flaeche OHNE die
- * Timer-Anzeige gerechnet; die Anzeige kostet 64px plus Abstand, und an einem
- * vollen Tag schob sie Fuss samt „Timer abbrechen" und Ausstieg auf 808-856px -
- * unter den Bildrand einer Flaeche, die nicht scrollt. Solange der Timer steht,
- * zeigt das Programm eine Zeile weniger, und „+N weitere" zaehlt sie mit. */
-test('Wand-Modus: ein laufender Timer nimmt dem Programm eine Zeile', async () => {
-  const { __test } = await import('../public/pages/dashboard.js');
-  const { startWallTimer, clearWallTimer } = await import('../public/components/wall-timer.js');
-  const store = new Map();
-  const prev = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
-  Object.defineProperty(globalThis, 'localStorage', {
-    configurable: true,
-    value: { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) },
-  });
-  try {
-    await withWallWindow(() => {
-      const data = { urgentTasks: wallTasks(9), users: [] };
-      const rows = (html) => (html.match(/class="wall-row /g) ?? []).length;
-      nodeAssert.equal(rows(__test.renderWallSurface(data, null, {})), __test.WALL_ROW_CAP, 'Vorbedingung: ohne Timer der volle Deckel');
-      startWallTimer(5);
-      const running = __test.renderWallSurface(data, null, {});
-      nodeAssert.match(running, /wall__timer-value/, 'Vorbedingung: die Timer-Anzeige steht');
-      nodeAssert.equal(rows(running), __test.WALL_ROW_CAP - 1, 'mit laufendem Timer eine Zeile weniger');
-      clearWallTimer();
-      nodeAssert.equal(rows(__test.renderWallSurface(data, null, {})), __test.WALL_ROW_CAP, 'nach dem Timer wieder der volle Deckel');
-    });
-  } finally {
-    if (prev) Object.defineProperty(globalThis, 'localStorage', prev);
-    else delete globalThis.localStorage;
-  }
-});
-
-test('Wand-Modus: der Deckel greift, und der Überlauf sagt die Wahrheit', async () => {
+test('Wand-Modus: der Deckel ist das Fenster, der Rest wird gewischt', async () => {
   const { __test } = await import('../public/pages/dashboard.js');
   await withWallWindow(() => {
     const data = { urgentTasks: wallTasks(9), users: [] };
     const html = __test.renderWallSurface(data, null, {});
     const rows = html.match(/class="wall-row /g) ?? [];
     nodeAssert.ok(rows.length > 0, 'Reichweite: Zeilen wurden überhaupt gelesen');
-    nodeAssert.equal(rows.length, __test.WALL_ROW_CAP, 'der Wand-Deckel greift');
+    nodeAssert.equal(rows.length, 9, 'alle heutigen Zeilen stehen in der Liste');
+    nodeAssert.match(html, /wall-program__list--scroll/, 'die Liste scrollt im Block, der Block wächst nicht');
+    nodeAssert.ok(!/wall-program__foot/.test(html), 'kein „+N weitere" unter dem Block');
     nodeAssert.ok(__test.WALL_ROW_CAP < __test.PROGRAM_ROW_CAP,
-      'die Wand zeigt weniger Zeilen als das Cockpit - sie muss ohne Scrollen passen');
-    nodeAssert.match(html, /wall-program__foot/, 'der Überlauf spricht als Fußzeile');
+      'das Fenster der Wand ist kleiner als das Cockpit - die Seite selbst scrollt nicht');
 
-    // Die Zahl zählt gegen ALLE Zeilen des Tages, nicht gegen die gezeigten.
-    // Am Modell geprüft und nicht am Text: `t()` ist in dieser Suite nicht
-    // initialisiert und gäbe den Schlüssel zurück - eine Zusicherung über den
-    // gerenderten Satz wäre eine über den Schlüsselnamen.
-    const model = __test.buildTodayCockpitModel(data, [], { cap: __test.WALL_ROW_CAP });
-    nodeAssert.equal(model.allRows.length, 9, 'das Modell kennt den ganzen Tag');
-    nodeAssert.equal(model.overflow, 9 - __test.WALL_ROW_CAP, 'der Überlauf nennt die echte Restzahl');
+    const few = __test.renderWallSurface({ urgentTasks: wallTasks(3), users: [] }, null, {});
+    nodeAssert.ok(!/wall-program__list--scroll/.test(few), 'ohne Überlauf kein Slider');
+
+    const css = readFileSync(new URL('../public/styles/dashboard.css', import.meta.url), 'utf8');
+    nodeAssert.match(css, /\.wall-program__list--scroll\s*\{[^}]*overflow-y:\s*auto/s,
+      'der Rest wird im Block gewischt, der Block wächst nicht');
+    nodeAssert.match(css, /\[data-wall-mode\]\s+\.app-content\s*\{[^}]*overflow:\s*hidden/s,
+      'die Seite schluckt den Wisch nicht - sonst bleibt die Liste auf Android tot');
   });
 });
 
@@ -2727,12 +2710,106 @@ test('Wand-Modus: „Wer heute dran ist" entfällt im Solo-Haushalt', async () =
   }
 });
 
-test('Wand-Modus: leerer Tag spricht, statt zu verschwinden', async () => {
+test('Wand-Modus: ein Gesicht filtert das Programm, die Liste bleibt ohne Knopf', async () => {
+  const { __test } = await import('../public/pages/dashboard.js');
+  const { writeWallWhoFilter } = await import('../public/utils/wall-prefs.js');
+  await withWallWindow(() => {
+    const mia = { id: 42, display_name: 'Mia Muster', avatar_color: '#CE2A63' };
+    const leo = { id: 7, display_name: 'Leo Lang', avatar_color: '#6C3AED' };
+    const tasks = wallTasks(4, { assignTo: (i) => (i === 0 ? mia : leo) });
+    writeWallWhoFilter(42);
+    try {
+      const html = __test.renderWallSurface({ urgentTasks: tasks, users: [mia, leo] }, null, {});
+      const list = html.slice(html.indexOf('wall-program__list'), html.indexOf('</ol>'));
+      nodeAssert.match(list, /Aufgabe 1/, 'Mias Zeile bleibt');
+      nodeAssert.ok(!/Aufgabe 2/.test(list), 'Leos Zeilen fallen raus');
+      nodeAssert.ok(!/<button/.test(list), 'der Filter wohnt in den Gesichtern, nicht in der Liste');
+    } finally {
+      writeWallWhoFilter(null);
+    }
+  });
+});
+
+test('Wand-Modus: ein Display darf eine Aufgabe abhaken, ein Mitglied nicht', async () => {
   const { __test } = await import('../public/pages/dashboard.js');
   await withWallWindow(() => {
-    const html = __test.renderWallSurface({ urgentTasks: [], upcomingEvents: [], users: [] }, null, {});
-    // Eine leere Fläche liest sich aus zwei Metern wie ein Defekt.
-    nodeAssert.match(html, /wall-row--state/, 'der leere Tag bekommt seine eigene Zeile');
+    const people = [{ id: 9, display_name: 'Mia Muster', can_tick_off: true, avatar_color: '#CE2A63' }];
+    const member = __test.renderWallSurface({ urgentTasks: wallTasks(2), users: people }, null, {});
+    const memberList = member.slice(member.indexOf('wall-program__list'), member.indexOf('</ol>'));
+    nodeAssert.ok(!/<button/.test(memberList), 'ohne Display-Gesichter bleibt die Liste Text');
+
+    const display = __test.renderWallSurface(
+      { urgentTasks: wallTasks(2), users: people },
+      null,
+      { tickPeople: people },
+    );
+    const displayList = display.slice(display.indexOf('wall-program__list'), display.indexOf('</ol>'));
+    nodeAssert.match(displayList, /wall-row__tick/, 'am Display wird die Aufgabe zur Wahl');
+    nodeAssert.match(displayList, /data-wall-tick="1"/, 'die Zeile traegt die Aufgaben-Id');
+    nodeAssert.ok(!/data-route/.test(displayList), 'ohne Route');
+  });
+});
+
+test('Wand-Modus: die Termine des Tages stehen im Couloir, nicht hinter den Aufgaben', async () => {
+  const { __test } = await import('../public/pages/dashboard.js');
+  const { applyWallPreset, writeWallPrefs, DEFAULT_WALL_PREFS } = await import('../public/utils/wall-prefs.js');
+  await withWallWindow(() => {
+    applyWallPreset('hallway');
+    try {
+      const todayStr = toLocalDateKey(new Date());
+      const html = __test.renderWallSurface({
+        urgentTasks: wallTasks(6),
+        upcomingEvents: [
+          { id: 21, title: 'Conseil d ecole', start_datetime: `${todayStr}T23:59:00` },
+          { id: 22, title: 'Dentiste', start_datetime: `${todayStr}T09:00:00` },
+        ],
+        users: [],
+      }, null, {});
+      nodeAssert.match(html, /wall-events-title/, 'der Kalender hat einen eigenen Block');
+      nodeAssert.match(html, /Conseil d ecole/, 'der Abendtermin steht da');
+      const program = html.slice(html.indexOf('id="wall-program-title"'), html.indexOf('wall__aside') === -1 ? html.length : html.indexOf('wall__aside'));
+      nodeAssert.match(program, /Conseil d ecole/, 'im Tagesprogramm, nicht nur im Nebenraum');
+    } finally {
+      writeWallPrefs({ ...DEFAULT_WALL_PREFS });
+    }
+  });
+});
+
+test('Wand-Modus: Kuechen-Preset zeigt Essen statt Wer', async () => {
+  const { __test } = await import('../public/pages/dashboard.js');
+  const { applyWallPreset, writeWallPrefs, DEFAULT_WALL_PREFS } = await import('../public/utils/wall-prefs.js');
+  await withWallWindow(() => {
+    applyWallPreset('kitchen');
+    try {
+      const html = __test.renderWallSurface({
+        urgentTasks: wallTasks(1),
+        users: [{ id: 1, display_name: 'Mia Muster' }],
+        todayMeals: [{ meal_type: 'dinner', title: 'Pasta' }],
+      }, null, {});
+      nodeAssert.ok(!/wall__who/.test(html), 'Wer gehoert zum Flur, nicht zur Kueche');
+      nodeAssert.match(html, /wall-meals-title/, 'Essen steht im Nebenraum');
+    } finally {
+      writeWallPrefs({ ...DEFAULT_WALL_PREFS });
+    }
+  });
+});
+
+test('Wand-Modus: ausgeschaltetes Wetter und Timer folgen den Prefs', async () => {
+  const { __test } = await import('../public/pages/dashboard.js');
+  const { writeWallPrefs, DEFAULT_WALL_PREFS } = await import('../public/utils/wall-prefs.js');
+  await withWallWindow(() => {
+    writeWallPrefs({ showWeather: false, showTimer: false });
+    try {
+      const html = __test.renderWallSurface({ urgentTasks: wallTasks(3), users: [] }, {
+        current: { temp: 18, desc: 'klar', icon: '01d' },
+        forecast: [],
+        units: 'celsius',
+      }, {});
+      nodeAssert.ok(!/wall__weather/.test(html), 'Wetter-Block ist aus');
+      nodeAssert.ok(!/wall__timer/.test(html), 'Timer-Block ist aus');
+    } finally {
+      writeWallPrefs({ ...DEFAULT_WALL_PREFS });
+    }
   });
 });
 

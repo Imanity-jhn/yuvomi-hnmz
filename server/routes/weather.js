@@ -36,6 +36,51 @@ function wmoIcon(code, isDay = true) {
   return 'cloud-lightning';                            // 95–99 thunderstorm
 }
 
+const DAY_SLOT_HOURS = [8, 12, 16, 19];
+
+function nearestSlot(items, hour) {
+  if (!items.length) return null;
+  return items.reduce((best, cur) =>
+    Math.abs(cur.hour - hour) < Math.abs(best.hour - hour) ? cur : best, items[0]);
+}
+
+function openMeteoHours(om, day) {
+  const times = om.hourly?.time ?? [];
+  const temps = om.hourly?.temperature_2m ?? [];
+  const codes = om.hourly?.weather_code ?? [];
+  const pops = om.hourly?.precipitation_probability ?? [];
+  if (!day || !times.length) return [];
+  return DAY_SLOT_HOURS.map((hour) => {
+    const prefix = `${day}T${String(hour).padStart(2, '0')}`;
+    const i = times.findIndex((stamp) => String(stamp).startsWith(prefix));
+    if (i < 0 || temps[i] == null || codes[i] == null) return null;
+    return {
+      hour,
+      temp: Math.round(temps[i]),
+      icon: wmoIcon(codes[i], hour >= 6 && hour < 21),
+      desc: `wmo.${codes[i]}`,
+      precip: pops[i] == null ? null : Math.round(pops[i]),
+    };
+  }).filter(Boolean);
+}
+
+function owmHours(items, today) {
+  const mine = (items || []).filter((row) => row.date === today);
+  if (!mine.length) return [];
+  return DAY_SLOT_HOURS.map((hour) => {
+    const hit = nearestSlot(mine, hour);
+    if (!hit) return null;
+    const pop = hit.item.pop;
+    return {
+      hour,
+      temp: Math.round(hit.item.main.temp),
+      icon: hit.item.weather[0]?.icon,
+      desc: hit.item.weather[0]?.description,
+      precip: pop == null ? null : Math.round(Number(pop) * 100),
+    };
+  }).filter(Boolean);
+}
+
 // ----------------------------------------------------------------
 // Read a sync_config key from DB (safe — returns null on any error)
 // ----------------------------------------------------------------
@@ -261,6 +306,7 @@ export function buildRouter({ cfgGet: cfgGetFn = cfgGet, fetchFn = null, logger 
           `?latitude=${encodeURIComponent(lat)}`,
           `&longitude=${encodeURIComponent(lon)}`,
           '&current=temperature_2m,apparent_temperature,relative_humidity_2m,is_day,weather_code,wind_speed_10m',
+          '&hourly=temperature_2m,weather_code,precipitation_probability',
           '&daily=weather_code,temperature_2m_max,temperature_2m_min',
           '&timezone=auto',
           '&forecast_days=6',
@@ -307,6 +353,7 @@ export function buildRouter({ cfgGet: cfgGetFn = cfgGet, fetchFn = null, logger 
           },
           today: days.find((d) => d.date === omToday) ?? null,
           forecast: days.filter((d) => d.date > omToday).slice(0, 5),
+          hours: openMeteoHours(om, omToday),
         };
       } else {
         // OWM legacy path
@@ -336,6 +383,7 @@ export function buildRouter({ cfgGet: cfgGetFn = cfgGet, fetchFn = null, logger 
         locationOffsetMs = owmOffsetMs;
         let todayDay = null;
         let forecastDays = [];
+        let hourSlots = [];
 
         if (forecastRes.ok) {
           const forecastJson = await forecastRes.json();
@@ -348,7 +396,7 @@ export function buildRouter({ cfgGet: cfgGetFn = cfgGet, fetchFn = null, logger 
             if (!dayMap.has(dateStr)) dayMap.set(dateStr, { temps: [], items: [] });
             const day = dayMap.get(dateStr);
             day.temps.push(item.main.temp);
-            day.items.push({ item, hour: local.getUTCHours() });
+            day.items.push({ item, hour: local.getUTCHours(), date: dateStr });
           }
           // Erst alle Tage bauen, dann heute heraustrennen - nicht waehrend des
           // Laufs deckeln: sonst haengt es an der Schluesselreihenfolge, ob der
@@ -369,6 +417,10 @@ export function buildRouter({ cfgGet: cfgGetFn = cfgGet, fetchFn = null, logger 
             });
           }
           todayDay = days.find((d) => d.date === owmToday) ?? null;
+          hourSlots = owmHours(
+            [...dayMap.values()].flatMap((bucket) => bucket.items),
+            owmToday,
+          );
           // `>` und nicht `!==`: die Liste kann mit einem bereits vergangenen
           // Ortstag beginnen, und der gehoert nicht an die Spitze einer
           // VORhersage.
@@ -413,6 +465,7 @@ export function buildRouter({ cfgGet: cfgGetFn = cfgGet, fetchFn = null, logger 
           },
           today: todayDay,
           forecast: forecastDays,
+          hours: hourSlots,
         };
       }
 

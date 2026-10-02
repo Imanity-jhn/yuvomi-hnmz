@@ -1,5 +1,5 @@
 /**
- * Test: automatische Aufgaben-Erinnerungen (Faelligkeit + J-3) und Fan-out.
+ * Test: automatische Aufgaben-Erinnerungen (nur Faelligkeit) und Fan-out.
  *
  * Ausfuehren: node --experimental-sqlite --test test/test-task-reminders.js
  */
@@ -15,7 +15,6 @@ const {
   fanOutTaskReminders,
   dropInheritedTaskReminders,
   syncTaskAutoReminders,
-  TASK_DUE_LEAD_DAYS,
 } = await import('../server/services/task-reminders.js');
 const { setEventAssignments } = await import('../server/routes/calendar/helpers.js');
 const database = dbmod.get();
@@ -44,24 +43,30 @@ const autosOf = (taskId, userId) => database.prepare(`
   ORDER BY remind_at ASC
 `).all(taskId, userId);
 
-test('Zustaendige bekommen Faelligkeit und J-3', () => {
+test('Zustaendige bekommen nur die Faelligkeit, keinen Vorlauf J-3', () => {
   const id = newTask({ assignees: [ANNA, BEN], dueDate: '2099-06-15', dueTime: '18:00' });
   const written = syncTaskAutoReminders(database, id, { now: new Date('2099-06-01T10:00:00Z') });
-  assert.ok(written >= 2);
+  assert.ok(written >= 1);
   const bens = autosOf(id, BEN);
-  assert.equal(bens.length, 2, 'J-3 und Faelligkeit');
-  assert.equal(TASK_DUE_LEAD_DAYS, 3);
-  assert.ok(bens[0].remind_at.startsWith('2099-06-12'));
-  assert.ok(bens[1].remind_at.startsWith('2099-06-15'));
+  assert.equal(bens.length, 1, 'nur die Faelligkeit');
+  assert.ok(bens[0].remind_at.startsWith('2099-06-15'));
   assert.equal(bens[0].assigned_from, BEN);
 });
 
-test('kein J-3 wenn die Faelligkeit in weniger als 3 Tagen liegt', () => {
-  const id = newTask({ assignees: [BEN], dueDate: '2099-06-02', dueTime: '18:00' });
+test('ein alter J-3 Auto-Termin wird beim naechsten Sync entfernt', () => {
+  const id = newTask({ assignees: [BEN], dueDate: '2099-06-15', dueTime: '18:00' });
+  database.prepare(`
+    INSERT INTO reminders (entity_type, entity_id, remind_at, created_by, assigned_from)
+    VALUES ('task', ?, '2099-06-12T16:00:00.000Z', ?, ?)
+  `).run(id, BEN, BEN);
   syncTaskAutoReminders(database, id, { now: new Date('2099-06-01T10:00:00Z') });
   const bens = autosOf(id, BEN);
-  assert.equal(bens.length, 1, 'nur die Faelligkeit, nicht der Vorlauf');
-  assert.ok(bens[0].remind_at.startsWith('2099-06-02'));
+  assert.equal(bens.length, 1);
+  assert.ok(bens[0].remind_at.startsWith('2099-06-15'));
+  assert.equal(database.prepare(`
+    SELECT COUNT(*) n FROM reminders
+    WHERE entity_type='task' AND entity_id=? AND remind_at LIKE '2099-06-12%'
+  `).get(id).n, 0);
 });
 
 test('ohne Faelligkeit keine Auto-Erinnerung', () => {

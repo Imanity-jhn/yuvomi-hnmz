@@ -40,6 +40,28 @@
 .photo-screensaver p[data-position="2"] { right: 1.25rem; top: 1.25rem; }
 .photo-screensaver p[data-position="3"] { left: 1.25rem; top: 1.25rem; }
 
+/* Eine Zeile „was als Nächstes kommt" - fest unten, nicht mit dem Foto-Ort.
+ * Die Fotozeile wandert gegen Einbrennen; diese Auskunft soll man finden. */
+.photo-screensaver__next {
+  left: 50%;
+  right: auto;
+  top: auto;
+  bottom: 1.25rem;
+  transform: translateX(-50%);
+  max-width: min(92vw, 40rem);
+  font-size: clamp(1rem, 2.4vmin, 1.5rem);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+.photo-screensaver__next[hidden] {
+  display: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .photo-screensaver img { transition: none; }
 }

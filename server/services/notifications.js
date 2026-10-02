@@ -14,6 +14,7 @@ import { emailProvider } from './notification-providers/email.js';
 import { guardedFetch } from './notification-providers/guarded-fetch.js';
 import { syncAllBirthdayReminders } from './birthdays.js';
 import { resolveHouseholdFormats, formatDateKey, translate } from '../utils/i18n.js';
+import { decoratePushPayload } from './push-payload.js';
 import { warrantyEndDate } from './inventory-deadlines.js';
 import { syncAllPantryExpiryReminders } from './pantry-reminders.js';
 import { syncAllCycleReminders } from './cycle-reminders.js';
@@ -255,11 +256,60 @@ function fastingBody(reminder, locale) {
     : 'health.fasting.remindNext');
 }
 
+function clock(raw) {
+  const m = /^(\d{2}):(\d{2})/.exec(String(raw || ''));
+  return m ? `${m[1]}:${m[2]}` : '';
+}
+
+function formatTaskWhen(reminder, dateFormat) {
+  const date = reminder.task_due_date ? formatDateKey(reminder.task_due_date, dateFormat) : '';
+  const time = clock(reminder.task_due_time);
+  if (date && time) return `${date} · ${time}`;
+  return date || time;
+}
+
+function formatEventWhen(reminder, dateFormat) {
+  const raw = String(reminder.event_start || '');
+  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(raw);
+  if (!m) return '';
+  const date = formatDateKey(m[1], dateFormat);
+  return date ? `${date} · ${m[2]}` : m[2];
+}
+
+function isAutoDueReminder(reminder) {
+  return reminder.assigned_from != null && Number(reminder.assigned_from) === Number(reminder.created_by);
+}
+
+function taskReminderCopy(reminder, locale, dateFormat) {
+  const item = reminder.entity_title || FALLBACK_BODY;
+  const when = formatTaskWhen(reminder, dateFormat);
+  const due = isAutoDueReminder(reminder);
+  const kind = translate(locale, due ? 'reminders.pushDueTitle' : 'reminders.pushReminderTitle');
+  return {
+    title: `${kind} · ${translate(locale, 'nav.tasks')}`,
+    body: when ? translate(locale, 'reminders.pushBodyWithWhen', { title: item, when }) : item,
+  };
+}
+
+function eventReminderCopy(reminder, locale, dateFormat) {
+  const item = reminder.entity_title || FALLBACK_BODY;
+  const when = formatEventWhen(reminder, dateFormat);
+  return {
+    title: `${translate(locale, 'reminders.pushReminderTitle')} · ${translate(locale, 'nav.calendar')}`,
+    body: when ? translate(locale, 'reminders.pushBodyWithWhen', { title: item, when }) : item,
+  };
+}
+
 function reminderPayload(reminder, locale, dateFormat) {
   const title = reminder.entity_title || FALLBACK_BODY;
   const origin = REMINDER_ORIGINS[reminder.entity_type];
   let body = title;
-  if (reminder.entity_type === 'subscription' && reminder.entity_title) {
+  let headline = origin ? translate(locale, origin.titleKey) : APP_NAME;
+  if (reminder.entity_type === 'task' && reminder.entity_title) {
+    ({ title: headline, body } = taskReminderCopy(reminder, locale, dateFormat));
+  } else if (reminder.entity_type === 'event' && reminder.entity_title) {
+    ({ title: headline, body } = eventReminderCopy(reminder, locale, dateFormat));
+  } else if (reminder.entity_type === 'subscription' && reminder.entity_title) {
     body = subscriptionBody(reminder);
   } else if (reminder.entity_type === 'inventory_item' && reminder.entity_title) {
     body = warrantyBody(reminder);
@@ -290,17 +340,18 @@ function reminderPayload(reminder, locale, dateFormat) {
   } else if ((reminder.entity_type === 'task' || reminder.entity_type === 'event') && reminder.entity_id) {
     url = `${origin ? origin.url : (reminder.entity_type === 'task' ? '/tasks' : '/calendar')}?open=${reminder.entity_id}`;
   }
-  return {
+  const stamp = Date.parse(reminder.remind_at);
+  return decoratePushPayload({
     // Ohne bekannte Herkunft bleibt der App-Name: er ist nichtssagend, aber nie
     // falsch - und ein roher `entity_type` im Titel waere beides. Das Ziel
     // faellt aus demselben Grund auf die Uebersicht: sie ist die einzige Seite,
     // die es mit Sicherheit gibt.
-    title: origin ? translate(locale, origin.titleKey) : APP_NAME,
+    title: headline,
     body,
     url,
     tag: `reminder-${reminder.id}`,
     priority: 'default',
-  };
+  }, locale, { timestamp: Number.isFinite(stamp) ? stamp : Date.now() });
 }
 
 function upsertPendingDelivery(database, { reminderId, provider, channelId = null, targetKey, nowIso }) {
@@ -493,7 +544,7 @@ export async function processDueNotifications({
   }
 
   const dueRows = activeDb.prepare(`
-    SELECT r.id, r.created_by, r.entity_type, r.entity_id, r.assigned_from,
+    SELECT r.id, r.created_by, r.entity_type, r.entity_id, r.assigned_from, r.remind_at,
       CASE r.entity_type
         WHEN 'task'  THEN (SELECT title FROM tasks           WHERE id = r.entity_id)
         WHEN 'event' THEN (SELECT title FROM calendar_events WHERE id = r.entity_id)
@@ -526,6 +577,9 @@ export async function processDueNotifications({
           WHERE pr.id = r.entity_id
         )
       END AS entity_title,
+      CASE WHEN r.entity_type = 'task' THEN (SELECT due_date FROM tasks WHERE id = r.entity_id) END AS task_due_date,
+      CASE WHEN r.entity_type = 'task' THEN (SELECT due_time FROM tasks WHERE id = r.entity_id) END AS task_due_time,
+      CASE WHEN r.entity_type = 'event' THEN (SELECT start_datetime FROM calendar_events WHERE id = r.entity_id) END AS event_start,
       -- Unterscheidet die eigene Perioden-Erinnerung von der an eine
       -- Partnerperson weitergereichten (gleicher entity_type, siehe
       -- cycleBody() oben). Der Anzeigename des Zyklus-Eigentümers selbst wird
@@ -671,8 +725,18 @@ export async function processDueNotifications({
             markSent(activeDb, delivery.id, nowIso);
             counters.sent += 1;
           } else {
-            markSkipped(activeDb, delivery.id, nowIso, 'No active Web Push subscriptions accepted the notification.');
-            counters.skipped += 1;
+            // Nicht als endgueltig uebersprungen merken: 410/abgelaufene Abos
+            // loeschen die Zeilen, und ohne Retry kommt die Meldung erst wieder,
+            // wenn die App geoeffnet wird (Poll). Drei Versuche geben dem
+            // naechsten Resync eine Chance, das Geraet wieder zu erreichen.
+            const status = markFailed(
+              activeDb,
+              delivery.id,
+              now,
+              new Error('No active Web Push subscriptions accepted the notification.'),
+            );
+            if (status === 'skipped') counters.skipped += 1;
+            else counters.failed += 1;
           }
         } else {
           const provider = providers[target.provider];

@@ -65,7 +65,7 @@ test('GET /sw.js injects the build revision and forbids intermediary caching', a
 
   assert.equal(res.status, 200);
   assert.equal(res.headers.get('cache-control'), 'no-store, max-age=0');
-  assert.match(body, /const APP_BUILD_REVISION\s*=\s*'acceptance-route-test'/);
+  assert.match(body, /const APP_BUILD_REVISION\s*=\s*'acceptance-route-test-\d+'/);
   assert.doesNotMatch(body, /__YUVOMI_BUILD_REVISION__/);
 });
 

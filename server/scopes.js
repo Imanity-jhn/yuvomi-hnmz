@@ -42,7 +42,7 @@ const SCOPE_MODULES = [
   // kein eigenes Modul (#469), aber ihre Route braucht eine Zuordnung - ohne
   // eine waere sie fuer JEDES gescopte Token gesperrt (tokenAllows verweigert
   // unbekannte Module) und damit auch fuer das, das die Uebersicht lesen darf.
-  { key: 'dashboard',    prefixes: ['dashboard', 'quick-links'] },
+  { key: 'dashboard',    prefixes: ['dashboard', 'quick-links', 'routines'] },
   { key: 'search',       prefixes: ['search'] },
 ];
 

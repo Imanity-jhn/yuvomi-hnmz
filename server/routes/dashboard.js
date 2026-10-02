@@ -277,6 +277,7 @@ router.get('/', (req, res) => {
    * Der Standard bleibt „mit Geburtstagen": ein Filter wirkt nur, wo jemand ihn
    * gesetzt hat. Der Parameter reist deshalb nur in seiner einen Richtung. */
   const includeBirthdays = req.query.events_birthdays !== 'hide';
+  const eventsLimit = Math.min(20, Math.max(1, Number.parseInt(String(req.query.events_limit ?? ''), 10) || 5));
 
   const now = new Date();
 
@@ -321,16 +322,16 @@ router.get('/', (req, res) => {
   for (const key of denied) Object.assign(result, DENIED_PAYLOAD[key]?.({ month: currentMonth }));
   const allows = (moduleKey) => !denied.has(moduleKey);
 
-  // Anstehende Termine (nächste 5, ab jetzt).
-  // Geteilte Logik mit /calendar/upcoming: expandiert wiederkehrende Serien,
-  // sodass auch Termine erscheinen, deren Master-Start in der Vergangenheit liegt.
+  // Anstehende Termine (naechste 5, ab Mitternacht der Haushaltszone).
+  // Die Wand fragt `events_limit=20`, damit ein voller Tag nicht hinter
+  // fuenf Morgen-Terminen verschwindet.
   if (allows('calendar')) try {
     // Der Deckel von fuenf zaehlt nur, was noch kommt (#1449); beendete Termine
     // von heute kommen ausserhalb mit - die Kachel zeigt sie zurueckgetreten,
     // das Heute-Blatt laesst sie weg. Welche beendet sind, entscheidet der
     // Browser an der Uhr: ein Termin endet auch zwischen zwei Abrufen.
     result.upcomingEvents = serializeEvents(getUpcomingEvents(d, {
-      userId, limit: 5, fromToday: true, assignedTo: eventsAssignedTo, includeBirthdays,
+      userId, limit: eventsLimit, fromToday: true, assignedTo: eventsAssignedTo, includeBirthdays,
       keepEndedToday: ENDED_TODAY_POOL,
     }), { database: d, viewer: documentViewer(req), actorId: userId, isAdmin: isAdminUser(req) });
   } catch (err) {

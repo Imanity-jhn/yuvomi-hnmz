@@ -132,7 +132,8 @@ test('die Blaetter verteilen sich wie beschlossen auf drei Bereiche, je Modul ei
   const perDomain = {};
   for (const leaf of SETTINGS_LEAVES) perDomain[leaf.domainId] = (perDomain[leaf.domainId] ?? 0) + 1;
   // R14 (A7 P2-3): Inventar und Entsorgung bekommen ein Blatt fuer ihren Feed.
-  assert.deepEqual(perDomain, { personal: 5, admin: 8, modules: 15 });
+  // HNMZ: Kinder-Routinen sind ein sechstes Konto-Blatt.
+  assert.deepEqual(perDomain, { personal: 6, admin: 8, modules: 15 });
   assert.deepEqual(SETTINGS_DOMAINS.map((domain) => domain.id), ['personal', 'admin', 'modules']);
   // Jedes Blatt haengt an einem existierenden Bereich, jeder Abschnitt an
   // einem existierenden Blatt, und kein Blatt ist leer.

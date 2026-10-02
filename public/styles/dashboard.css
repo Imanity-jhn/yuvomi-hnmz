@@ -6427,3 +6427,267 @@ button.today-cockpit__more--link {
   .nutrition-widget__row { grid-template-columns: minmax(5rem, 8rem) 1fr auto; }
   .nutrition-widget__bar { grid-column: auto; grid-row: auto; }
 }
+
+/* ── Kinder-Routine auf der Wand ── */
+.wall-routine {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+  gap: clamp(0.35rem, 1vmin, 0.7rem);
+}
+
+.wall-routine__chrome {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: clamp(0.4rem, 1vmin, 0.8rem);
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+.wall-routine__periods {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--space-2);
+}
+
+.wall-routine__period,
+.wall-routine__person,
+.wall-routine__card {
+  font-family: inherit;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+
+.wall-routine__period {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--target-md);
+  padding: 0.3rem 0.85rem;
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--color-surface) 82%, transparent);
+  color: var(--color-text-secondary);
+  font-size: clamp(0.9rem, 1.8vmin, 1.15rem);
+}
+
+.wall-routine__period svg {
+  width: 1.2em;
+  height: 1.2em;
+}
+
+.wall-routine__period--on {
+  background: var(--color-accent-subtle);
+  color: var(--color-text-primary);
+  border-color: var(--color-accent);
+}
+
+.wall-routine__people {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.wall-routine__person {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.4rem;
+  flex: 0 0 auto;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0.2rem 0.7rem 0.2rem 0.25rem;
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--color-surface) 72%, transparent);
+  color: inherit;
+}
+
+.wall-routine__person--on {
+  background: var(--color-accent-subtle);
+  border-color: var(--color-accent);
+}
+
+.wall-routine__avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: clamp(1.85rem, 4.2vmin, 2.4rem);
+  height: clamp(1.85rem, 4.2vmin, 2.4rem);
+  border-radius: var(--radius-full);
+  overflow: hidden;
+  font-size: 0.7em;
+  font-weight: var(--font-weight-semibold);
+}
+
+.wall-routine__avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.wall-routine__who-name {
+  min-width: 0;
+  overflow: visible;
+  white-space: nowrap;
+  font-size: clamp(0.9rem, 1.9vmin, 1.15rem);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.2;
+}
+
+.wall-routine__grid {
+  display: grid;
+  grid-template-columns: repeat(var(--routine-cols, 4), minmax(0, 1fr));
+  grid-template-rows: repeat(var(--routine-rows, 1), minmax(0, 1fr));
+  gap: clamp(0.4rem, 1.1vmin, 0.85rem);
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.wall-routine__card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+  min-height: 0;
+  height: 100%;
+  padding: 0.5rem 0.4rem;
+  overflow: hidden;
+  border-radius: var(--radius-xl);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
+  color: var(--color-text-primary);
+}
+
+.wall-routine__card:active {
+  transform: scale(0.97);
+}
+
+.wall-routine__icon {
+  display: grid;
+  place-items: center;
+  width: clamp(2.6rem, 10vmin, 4.4rem);
+  height: clamp(2.6rem, 10vmin, 4.4rem);
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--color-accent) var(--tint-surface), var(--color-surface));
+  color: var(--color-accent);
+}
+
+.wall-routine__icon svg {
+  width: 60%;
+  height: 60%;
+}
+
+.wall-routine__label {
+  text-align: center;
+  font-size: clamp(0.9rem, 2.1vmin, 1.2rem);
+  font-weight: var(--font-weight-medium);
+  line-height: var(--line-height-snug);
+}
+
+.wall-routine__photo {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.wall-routine__card--photo {
+  padding: 0;
+  background: #fffaf3;
+}
+
+.wall-routine__card--photo .wall-routine__photo {
+  position: absolute;
+  inset: 0;
+}
+
+.wall-routine__card--photo.wall-routine__card--titled .wall-routine__label {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1;
+  padding: 1.4rem 0.45rem 0.45rem;
+  background: linear-gradient(transparent, color-mix(in srgb, black 58%, transparent));
+  color: #fff;
+}
+
+.wall-routine__empty {
+  margin: auto 0;
+  text-align: center;
+  font-size: clamp(1.2rem, 3vmin, 1.8rem);
+  color: var(--color-text-secondary);
+}
+
+.wall-routine__empty--done {
+  color: var(--color-success);
+  font-weight: var(--font-weight-semibold);
+}
+
+.wall-routine__section {
+  margin: 0;
+  font-size: var(--type-caption);
+  color: var(--color-text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.wall-routine__done {
+  flex: 0 0 auto;
+}
+
+.wall-routine__done-row {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: var(--space-2);
+  overflow-x: auto;
+  overflow-y: hidden;
+  max-height: 4.5rem;
+  scrollbar-width: thin;
+}
+
+.wall-routine__card--done {
+  flex: 0 0 auto;
+  width: 4.3rem;
+  height: 4.3rem;
+  min-height: 0;
+  padding: 0.25rem;
+  background: var(--color-surface-receded);
+  border-color: var(--color-border-receded);
+  color: var(--color-text-receded);
+}
+
+.wall-routine__card--done.wall-routine__card--photo {
+  padding: 0;
+}
+
+.wall-routine__card--done .wall-routine__photo {
+  position: absolute;
+  inset: 0;
+}
+
+.wall-routine__card--done .wall-routine__icon {
+  width: 2.2rem;
+  height: 2.2rem;
+}
+
+.wall-routine__card--done .wall-routine__label {
+  font-size: var(--type-caption);
+}
+
+[data-wall-night] .wall-routine__card:not(.wall-routine__card--done),
+[data-wall-night] .wall-routine__period,
+[data-wall-night] .wall-routine__person {
+  background: color-mix(in srgb, var(--color-surface) 88%, black);
+}

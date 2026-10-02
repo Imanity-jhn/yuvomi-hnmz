@@ -38,6 +38,13 @@ export function dashboardPaths() {
             description: '`hide` drops appointments that belong to a birthday entry from `upcomingEvents` and `weekEvents`, so a household that already shows the Birthdays tile does not read them twice. Applied before the five-item cap, so the freed rows are filled with the next real appointments. Anything else keeps them - birthdays are in by default.',
             schema: { type: 'string', enum: ['show', 'hide'] },
           },
+          {
+            name: 'events_limit',
+            in: 'query',
+            required: false,
+            description: 'Cap for `upcomingEvents` (1–20). Default 5. Wall mode requests 20 so a busy day is not truncated after the morning.',
+            schema: { type: 'integer', minimum: 1, maximum: 20 },
+          },
         ],
       }),
     },

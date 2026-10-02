@@ -49,7 +49,20 @@ import { widgetDisplayLabel, optionFieldLabel } from '/utils/extension-i18n.js';
 import { whoMark } from '/utils/seal-pair.js';
 import { MODULE_ICON, moduleIconHTML } from '/nav-icons.js';
 import { enterWallMode, exitWallMode, isWallActive, syncWallMode } from '/utils/wall-mode.js';
+import {
+  readWallPrefs, readWallWhoFilter, toggleWallWhoFilter, wallHasBlock,
+  applyWallNextToDocument, writeWallPrefs, WALL_ROW_CAP_DEFAULT,
+} from '/utils/wall-prefs.js';
 import { renderWallTimer, wireWallTimer } from '/components/wall-timer.js';
+import { renderWallSetup, wireWallSetup, isWallSetupOpen, setWallSetupOpen } from '/components/wall-setup.js';
+import {
+  renderWallTick, wireWallTick, completeWallTask, readWallTickTask, setWallTickTask, isWallTickOpen,
+} from '/components/wall-tick.js';
+import {
+  renderWallRoutine, wireWallRoutine, completeRoutineStep, undoRoutineStep,
+  activeRoutinePerson,
+} from '/components/wall-routine.js';
+import { routineWallpaperUrl } from '/utils/routines.js';
 import { rememberLayoutHint, layoutHintSizes, layoutHintQuery } from '/utils/dashboard-layout-hint.js';
 import { emptyHintHTML } from '/utils/empty-state.js';
 import { quickLinkHost } from '/utils/quick-link-url.js';
@@ -5096,24 +5109,51 @@ function clockWidgetParts(now = new Date()) {
  *   Ihre IDs bleiben dieselben - der Minutentakt (`updateClockWidget`) findet
  *   sie so in beiden Zustaenden, statt ein zweites Mal geschrieben zu werden.
  */
-function renderClockWidget({ wall = false } = {}) {
+function renderWallClockHours(weather) {
+  const slots = Array.isArray(weather?.hours) ? weather.hours : [];
+  if (!slots.length) return '';
+  const nowHour = nowFields()?.hour;
+  const unit = weatherUnitSymbol(weather.units);
+  return `
+    <ol class="clock-widget__hours" aria-label="${esc(t('dashboard.weather'))}">
+      ${slots.map((slot) => {
+        const past = Number.isInteger(nowHour) && slot.hour < nowHour;
+        const desc = weatherDescText(weather, slot.desc);
+        return `
+          <li class="clock-widget__hour${past ? ' clock-widget__hour--past' : ''}"${weatherToneAttr(slot.icon)}>
+            <span class="clock-widget__hour-time">${esc(String(slot.hour).padStart(2, '0'))}h</span>
+            ${weatherIconHtml(weather, slot.icon, 'clock-widget__hour-sky', 22, desc)}
+            <span class="clock-widget__hour-temp">${esc(String(slot.temp))}${esc(unit)}</span>
+          </li>`;
+      }).join('')}
+    </ol>`;
+}
+
+/**
+ * @param {{wall?: boolean, weather?: object|null}} [options]
+ */
+function renderClockWidget({ wall = false, weather = null } = {}) {
   const { time, date, machineTime } = clockWidgetParts();
   const cls = wall ? 'clock-widget clock-widget--wall' : 'widget widget--clock clock-widget';
+  const hours = wall && weather?.hours?.length && readWallPrefs().showWeather !== false
+    ? renderWallClockHours(weather)
+    : '';
   const body = `
-    <time class="clock-widget__time" id="clock-widget-time" datetime="${esc(machineTime)}">${esc(time)}</time>
-    <p class="clock-widget__date" id="clock-widget-date">${esc(date)}</p>`;
-  // Kachel-Form bekommt seit dem Polish-Batch (PLAN.md #7) denselben
-  // Siegel+Titel-Kopf wie ihre 15 Geschwister-Widgets - vorher eines von zwei
-  // Widgets ganz ohne Kopf (das andere war das Wetter). Die Wand-Form bleibt
-  // unveraendert kopflos: dort ist die Uhr der Anker der Flaeche, keine
-  // Kachel unter anderen, und ihre Kinder bleiben deshalb ungewrappt.
+    <div class="clock-widget__when">
+      <time class="clock-widget__time" id="clock-widget-time" datetime="${esc(machineTime)}">${esc(time)}</time>
+      <p class="clock-widget__date" id="clock-widget-date">${esc(date)}</p>
+    </div>
+    ${hours}`;
   if (wall) {
     return `<div class="${cls}" id="clock-widget">${body}</div>`;
   }
   return `
     <div class="${cls}" id="clock-widget">
       ${widgetHeader('clock', t('dashboard.clock'), null, null, null, 'dashboard')}
-      <div class="widget__body clock-widget__body">${body}</div>
+      <div class="widget__body clock-widget__body">
+        <time class="clock-widget__time" id="clock-widget-time" datetime="${esc(machineTime)}">${esc(time)}</time>
+        <p class="clock-widget__date" id="clock-widget-date">${esc(date)}</p>
+      </div>
     </div>`;
 }
 
@@ -5170,8 +5210,8 @@ function startClockTicker(container, signal, onTick = null) {
  * DESHALB SIND DIE ZEILEN KEINE LINKS. Der Modus ist ein Read-Zustand: waeren
  * die Zeilen beruehrbar, braeuchten sie Distanz-Zielgroessen weit ueber 44px
  * und fuehrten in Ansichten, die auf Arm-Laenge gebaut sind. Wer wirklich etwas
- * tun will, ist einen Tap vom normalen Dashboard entfernt. Der einzige
- * Bedienpunkt der ganzen Flaeche ist der Ausstieg.
+ * tun will, geht in die App. Auf der Flaeche selbst bleiben nur Geraete-lokale
+ * Handlungen: Ausstieg, Kuechentimer, Wer-Filter, Darstellung.
  *
  * DIE VIER DINGE, IN DIESER RANGFOLGE: Uhrzeit gross (der Anker, aus dem die
  * 48/72px-Display-Stufen aus tokens.css endlich ihre Rolle bekommen - laut
@@ -5188,35 +5228,83 @@ const WALL_AWAKE_MS = 6000;
 /** So viele Gesichter zeigt „Wer heute dran ist", der Rest spricht als Zahl. */
 const WALL_WHO_CAP = 6;
 
-/* DER DECKEL DER WAND IST KLEINER ALS DER DES COCKPITS - GEMESSEN, NICHT GERATEN.
+/* DER DECKEL DER WAND IST DIE FENSTERHOEHE, NICHT DER SCHLUSS DER LISTE.
  *
  * Das Cockpit zeigt sechs Zeilen auf Arm-Laenge. In Distanzgroesse ist eine
- * Zeile rund 88px hoch; mit Uhr, Abschnittskopf, Fusszeile und der zeitlosen
- * Einkaufszeile ergaben sechs davon 892px - auf dem kleinsten realistischen
- * Wandtablet (1280x800) lief die Flaeche unten aus dem Bild, samt Ausstieg.
- * Eine Wand kann nicht scrollen, also muss das Bild passen.
+ * Zeile rund 88px hoch; mit Uhr, Abschnittskopf und der zeitlosen Einkaufszeile
+ * ergaben sechs davon 892px - auf dem kleinsten realistischen Wandtablet
+ * (1280x800) lief die Flaeche unten aus dem Bild, samt Ausstieg. Die SEITE
+ * darf deshalb nicht wachsen; der Block bleibt so hoch wie `rowCap` Zeilen.
  *
- * Vier ist deshalb kein zweiter Deckel neben `PROGRAM_ROW_CAP`, sondern
- * derselbe Mechanismus mit dem Wert, der auf DIESE Flaeche passt - und der
- * Ueberlauf luegt nicht: „+N weitere heute" steht darunter und zaehlt aus
- * demselben Modell. Wer aus zwei Metern mehr als vier Zeilen liest, liest
- * ohnehin nicht mehr im Vorbeigehen, sondern arbeitet eine Liste ab - und
- * dafuer gibt es das Dashboard. */
-const WALL_ROW_CAP = 4;
+ * Was nicht in dieses Fenster passt, steht trotzdem in der Liste: man wischt
+ * darin, der Block waechst nicht, und „+N weitere heute" waere genau die Luege,
+ * die den Rest hinter einer Fusszeile versteckt. */
+const WALL_ROW_CAP = WALL_ROW_CAP_DEFAULT;
 
-/** Eine Programmzeile als reiner Text - kein href, kein data-route, kein Modal. */
-function renderWallRow(row) {
+function withWallEventLimit(path, wall) {
+  if (!wall) return path;
+  if (/[?&]events_limit=/.test(path)) return path;
+  return `${path}${path.includes('?') ? '&' : '?'}events_limit=20`;
+}
+
+function wallCockpitModel(data, prefs, whoId) {
+  const full = buildTodayCockpitModel(data, [], { cap: 99 });
+  const allRows = full.allRows ?? [];
+  const source = whoId == null
+    ? allRows
+    : allRows.filter((row) => Number(row.who?.id) === Number(whoId));
+  const rowCap = prefs.rowCap;
+  const overflow = Math.max(0, source.length - rowCap);
+  let state = null;
+  if (!source.length) {
+    state = whoId != null
+      ? { title: t('dashboard.wallWhoFilterEmpty'), sub: '', icon: 'users' }
+      : (full.state ?? { title: t('dashboard.todayFree'), sub: '', icon: 'sparkles' });
+  }
+  return {
+    ...full,
+    allRows,
+    rows: source,
+    rowCap,
+    overflow,
+    state,
+    shopping: whoId != null ? null : full.shopping,
+    coda: overflow > 0 || !source.length ? null : full.coda,
+  };
+}
+
+function wallTodayEvents(data) {
+  if (window.yuvomi?.isModuleDisabled?.('calendar')) return [];
+  const events = Array.isArray(data?.upcomingEvents) ? data.upcomingEvents : [];
+  const today = householdToday();
+  return events.filter((event) => eventOccurrenceDateKey(event) === today);
+}
+
+/**
+ * Eine Programmzeile. Ohne Display bleibt sie Text. Am Display wird eine
+ * offene Aufgabe zur Wahl der Person - kein href, keine Route, kein Modal.
+ */
+function renderWallRow(row, { canTick = false } = {}) {
   const time = row.timeLabel
     ? `<span class="wall-row__time${row.overdue ? ' wall-row__time--overdue' : ''}">${esc(row.timeLabel)}</span>`
     : '';
-  return `
-    <li class="wall-row wall-row--${esc(row.tone)}">
+  const inner = `
       <span class="module-seal wall-row__seal">${moduleIconHTML(row.icon)}</span>
       <span class="wall-row__body">
         <span class="wall-row__title">${esc(row.title)}</span>
         <span class="wall-row__sub">${esc(row.sub)}</span>
       </span>
-      ${time}
+      ${time}`;
+  if (canTick && row.kind === 'task' && row.objectId != null) {
+    return `
+    <li class="wall-row wall-row--${esc(row.tone)}">
+      <button type="button" class="wall-row__tick" data-wall-tick="${esc(String(row.objectId))}"
+          aria-label="${esc(t('tasks.doneByPick', { title: row.title }))}">${inner}</button>
+    </li>`;
+  }
+  return `
+    <li class="wall-row wall-row--${esc(row.tone)}">
+      ${inner}
     </li>`;
 }
 
@@ -5238,17 +5326,17 @@ function renderWallProgram(model) {
         </span>
       </li>`);
   }
-  parts.push(...model.rows.map(renderWallRow));
+  parts.push(...model.rows.map((row) => renderWallRow(row, { canTick: model.canTick })));
   if (model.shopping) parts.push(renderWallRow(model.shopping));
 
-  const foot = model.overflow > 0
-    ? t('dashboard.todayMore', { count: model.overflow })
-    : model.coda;
+  const cap = model.rowCap ?? WALL_ROW_CAP;
+  const scroll = parts.length > cap;
+  const foot = model.coda;
 
   return `
     <section class="wall__program" aria-labelledby="wall-program-title">
       <h2 class="wall__section-title" id="wall-program-title">${esc(t('dashboard.todayTitle'))}</h2>
-      <ol class="wall-program__list">${parts.join('')}</ol>
+      <ol class="wall-program__list${scroll ? ' wall-program__list--scroll' : ''}">${parts.join('')}</ol>
       ${foot ? `<p class="wall-program__foot">${esc(foot)}</p>` : ''}
     </section>`;
 }
@@ -5270,7 +5358,7 @@ function renderWallProgram(model) {
  * auf zwei Metern schlechter als gar keiner. Im eigenen Haushalt ist der
  * Vorname ohnehin die Antwort.
  */
-function renderWallWho(data, model) {
+function renderWallWho(data, model, { filterId = null } = {}) {
   if (isSoloHousehold()) return '';
   const users = Array.isArray(data?.users) ? data.users : [];
   if (!users.length) return '';
@@ -5291,18 +5379,22 @@ function renderWallWho(data, model) {
     ? `<ul class="wall-who__list">${shown.map((u) => {
         const color = u.avatar_color || AVATAR_FALLBACK_COLOR;
         const count = counts.get(u.id);
+        const pressed = Number(filterId) === Number(u.id);
         return `
-          <li class="wall-who__member">
-            <span class="wall-who__mark">
-              <span class="wall-who__avatar" style="background:${esc(color)};color:${getReadableTextColor(color)}">
-                ${u.avatar_data ? `<img src="${esc(u.avatar_data)}" alt="" loading="lazy">` : esc(initials(u.display_name))}
+          <li>
+            <button type="button" class="wall-who__member${pressed ? ' wall-who__member--on' : ''}"
+                data-wall-who="${esc(String(u.id))}" aria-pressed="${pressed ? 'true' : 'false'}">
+              <span class="wall-who__mark">
+                <span class="wall-who__avatar" style="background:${esc(color)};color:${getReadableTextColor(color)}">
+                  ${u.avatar_data ? `<img src="${esc(u.avatar_data)}" alt="" loading="lazy">` : esc(initials(u.display_name))}
+                </span>
+                <span class="wall-who__count">
+                  <span aria-hidden="true">${esc(String(count))}</span>
+                  <span class="sr-only">${esc(t('dashboard.wallWhoCount', { count }))}</span>
+                </span>
               </span>
-              <span class="wall-who__count">
-                <span aria-hidden="true">${esc(String(count))}</span>
-                <span class="sr-only">${esc(t('dashboard.wallWhoCount', { count }))}</span>
-              </span>
-            </span>
-            <span class="wall-who__name">${esc(firstName(u.display_name))}</span>
+              <span class="wall-who__name">${esc(firstName(u.display_name))}</span>
+            </button>
           </li>`;
       }).join('')}</ul>${onDuty.length > shown.length
         ? `<p class="wall-who__more">${esc(t('dashboard.shoppingMore', { count: onDuty.length - shown.length }))}</p>`
@@ -5312,6 +5404,7 @@ function renderWallWho(data, model) {
   return `
     <section class="wall__who" aria-labelledby="wall-who-title">
       <h2 class="wall__section-title" id="wall-who-title">${esc(t('dashboard.wallWho'))}</h2>
+      ${shown.length ? `<p class="wall-who__hint">${esc(t('dashboard.wallWhoFilterHint'))}</p>` : ''}
       ${body}
     </section>`;
 }
@@ -5353,9 +5446,177 @@ function renderWallWeather(weather) {
     </section>`;
 }
 
+function wallSection(id, title, rowsHtml) {
+  if (!rowsHtml) return '';
+  return `
+    <section class="wall__block" aria-labelledby="wall-${id}-title">
+      <h2 class="wall__section-title" id="wall-${id}-title">${esc(title)}</h2>
+      <ol class="wall-program__list">${rowsHtml}</ol>
+    </section>`;
+}
+
+function renderWallEvents(data) {
+  if (window.yuvomi?.isModuleDisabled?.('calendar')) return '';
+  const events = wallTodayEvents(data);
+  if (!events.length) return '';
+  const cap = 6;
+  const shown = events.slice(0, cap);
+  const rows = shown.map((event) => {
+    const start = eventStartDate(event);
+    const timed = !event.all_day && start && String(event.start_datetime).length > 10;
+    const sub = event.location
+      ? fmtLocation(event.location)
+      : (event.cal_name || t('dashboard.todayEvent'));
+    return `
+      <li class="wall-row wall-row--event">
+        <span class="module-seal wall-row__seal">${moduleIconHTML('calendar')}</span>
+        <span class="wall-row__body">
+          <span class="wall-row__title">${esc(event.title)}</span>
+          <span class="wall-row__sub">${esc(sub)}</span>
+        </span>
+        <span class="wall-row__time">${esc(timed ? formatTime(start) : t('dashboard.allDay'))}</span>
+      </li>`;
+  }).join('');
+  const more = events.length > cap
+    ? `<p class="wall-program__foot">${esc(t('dashboard.todayMore', { count: events.length - cap }))}</p>`
+    : '';
+  return `
+    <section class="wall__block" aria-labelledby="wall-events-title">
+      <h2 class="wall__section-title" id="wall-events-title">${esc(t('nav.calendar'))}</h2>
+      <ol class="wall-program__list">${rows}</ol>
+      ${more}
+    </section>`;
+}
+
+function renderWallMeals(data, mealTypes) {
+  if (window.yuvomi?.isModuleDisabled?.('meals')) return '';
+  const meals = Array.isArray(data?.todayMeals) ? data.todayMeals : [];
+  const labels = MEAL_LABELS();
+  const rows = normalizeVisibleMealTypes(mealTypes).map((type) => {
+    const meal = meals.find((m) => m.meal_type === type);
+    return `
+      <li class="wall-row wall-row--dinner">
+        <span class="module-seal wall-row__seal">${moduleIconHTML(MEAL_ICONS[type] || 'utensils')}</span>
+        <span class="wall-row__body">
+          <span class="wall-row__title">${esc(meal?.title || '')}</span>
+          <span class="wall-row__sub">${esc(labels[type] || type)}</span>
+        </span>
+      </li>`;
+  }).join('');
+  return wallSection('meals', t('dashboard.todayMeals'), rows);
+}
+
+function renderWallSchedule(data) {
+  if (window.yuvomi?.isModuleDisabled?.('schedule')) return '';
+  const schedule = data?.schedule;
+  if (!schedule || schedule === null) return '';
+  const entries = Array.isArray(schedule.entries) ? schedule.entries.filter((e) => e.shift_type) : [];
+  if (!entries.length) return '';
+  const directory = schedule.people?.length ? schedule.people : (data.users ?? []);
+  const rows = entries.slice(0, 4).map((entry) => {
+    const user = directory.find((item) => Number(item.id) === Number(entry.user_id));
+    const type = entry.shift_type;
+    const label = type.short_code ? `${type.short_code} · ${type.name}` : type.name;
+    return `
+      <li class="wall-row wall-row--event">
+        <span class="module-seal wall-row__seal">${moduleIconHTML(type.icon && hasIcon(type.icon) ? type.icon : 'calendar-clock')}</span>
+        <span class="wall-row__body">
+          <span class="wall-row__title">${esc(user?.display_name || '')}</span>
+          <span class="wall-row__sub">${esc(label)}</span>
+        </span>
+      </li>`;
+  }).join('');
+  return wallSection('schedule', t('nav.schedule'), rows);
+}
+
+function renderWallWaste(data) {
+  if (window.yuvomi?.isModuleDisabled?.('waste')) return '';
+  const items = Array.isArray(data?.waste?.items) ? data.waste.items : [];
+  const upcoming = items.filter((entry) => entry.next).sort((a, b) => {
+    const ad = a.next.date_key;
+    const bd = b.next.date_key;
+    return ad < bd ? -1 : ad > bd ? 1 : 0;
+  }).slice(0, 4);
+  if (!upcoming.length) return '';
+  const rows = upcoming.map((entry) => `
+      <li class="wall-row">
+        <span class="module-seal wall-row__seal">${moduleIconHTML(entry.type.icon && hasIcon(entry.type.icon) ? entry.type.icon : 'trash-2')}</span>
+        <span class="wall-row__body">
+          <span class="wall-row__title">${esc(entry.type.name)}</span>
+          <span class="wall-row__sub">${esc(relativeDateLabel(entry.next.date_key))}</span>
+        </span>
+      </li>`).join('');
+  return wallSection('waste', t('nav.waste'), rows);
+}
+
+function renderWallDates(data) {
+  const birthdays = Array.isArray(data?.birthdays) ? data.birthdays : [];
+  const countdowns = visibleCountdowns(data?.countdowns ?? []);
+  const dated = [
+    ...birthdays.map((b) => ({
+      days: Number(b.days_until),
+      title: b.name || b.display_name || '',
+      sub: b.days_until === 0 ? t('common.today') : t('dashboard.daysLeft', { count: b.days_until }),
+      icon: 'cake',
+    })),
+    ...countdowns.map((c) => {
+      const phrase = countdownPhrase(c.days_until);
+      const sub = phrase.count === undefined ? t(phrase.key) : t(phrase.key, { count: phrase.count });
+      return { days: Number(c.days_until), title: c.title, sub, icon: c.icon || 'calendar' };
+    }),
+  ].filter((item) => item.title).sort((a, b) => a.days - b.days).slice(0, 4);
+  if (!dated.length) return '';
+  const rows = dated.map((item) => `
+      <li class="wall-row wall-row--event">
+        <span class="module-seal wall-row__seal">${moduleIconHTML(hasIcon(item.icon) ? item.icon : 'calendar')}</span>
+        <span class="wall-row__body">
+          <span class="wall-row__title">${esc(item.title)}</span>
+          <span class="wall-row__sub">${esc(item.sub)}</span>
+        </span>
+      </li>`).join('');
+  return wallSection('dates', t('dashboard.countdownTitle'), rows);
+}
+
+function wallNextCaption(model, data, prefs) {
+  if (wallHasBlock('events', prefs)) {
+    const event = wallTodayEvents(data)[0];
+    if (event) {
+      const start = eventStartDate(event);
+      const timed = !event.all_day && start && String(event.start_datetime).length > 10;
+      return [timed ? formatTime(start) : t('dashboard.allDay'), event.title].filter(Boolean).join(' · ');
+    }
+  }
+  const row = model?.rows?.[0];
+  if (row) return [row.timeLabel, row.title].filter(Boolean).join(' · ');
+  if (model?.state?.title) return [model.state.title, model.state.sub].filter(Boolean).join(' · ');
+  if (model?.shopping?.title) return model.shopping.title;
+  return '';
+}
+
+function renderWallAside(data, weather, model, prefs, whoId, mealTypes, tickPeople) {
+  const parts = [];
+  for (const id of prefs.blocks) {
+    if (id === 'program' || id === 'timer') continue;
+    if (id === 'who') parts.push(renderWallWho(data, model, { filterId: whoId }));
+    else if (id === 'events') parts.push(renderWallEvents(data));
+    else if (id === 'meals') parts.push(renderWallMeals(data, mealTypes));
+    else if (id === 'schedule') parts.push(renderWallSchedule(data));
+    else if (id === 'waste') parts.push(renderWallWaste(data));
+    else if (id === 'dates') parts.push(renderWallDates(data));
+    else if (id === 'weather') parts.push(renderWallWeather(weather));
+  }
+  const aside = parts.filter(Boolean).join('');
+  const tickTaskId = readWallTickTask();
+  const tickTitle = tickTaskId
+    ? (model?.allRows ?? []).find((row) => row.kind === 'task' && Number(row.objectId) === tickTaskId)?.title
+      || (Array.isArray(data?.urgentTasks) ? data.urgentTasks.find((task) => Number(task.id) === tickTaskId)?.title : '')
+      || ''
+    : '';
+  const tick = renderWallTick(tickPeople, { title: tickTitle });
+  return { aside, tick };
+}
+
 /**
- * Der Ladefehler in Wand-Fassung.
- *
  * Der bestehende Fehlerzustand ist auf Arm-Laenge gebaut und traegt einen
  * Retry-Knopf - am Wandtablet drueckt den niemand. Hier steht deshalb ein Satz,
  * den man aus zwei Metern als Fehler erkennt, plus die Zusage, dass die Flaeche
@@ -5375,62 +5636,90 @@ function renderWallError() {
 /**
  * Die ganze Flaeche.
  *
- * DER AUSSTIEG IST LEISE DA, NICHT VERSTECKT. Ein voller Knopf widerspraeche
- * der ruhigen Flaeche, ein unsichtbarer waere eine Falle - also steht er immer
- * im DOM, immer im Bild (der Fuss klebt an der Unterkante, #1559) und immer mit
- * seinem Wort, in Sekundaerfarbe ohne Kapsel. Bis #1559 trug er in Ruhe nur
- * sein Zeichen, und genau daran fand jemand nicht mehr hinaus (D#1494). Jede
- * Beruehrung hebt ihn fuer ein paar Sekunden auf die volle Kapsel
- * (`data-wall-awake`, siehe `wireWallSurface`). Seit dem Kuechentimer (#844)
- * ist der Ausstieg nicht mehr das Einzige, was man beruehren kann - dessen
- * Startknoepfe stehen daneben und ruhen genauso leise, aber sichtbar. Damit
- * ein Tipp, der die Wand nur wecken
- * sollte, keinen Timer startet, weckt der erste Zeiger auf eine schlafende
- * Wand dort nur (wall-timer.js).
+ * DER AUSSTIEG IST LEISE DA, NICHT VERSTECKT. Ein sichtbarer Knopf
+ * widerspraeche der ruhigen Flaeche, ein unsichtbarer waere eine Falle - also
+ * steht er immer im DOM und ist immer per Tastatur erreichbar, traegt aber im
+ * Ruhezustand nur sein Zeichen. Jede Beruehrung hebt ihn fuer ein paar Sekunden
+ * auf die volle Kapsel samt Beschriftung (`data-wall-awake`, siehe
+ * `wireWallSurface`). Timer, Wer-Filter und Darstellung wecken dieselbe
+ * Kapsel: eine Beruehrung ist ohnehin schon da.
  */
-function renderWallSurface(data, weather, { failed = false, loading = false, updatedAt = null, now = new Date() } = {}) {
-  // Der Kuechentimer (#844). Er wird auch im Lade- und Fehlerzustand gebaut: er
-  // haengt an nichts, was geladen werden koennte, und ein laufender Timer, der
-  // beim naechsten Netzfehler verschwaende, waere schlimmer als gar keiner.
-  const timer = renderWallTimer();
-  // Seine Anzeige kostet eine Programmzeile Hoehe (64px plus Abstand, gemessen
-  // bei 1280x800). WALL_ROW_CAP ist fuer die Flaeche OHNE sie gerechnet: an
-  // einem vollen Tag schob sie den Fuss samt „Timer abbrechen" und Ausstieg
-  // unter den Bildrand. Solange sie steht, nimmt das Programm eine Zeile
-  // weniger, und „+N weitere" zaehlt sie mit. Der Start und das Ende rufen
-  // ohnehin `rerender()` (wall-timer.js), der Deckel folgt also von selbst.
-  const cap = timer.display ? WALL_ROW_CAP - 1 : WALL_ROW_CAP;
-  const model = failed || loading ? null : buildTodayCockpitModel(data, [], { cap, now, groupOverdue: false });
+function renderWallSurface(data, weather, {
+  failed = false,
+  loading = false,
+  updatedAt = null,
+  tickPeople = [],
+  mealTypes = MEAL_ORDER,
+  routineBoard = null,
+} = {}) {
+  const prefs = readWallPrefs();
+  const whoId = readWallWhoFilter();
+  const setupOpen = isWallSetupOpen();
+  const tickOpen = readWallTickTask() != null;
+  const canTick = Array.isArray(tickPeople) && tickPeople.length > 0;
+  const routine = prefs.surface === 'routine';
+  const model = failed || loading || routine ? null : wallCockpitModel(data, prefs, whoId);
+  if (model) model.canTick = canTick;
+
+  applyWallNextToDocument(failed || loading || routine ? '' : wallNextCaption(model, data, prefs));
 
   let main;
+  let tick = '';
   if (failed) {
     main = renderWallError();
   } else if (loading) {
     main = '<div class="wall__loading" aria-hidden="true"></div>';
+  } else if (routine) {
+    main = renderWallRoutine(routineBoard);
   } else {
-    const aside = `${renderWallWho(data, model)}${renderWallWeather(weather)}`;
+    const built = renderWallAside(data, weather, model, prefs, whoId, mealTypes, tickPeople);
+    tick = built.tick;
     main = `
       ${renderWallProgram(model)}
-      ${aside ? `<div class="wall__aside">${aside}</div>` : ''}`;
+      ${built.aside ? `<div class="wall__aside">${built.aside}</div>` : ''}`;
   }
 
   const stamp = updatedAt
     ? `<p class="wall__updated">${esc(t('dashboard.updatedAt', { time: formatTime(updatedAt) }))}</p>`
     : '<p class="wall__updated"></p>';
 
+  const timer = !routine && prefs.showTimer
+    ? renderWallTimer()
+    : { display: '', controls: '' };
+
+  const awake = setupOpen || tickOpen ? ' data-wall-awake' : '';
+  const setupAttr = setupOpen ? ' data-wall-setup' : '';
+  const tickAttr = tickOpen ? ' data-wall-tick' : '';
+  const surfaceAttr = ` data-wall-surface="${esc(routine ? 'routine' : 'classic')}"`;
+  const wallpaper = routine ? routineWallpaperUrl(activeRoutinePerson(routineBoard || {})) : '';
+  const paperClass = wallpaper ? ' wall--paper' : '';
+  const paperStyle = wallpaper ? ` style="background-image:url('${esc(wallpaper)}')"` : '';
+
   return `
-    <div class="wall">
-      ${renderClockWidget({ wall: true })}
-      <div class="wall__stage${failed || loading ? ' wall__stage--single' : ''}">${main}</div>
+    <div class="wall${paperClass}"${setupAttr}${tickAttr}${awake}${surfaceAttr} data-wall-density="${esc(String(prefs.rowCap))}"${paperStyle}>
+      ${renderClockWidget({ wall: true, weather })}
+      <div class="wall__stage${failed || loading || routine ? ' wall__stage--single' : ''}">${main}</div>
       ${timer.display}
       <div class="wall__foot">
         ${stamp}
-        ${timer.controls}
-        <button type="button" class="wall__foot-btn" id="wall-exit" aria-label="${esc(t('dashboard.wallExit'))}">
-          <i data-lucide="minimize-2" aria-hidden="true"></i>
-          <span class="wall__foot-btn-label" aria-hidden="true">${esc(t('dashboard.wallExit'))}</span>
-        </button>
+        <div class="wall__foot-actions">
+          ${timer.controls}
+          <button type="button" class="wall__foot-btn" id="wall-routine-toggle" aria-label="${esc(t('dashboard.wallRoutineToggle'))}">
+            <i data-lucide="${routine ? 'layout-list' : 'sun'}" aria-hidden="true"></i>
+            <span class="wall__foot-btn-label" aria-hidden="true">${esc(routine ? t('dashboard.wallSurfaceClassic') : t('dashboard.wallSurfaceRoutine'))}</span>
+          </button>
+          <button type="button" class="wall__foot-btn" id="wall-setup" aria-label="${esc(t('dashboard.wallSetup'))}">
+            <i data-lucide="sliders-horizontal" aria-hidden="true"></i>
+            <span class="wall__foot-btn-label" aria-hidden="true">${esc(t('dashboard.wallSetup'))}</span>
+          </button>
+          <button type="button" class="wall__foot-btn" id="wall-exit" aria-label="${esc(t('dashboard.wallExit'))}">
+            <i data-lucide="minimize-2" aria-hidden="true"></i>
+            <span class="wall__foot-btn-label" aria-hidden="true">${esc(t('dashboard.wallExit'))}</span>
+          </button>
+        </div>
       </div>
+      ${renderWallSetup(prefs)}
+      ${tick}
     </div>`;
 }
 
@@ -5442,7 +5731,7 @@ function renderWallSurface(data, weather, { failed = false, loading = false, upd
  * Das Wecken haengt an den Ereignissen, die auch der Screensaver hoert - es
  * verbraucht sie aber nicht, sondern setzt nur ein Attribut.
  */
-function wireWallSurface(container, rerender, signal) {
+function wireWallSurface(container, rerender, signal, tickCtx = null) {
   const wall = container.querySelector('.wall');
   if (!wall) return;
 
@@ -5450,14 +5739,46 @@ function wireWallSurface(container, rerender, signal) {
   const wake = () => {
     wall.setAttribute('data-wall-awake', '');
     clearTimeout(awakeTimer);
-    awakeTimer = setTimeout(() => wall.removeAttribute('data-wall-awake'), WALL_AWAKE_MS);
+    awakeTimer = setTimeout(() => {
+      if (isWallSetupOpen(wall) || isWallTickOpen(wall)) return;
+      wall.removeAttribute('data-wall-awake');
+    }, WALL_AWAKE_MS);
   };
   for (const type of ['pointerdown', 'pointermove', 'keydown']) {
     window.addEventListener(type, wake, { passive: true, signal });
   }
   signal.addEventListener('abort', () => clearTimeout(awakeTimer));
 
+  wall.addEventListener('click', (event) => {
+    const whoBtn = event.target.closest('[data-wall-who]');
+    if (!whoBtn || !wall.contains(whoBtn)) return;
+    toggleWallWhoFilter(whoBtn.dataset.wallWho);
+    rerender();
+  }, { signal });
+
   wireWallTimer(wall, rerender, signal, { announce: announceDashboard });
+  wireWallSetup(wall, rerender, signal);
+  wall.addEventListener('click', (event) => {
+    const toggle = event.target.closest('#wall-routine-toggle');
+    if (!toggle || !wall.contains(toggle)) return;
+    const next = readWallPrefs().surface === 'routine' ? 'classic' : 'routine';
+    writeWallPrefs({ surface: next });
+    rerender();
+  }, { signal });
+  if (tickCtx?.people?.length) {
+    wireWallTick(wall, {
+      people: tickCtx.people,
+      rerender,
+      onDone: tickCtx.onDone,
+    }, signal);
+  }
+  if (tickCtx?.routine) {
+    wireWallRoutine(wall, {
+      paint: tickCtx.paintRoutine,
+      onDone: tickCtx.onRoutineDone,
+      onUndo: tickCtx.onRoutineUndo,
+    }, signal);
+  }
 }
 
 /**
@@ -5496,7 +5817,20 @@ function wireWallExit(container, rerender, signal) {
     if (event.target.closest('#wall-exit')) leave();
   }, { signal });
   window.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') leave();
+    if (event.key !== 'Escape') return;
+    const wall = container.querySelector('.wall');
+    if (isWallTickOpen(wall)) {
+      setWallTickTask(null);
+      wall.removeAttribute('data-wall-tick');
+      const panel = wall.querySelector('#wall-tick-panel');
+      if (panel) panel.hidden = true;
+      return;
+    }
+    if (isWallSetupOpen(wall)) {
+      setWallSetupOpen(wall, false);
+      return;
+    }
+    leave();
   }, { signal });
   // Der dritte Weg hinaus: Zurueck (#1559). Er schliesst die Wand wie ein
   // Dialog - `handleBackNavigation` ruft `leave`, der Router navigiert nicht.
@@ -6033,6 +6367,7 @@ export async function render(container, { user, signal: routeSignal = null } = {
   // seinen vorigen Takt selbst ab.
   if (wallMode) {
     wireWallTimer(container.querySelector('.wall'), rerender, signal, { announce: announceDashboard });
+    wireWallSetup(container.querySelector('.wall'), rerender, signal);
     // Der Ausstieg gehoert zur selben Sorte: er haengt an nichts, was geladen
     // wird. Einmal verdrahtet, ueber den Container - er ueberlebt das zweite
     // Rendern und braucht keinen zweiten Aufruf.
@@ -6067,13 +6402,15 @@ export async function render(container, { user, signal: routeSignal = null } = {
   let visibleMealTypes = MEAL_ORDER;
   let loadFailed   = false;
   let loadErrorStatus = null;
+  let displayPeople = [];
+  let routineBoard = { people: [], steps: [], date_key: null };
   // Zeitpunkt des letzten geglueckten Datenstands - der Anker im Masthead (A8).
   // Bleibt `null`, solange nichts geladen wurde: eine Uhrzeit ohne Daten
   // dahinter waere die falscheste aller Angaben.
   let lastLoadedAt = null;
   try {
     const [dashRes, weatherRes, prefsRes, remindersRes] = await Promise.all([
-      api.get(layoutHintQuery('/dashboard')),
+      api.get(withWallEventLimit(layoutHintQuery('/dashboard'), wallMode)),
       api.get(`/weather?lang=${encodeURIComponent(getLocale())}`).catch(() => ({ data: null })),
       api.get('/preferences').catch(() => ({ data: {} })),
       loadPendingReminders(),
@@ -6115,7 +6452,7 @@ export async function render(container, { user, signal: routeSignal = null } = {
      * die ohne Optionen. */
     if (dashboardQuery(widgetConfig) !== layoutHintQuery('/dashboard')) {
       try {
-        const filtered = await api.get(dashboardQuery(widgetConfig));
+        const filtered = await api.get(withWallEventLimit(dashboardQuery(widgetConfig), wallMode));
         if (signal.aborted) return;
         localizeEventLists(filtered);
         data = filtered;
@@ -6206,11 +6543,33 @@ export async function render(container, { user, signal: routeSignal = null } = {
   if (!loadFailed && widgetConfig.some((w) => w.id === 'cycle' && w.visible)) {
     await ensureCycleSlice();
   }
-  if (!loadFailed && widgetConfig.some((w) => w.id === 'schedule' && w.visible)) {
+  if (!loadFailed && (
+    widgetConfig.some((w) => w.id === 'schedule' && w.visible)
+    || (wallMode && wallHasBlock('schedule'))
+  )) {
     await ensureScheduleSlice();
   }
-  if (!loadFailed && widgetConfig.some((w) => w.id === 'waste' && w.visible)) {
+  if (!loadFailed && (
+    widgetConfig.some((w) => w.id === 'waste' && w.visible)
+    || (wallMode && wallHasBlock('waste'))
+  )) {
     await ensureWasteSlice();
+  }
+  if (!loadFailed && wallMode && user?.access_scope === 'display') {
+    try {
+      const peopleRes = await api.get('/displays/people');
+      displayPeople = (peopleRes.data ?? []).filter((p) => p.can_tick_off);
+    } catch {
+      displayPeople = [];
+    }
+  }
+  if (!loadFailed && wallMode) {
+    try {
+      const routineRes = await api.get('/routines');
+      routineBoard = routineRes.data ?? routineBoard;
+    } catch {
+      routineBoard = { people: [], steps: [], date_key: null };
+    }
   }
   // Auch die Nachlade-Runden koennen von einem Verlassen oder Neuaufbau
   // ueberholt worden sein (#977).
@@ -6224,7 +6583,7 @@ export async function render(container, { user, signal: routeSignal = null } = {
   async function reloadIfQueryChanged(previousQuery) {
     if (dashboardQuery(widgetConfig) === previousQuery) return;
     try {
-      const fresh = await api.get(dashboardQuery(widgetConfig));
+      const fresh = await api.get(withWallEventLimit(dashboardQuery(widgetConfig), wallMode));
       localizeEventLists(fresh);
       fresh.cycle = data.cycle;
       fresh.schedule = data.schedule;
@@ -6738,6 +7097,44 @@ export async function render(container, { user, signal: routeSignal = null } = {
   let renderedCustomizing = null;
   signal.addEventListener('abort', () => disposeFastingClock(), { once: true });
   signal.addEventListener('abort', () => disposeNoteCategories(), { once: true });
+
+  function paintRoutineSurface() {
+    if (signal.aborted) return;
+    const wall = container.querySelector('.wall');
+    const stage = wall?.querySelector('.wall__stage');
+    if (!wall || !stage || readWallPrefs().surface !== 'routine') return;
+    const wallpaper = routineWallpaperUrl(activeRoutinePerson(routineBoard || {}));
+    wall.classList.toggle('wall--paper', Boolean(wallpaper));
+    if (wallpaper) wall.style.backgroundImage = `url('${esc(wallpaper)}')`;
+    else wall.style.removeProperty('background-image');
+    setHtml(stage, renderWallRoutine(routineBoard));
+    if (window.lucide) window.lucide.createIcons({ el: stage });
+  }
+
+  function wallRefreshSignature(dash, board, wx) {
+    return JSON.stringify({
+      date: board?.date_key,
+      steps: (board?.steps || []).map((s) => [
+        s.id, s.done_today, s.title, s.icon, s.has_image, s.image_rev,
+        s.show_title, s.sort_order, s.user_id, s.period,
+      ]),
+      people: (board?.people || []).map((p) => [
+        p.id, p.display_name, p.has_wallpaper, p.wallpaper_rev, p.avatar_color,
+      ]),
+      hours: (wx?.hours || []).map((h) => [h.hour, h.temp, h.icon, h.precip]),
+      sky: [wx?.current?.temp, wx?.current?.icon],
+      tasks: (dash?.urgentTasks || []).map((t) => [t.id, t.status, t.updated_at]),
+      events: (dash?.upcomingEvents || []).map((e) => [e.id, e.start_datetime, e.title]),
+      meals: dash?.meals,
+      schedule: dash?.schedule,
+      waste: dash?.waste,
+      birthdays: dash?.birthdays,
+      countdowns: dash?.countdowns,
+    });
+  }
+
+  let lastWallSig = wallMode ? wallRefreshSignature(data, routineBoard, weather) : '';
+
   function rebuildDashboard(cfg) {
     // Der eine Engpass fuer jeden verspaeteten Neuaufbau (#977): eine Antwort,
     // die nach dem Verlassen der Seite oder nach dem naechsten render()
@@ -6749,9 +7146,57 @@ export async function render(container, { user, signal: routeSignal = null } = {
     const shell = container.querySelector('#dashboard-shell');
     if (!shell) return;
     if (wallMode) {
-      setHtml(shell, renderWallSurface(data, weather, { failed: loadFailed, updatedAt: lastLoadedAt }));
+      const programScroll = shell.querySelector('.wall-program__list')?.scrollTop ?? 0;
+      setHtml(shell, renderWallSurface(data, weather, {
+        failed: loadFailed,
+        updatedAt: lastLoadedAt,
+        tickPeople: displayPeople,
+        mealTypes: visibleMealTypes,
+        routineBoard,
+      }));
+      const nextList = shell.querySelector('.wall-program__list');
+      if (nextList && programScroll) nextList.scrollTop = programScroll;
+      lastWallSig = wallRefreshSignature(data, routineBoard, weather);
       if (window.lucide) window.lucide.createIcons({ el: shell });
-      wireWallSurface(container, rerender, signal);
+      wireWallSurface(container, rerender, signal, {
+        people: displayPeople,
+        routine: true,
+        paintRoutine: paintRoutineSurface,
+        onDone: async (taskId, userId, person) => {
+          try {
+            await completeWallTask(taskId, userId);
+            window.yuvomi?.showToast(
+              t('tasks.doneByToast', { name: person?.display_name ?? '' }),
+              'success',
+            );
+            rerender();
+          } catch (err) {
+            window.yuvomi?.showToast(err.message ?? t('common.unknownError'), 'danger');
+          }
+        },
+        onRoutineDone: async (stepId, userId) => {
+          try {
+            await completeRoutineStep(stepId, userId);
+            const step = routineBoard?.steps?.find((s) => Number(s.id) === Number(stepId));
+            if (step) step.done_today = true;
+            paintRoutineSurface();
+            lastWallSig = wallRefreshSignature(data, routineBoard, weather);
+          } catch (err) {
+            window.yuvomi?.showToast(err.message ?? t('common.unknownError'), 'danger');
+          }
+        },
+        onRoutineUndo: async (stepId, userId) => {
+          try {
+            await undoRoutineStep(stepId, userId);
+            const step = routineBoard?.steps?.find((s) => Number(s.id) === Number(stepId));
+            if (step) step.done_today = false;
+            paintRoutineSurface();
+            lastWallSig = wallRefreshSignature(data, routineBoard, weather);
+          } catch (err) {
+            window.yuvomi?.showToast(err.message ?? t('common.unknownError'), 'danger');
+          }
+        },
+      });
       return;
     }
     if (loadFailed) {
@@ -6919,7 +7364,7 @@ export async function render(container, { user, signal: routeSignal = null } = {
     if (isCustomizing || loadFailed || refreshInFlight) return;
     refreshInFlight = true;
     try {
-      const fresh = await api.get(dashboardQuery(widgetConfig));
+      const fresh = await api.get(withWallEventLimit(dashboardQuery(widgetConfig), wallMode));
       if (signal.aborted) return;
       localizeEventLists(fresh);
       // Der owner-only Zyklus-Slice reist unveraendert mit: /dashboard
@@ -6934,10 +7379,21 @@ export async function render(container, { user, signal: routeSignal = null } = {
       // Weg, den ein frisch eingeblendetes Widget in persistWidgetConfig()
       // schon nimmt. Das heilt nebenbei auch einen zuvor gescheiterten Slice
       // (M-6b) beim naechsten stillen Takt, statt auf den Retry-Knopf zu warten.
-      if (widgetConfig.some((w) => w.id === 'schedule' && w.visible)) {
+      if (widgetConfig.some((w) => w.id === 'schedule' && w.visible) || (wallMode && wallHasBlock('schedule'))) {
         data.schedule = undefined;
         await ensureScheduleSlice();
         if (signal.aborted) return;
+      }
+      if (widgetConfig.some((w) => w.id === 'waste' && w.visible) || (wallMode && wallHasBlock('waste'))) {
+        data.waste = undefined;
+        await ensureWasteSlice();
+        if (signal.aborted) return;
+      }
+      if (wallMode) {
+        try {
+          const routineRes = await api.get('/routines');
+          routineBoard = routineRes.data ?? routineBoard;
+        } catch { /* stiller Takt: der alte Stand bleibt */ }
       }
       fresh.schedule = data.schedule;
       fresh.waste = data.waste;
@@ -6945,13 +7401,20 @@ export async function render(container, { user, signal: routeSignal = null } = {
       if (signal.aborted) return;
       data = fresh;
       lastLoadedAt = new Date();
+      if (wallMode) {
+        // Der 20-Sekunden-Takt darf die Flaeche nicht neu malen, solange sich
+        // nichts geaendert hat - sonst flackert die Routine jede halbe Minute.
+        const nextSig = wallRefreshSignature(data, routineBoard, weather);
+        if (nextSig === lastWallSig) return;
+        lastWallSig = nextSig;
+      }
       rebuildDashboard(widgetConfig);
     } catch { /* Hintergrund-Refresh: bewusst still */ }
     finally { refreshInFlight = false; }
   }
   const refreshTimerId = setInterval(() => {
     if (!document.hidden) refreshDashboardData();
-  }, 15 * 60 * 1000);
+  }, wallMode ? 20_000 : 15 * 60 * 1000);
   signal.addEventListener('abort', () => clearInterval(refreshTimerId));
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) return;
@@ -7018,6 +7481,11 @@ export async function render(container, { user, signal: routeSignal = null } = {
         if (signal.aborted) return;
         weather = res.data ?? null;
         setWeatherAvailability(res, weatherPrefs);
+        if (wallMode) {
+          const nextSig = wallRefreshSignature(data, routineBoard, weather);
+          if (nextSig === lastWallSig) return;
+          lastWallSig = nextSig;
+        }
         rebuildDashboard(widgetConfig);
       } catch { /* Hintergrund-Timer: bewusst still — der Nutzer hat nichts
                    angestoßen, ein Toast alle 30 Min wäre reiner Lärm. */ }

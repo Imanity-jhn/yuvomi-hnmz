@@ -1,8 +1,9 @@
 /**
  * Modul: Erinnerungen an zugewiesenen Aufgaben
  * Zweck: Eine Stelle fuer (1) das Verteilen der Ersteller-Vorlage an die
- *        Zustaendigen und (2) die automatisch nachgezogenen Termine an der
- *        Faelligkeit und drei Tage davor.
+ *        Zustaendigen und (2) den automatisch nachgezogenen Termin an der
+ *        Faelligkeit. Kein Vorlauf J-3: Formular-Erinnerung, Assign-Push und
+ *        Faelligkeit reichen.
  * Abhaengigkeiten: server/utils/timezone.js
  *
  * WARUM HIER UND NICHT NUR IN DEN ROUTEN. Wie bei Terminen (#921) gibt es zwei
@@ -12,11 +13,7 @@
  * erneut gespeichert wurde. Dieselbe Regel an drei Enden waere drei Antworten.
  */
 
-import {
-  daysBetweenDateKeys, householdTimeZone, localToUTC, shiftDateKey, todayKey,
-} from '../utils/timezone.js';
-
-export const TASK_DUE_LEAD_DAYS = 3;
+import { householdTimeZone, localToUTC } from '../utils/timezone.js';
 
 function templateReminders(database, taskId, authorId) {
   return database.prepare(`
@@ -128,23 +125,14 @@ function wantedAutoTimes(database, task, now) {
   const dueAt = taskDueInstant(task, tz);
   if (!dueAt) return [];
   const nowIso = iso(now);
-  const times = [];
-  if (dueAt > nowIso) times.push(dueAt);
-
-  const today = todayKey(database, now);
-  const days = daysBetweenDateKeys(today, task.due_date);
-  if (days != null && days >= TASK_DUE_LEAD_DAYS) {
-    const leadAt = localToUTC(`${shiftDateKey(task.due_date, -TASK_DUE_LEAD_DAYS)}T${wallTime(task.due_time)}`, tz);
-    if (leadAt > nowIso && leadAt !== dueAt) times.push(leadAt);
-  }
-  return [...new Set(times)].sort();
+  return dueAt > nowIso ? [dueAt] : [];
 }
 
 const AUTO_SQL = `entity_type = 'task' AND entity_id = ? AND created_by = ?
   AND assigned_from IS NOT NULL AND assigned_from = created_by`;
 
 /**
- * Zieht Faelligkeit und J-3 fuer jede zustaendige Person nach.
+ * Zieht die Faelligkeit fuer jede zustaendige Person nach.
  *
  * MARKER: `assigned_from = created_by`. Das ist kein Erben vom Ersteller,
  * sondern "der Server hat diese Zeile fuer diese Person gelegt". Fan-out

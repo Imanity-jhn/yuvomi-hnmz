@@ -87,10 +87,7 @@ test('reloads an edited service worker source from an isolated file', () => {
       buildRevision: 'acceptance-route-test',
     });
 
-    assert.equal(
-      load().body,
-      "globalThis.cacheRevision = 'acceptance-route-test';\n",
-    );
+    assert.match(load().body, /globalThis\.cacheRevision = 'acceptance-route-test-\d+';/);
 
     writeFileSync(
       sourcePath,

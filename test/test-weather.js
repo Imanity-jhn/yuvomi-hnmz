@@ -45,6 +45,12 @@ const OM_FETCH = async (url) => {
         temperature_2m_max: [22, 18, 20, 25, 17],
         temperature_2m_min: [14, 12, 13, 16, 11],
       },
+      hourly: {
+        time: ['2026-06-05T08:00', '2026-06-05T12:00', '2026-06-05T16:00', '2026-06-05T19:00'],
+        temperature_2m: [12, 18, 16, 11],
+        weather_code: [3, 0, 61, 2],
+        precipitation_probability: [10, 0, 70, 20],
+      },
     }),
   };
 };
@@ -193,6 +199,12 @@ test('Open-Meteo via env: provider + city + cloud-sun icon + wmo desc + forecast
     const fc = body.data.forecast;
     assert.ok(Array.isArray(fc) && fc.length > 0);
     for (const k of ['date', 'temp_min', 'temp_max', 'icon', 'desc']) assert.ok(k in fc[0]);
+    const hours = body.data.hours;
+    assert.equal(hours.length, 4);
+    assert.equal(hours[0].hour, 8);
+    assert.equal(hours[0].temp, 12);
+    assert.equal(hours[2].icon, 'cloud-rain');
+    assert.equal(hours[2].precip, 70);
   } finally { await close(); }
 });
 

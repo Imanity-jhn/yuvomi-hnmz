@@ -36,10 +36,17 @@ export function createServiceWorkerResponseLoader(sourcePath, options) {
   return function loadServiceWorkerResponse() {
     const mtimeMs = statSync(sourcePath).mtimeMs;
     if (cachedMtimeMs !== mtimeMs) {
-      cachedResponse = buildServiceWorkerResponse(
-        readFileSync(sourcePath, 'utf8'),
-        options,
-      );
+      const source = readFileSync(sourcePath, 'utf8');
+      const envRev = String(options.buildRevision || '').trim();
+      // Ohne Deploy-SHA (Bind-Mount) wuerde die Revision auf der App-Version
+      // kleben: der Worker aendert sich, CACHE_RELEASE nicht, das Tablett
+      // behielt die alte Shell. Die Dateizeit dreht sie mit jeder sw.js-Aenderung.
+      const stamp = String(Math.floor(mtimeMs / 1000));
+      const mixed = envRev ? `${envRev}-${stamp}` : `${options.appVersion}-${stamp}`;
+      cachedResponse = buildServiceWorkerResponse(source, {
+        ...options,
+        buildRevision: mixed.length <= 80 ? mixed : (envRev || String(options.appVersion)),
+      });
       cachedMtimeMs = mtimeMs;
     }
     return cachedResponse;

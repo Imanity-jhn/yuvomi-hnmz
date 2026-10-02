@@ -106,6 +106,20 @@ export const SETTINGS_SECTIONS = freezeEntries([
     loader: () => import('/settings/pages/personal-device.js'),
   },
   {
+    id: 'personal-routines',
+    sheetId: 'personal-routines',
+    scope: 'mine',
+    labelKey: 'settings.pageRoutines',
+    descriptionKey: 'settings.pageRoutinesDescription',
+    options: [
+      'settings.routinesPerson',
+      'settings.routinesWallpaper',
+      'settings.routinesShowTitle',
+    ],
+    adminOnly: false,
+    loader: () => import('/settings/pages/personal-routines.js'),
+  },
+  {
     id: 'personal-notifications',
     sheetId: 'personal-notifications',
     scope: 'mine',
@@ -654,6 +668,7 @@ export const SETTINGS_LEAVES = freezeEntries([
   { id: 'personal-account', domainId: 'personal', path: '/settings/personal/account', labelKey: 'settings.pageAccount', descriptionKey: 'settings.pageAccountDescription', icon: 'circle-user' },
   { id: 'personal-appearance', domainId: 'personal', path: '/settings/personal/appearance', labelKey: 'settings.pageAppearance', descriptionKey: 'settings.pageAppearanceDescription', icon: 'palette' },
   { id: 'personal-device', domainId: 'personal', path: '/settings/personal/device', labelKey: 'settings.pageDevice', descriptionKey: 'settings.pageDeviceDescription', icon: 'smartphone' },
+  { id: 'personal-routines', domainId: 'personal', path: '/settings/personal/routines', labelKey: 'settings.pageRoutines', descriptionKey: 'settings.pageRoutinesDescription', icon: 'sun' },
   { id: 'personal-notifications', domainId: 'personal', path: '/settings/personal/notifications', labelKey: 'settings.pageNotifications', descriptionKey: 'settings.pageNotificationsDescription', icon: 'bell' },
   { id: 'personal-weather', domainId: 'personal', path: '/settings/personal/weather', labelKey: 'settings.pageWeather', descriptionKey: 'settings.pageWeatherDescription', icon: 'cloud-sun' },
   // Haushalt

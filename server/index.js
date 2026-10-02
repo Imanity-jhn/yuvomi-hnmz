@@ -53,6 +53,7 @@ import kitchenRouter from './routes/kitchen.js';
 import calendarRouter from './routes/calendar.js';
 import notesRouter from './routes/notes.js';
 import quickLinksRouter from './routes/quick-links.js';
+import routinesRouter from './routes/routines.js';
 import contactsRouter from './routes/contacts.js';
 import cardavRouter from './routes/cardav.js';
 import birthdaysRouter from './routes/birthdays.js';
@@ -241,10 +242,10 @@ if (process.env.NODE_ENV === 'production' && process.env.ENABLE_API_DOCS !== 'tr
 // --------------------------------------------------------
 // Statische Dateien (Frontend) - differenzierte Caching-Strategie
 //
-// HTML + JS + CSS: no-cache (Browser revalidiert via ETag/304, kein stale Content
-//   nach Deployment). Bei unverändertem File → 304 Not Modified ohne Übertragung.
+// HTML + JS + CSS: no-store (nicht an der CDN-Kante und nicht im Browser lagern).
+//   `no-cache` wurde hinter BunkerWeb/Cloudflare zu max-age=180d umgeschrieben.
 // Bilder + Icons + Fonts: 30 Tage immutable (ändern sich praktisch nie).
-// manifest.json: no-cache (PWA-Updates sollen sofort greifen).
+// manifest.json: no-store (PWA-Updates sollen sofort greifen).
 // /sw.js wird direkt darunter als no-store-Antwort gerendert.
 // --------------------------------------------------------
 app.get('/sw.js', (_req, res) => {
@@ -253,6 +254,7 @@ app.get('/sw.js', (_req, res) => {
   res.setHeader('Cache-Control', response.cacheControl);
   res.setHeader('CDN-Cache-Control', response.cdnCacheControl);
   res.setHeader('Cloudflare-CDN-Cache-Control', response.cloudflareCdnCacheControl);
+  res.setHeader('Surrogate-Control', 'no-store');
   res.send(response.body);
 });
 
@@ -272,8 +274,13 @@ app.use(express.static(path.join(import.meta.dirname, '..', 'public'), {
     } else if (['.png', '.jpg', '.jpeg', '.ico', '.svg', '.webp', '.woff2', '.woff'].includes(ext)) {
       res.setHeader('Cache-Control', 'public, max-age=2592000, immutable'); // 30 Tage
     } else {
-      // HTML, JS, CSS, JSON und manifest immer revalidieren.
-      res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+      // HTML, JS, CSS, JSON und manifest: nicht im Browser und nicht an der
+      // CDN-Kante lagern. BunkerWeb/Cloudflare haben `no-cache` schon einmal
+      // in max-age=180d umgeschrieben - `no-store` plus die CF-Header sind die
+      // gleiche Ansage wie bei /sw.js.
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('CDN-Cache-Control', 'no-store');
+      res.setHeader('Cloudflare-CDN-Cache-Control', 'no-store');
     }
     // manifest.json: korrekter MIME-Type für PWA-Erkennung durch Chrome/Android
     if (filePath.endsWith('manifest.json')) {
@@ -380,7 +387,9 @@ app.get('/manifest.webmanifest', apiLimiter, (req, res) => {
   }
 
   res.type('application/manifest+json');
-  res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('CDN-Cache-Control', 'no-store');
+  res.setHeader('Cloudflare-CDN-Cache-Control', 'no-store');
   res.json({
     name: `${appName} Familienplaner`,
     short_name: appName,
@@ -665,6 +674,7 @@ app.use('/api/v1/kitchen', kitchenRouter);
 app.use('/api/v1/calendar', calendarRouter);
 app.use('/api/v1/notes', notesRouter);
 app.use('/api/v1/quick-links', quickLinksRouter);
+app.use('/api/v1/routines', routinesRouter);
 app.use('/api/v1/contacts/cardav', cardavRouter);
 app.use('/api/v1/contacts', contactsRouter);
 app.use('/api/v1/birthdays', birthdaysRouter);

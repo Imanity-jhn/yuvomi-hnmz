@@ -1,13 +1,14 @@
 # Yuvomi HNMZ — instance de développement (hot reload)
-# Ne pas utiliser pour la prod Unraid (conteneur Yuvomi / port 3007 / appdata/yuvomi).
+# Données isolées de la prod Unraid (conteneur yuvomi / port 3007 / appdata/yuvomi).
+# Réseau bw-apps : même réseau que BunkerWeb, pour bascule du reverse proxy.
 #
 # Usage (sur Unraid) :
-#   cd /mnt/user/yuvomi-hnmz
-#   docker compose -f docker-compose.dev.yml up -d --build
-#   docker compose -f docker-compose.dev.yml logs -f
-#   docker compose -f docker-compose.dev.yml down
+#   bash scripts/unraid-dev-up.sh
+#   bash scripts/unraid-sync-prod-to-dev.sh   # copie les bind mounts prod → dev
+#   bash scripts/unraid-failover-to-dev.sh    # pointe dashboard.* vers ce conteneur
 #
-# Accès : http://192.168.50.2:3008
+# Accès LAN : http://192.168.50.2:3008
+# Accès public (après bascule) : https://dashboard.huvelin-maniez.fr
 
 services:
   yuvomi-hnmz-dev:
@@ -25,11 +26,11 @@ services:
       - .:/app
       # node_modules du conteneur (évite d'écraser avec le mount hôte)
       - yuvomi_hnmz_dev_node_modules:/app/node_modules
-      # Données isolées de la prod (/mnt/user/appdata/yuvomi)
-      - ${DATA_DIR:-/mnt/user/appdata/yuvomi-hnmz-dev/data}:/data
-      - ${BACKUP_DIR:-/mnt/user/appdata/yuvomi-hnmz-dev/backups}:/backups
-      - ${MODULES_DIR:-./modules}:/app/modules
-      - ${DOCUMENT_STORAGE_LOCAL_DIR:-/mnt/user/appdata/yuvomi-hnmz-dev/documents}:/documents
+      # Binds miroir de la prod, dans un appdata séparé
+      - ${YUVOMI_DEV_DATA:-/mnt/user/appdata/yuvomi-hnmz-dev/data}:/data
+      - ${YUVOMI_DEV_BACKUPS:-/mnt/user/appdata/yuvomi-hnmz-dev/backups}:/backups
+      - ${YUVOMI_DEV_MODULES:-/mnt/user/appdata/yuvomi-hnmz-dev/modules}:/app/modules
+      - ${YUVOMI_DEV_DOCUMENTS:-/mnt/user/appdata/yuvomi-hnmz-dev/documents}:/documents
     env_file:
       - .env
     environment:
@@ -40,8 +41,12 @@ services:
       - DOCUMENT_STORAGE_LOCAL_ENABLED=${DOCUMENT_STORAGE_LOCAL_ENABLED:-false}
       - DOCUMENT_STORAGE_LOCAL_PATH=${DOCUMENT_STORAGE_LOCAL_PATH:-/documents}
       - SESSION_SECURE=${SESSION_SECURE:-false}
-      - TRUST_PROXY=${TRUST_PROXY:-loopback}
+      - TRUST_PROXY=${TRUST_PROXY:-1}
+      - BASE_URL=${BASE_URL:-https://dashboard.huvelin-maniez.fr}
       - TZ=${TZ:-Europe/Paris}
+    networks:
+      - default
+      - bw-apps
     healthcheck:
       test:
         [
@@ -57,3 +62,7 @@ services:
 
 volumes:
   yuvomi_hnmz_dev_node_modules:
+
+networks:
+  bw-apps:
+    external: true

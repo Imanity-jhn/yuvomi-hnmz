@@ -62,6 +62,14 @@
  *          Eingabefelder, keine Auswahl-Ebene davor.
  *    Was eine davon reisst, gehoert nicht hierher, sondern in die App.
  *
+ *    DIE EINE SCHREIBAUSNAHME IST DAS DISPLAY-ABHAKEN (#1209), nicht der
+ *    Wandmodus selbst. Ein Mitgliedskonto bleibt auf der Flaeche lesend.
+ *    Nur `access_scope === 'display'` darf PATCH /tasks/:id/status, und nur
+ *    mit einer AM GERAET gewaehlten Person (`done_by_user_id`) - Allowlist
+ *    `DISPLAY_WRITE_ROUTES`, Overlay in components/wall-tick.js. Die Person
+ *    wird nicht gemerkt, Undo gibt es nicht, Rewards bleiben auf /rewards.
+ *    (b) gilt weiter fuer alles andere auf dieser Flaeche.
+ *
  * ── WARUM DIE ATTRIBUTE AN DER WURZEL HAENGEN ─────────────────────────────
  *
  * Der Modus blendet Sidebar und Tab-Leiste aus, und beide sind Shell-Elemente
@@ -72,6 +80,8 @@
  */
 
 import { nowFields } from './timezone.js';
+import { applyWallPrefsToDocument, wallNightWindow } from './wall-prefs.js';
+import { syncWallWakeLock } from './wall-wake-lock.js';
 
 const WALL_KEY = 'yuvomi-wall-mode';
 const THEME_KEY = 'yuvomi-theme';
@@ -136,8 +146,10 @@ export function isWallNight(now = new Date()) {
   // Die Uhr des Haushalts, nicht die des Geraets: ein Wandbildschirm, dessen
   // Browser in einer anderen Zone steht, ginge sonst zur falschen Stunde in den
   // Nachtmodus (#829 Teil 3).
+  const windowHours = wallNightWindow();
+  if (!windowHours) return false;
   const hour = nowFields(now).hour;
-  return hour >= WALL_NIGHT_FROM || hour < WALL_NIGHT_TO;
+  return hour >= windowHours.from || hour < windowHours.to;
 }
 
 /** Laeuft die Flaeche gerade als Wand? Liest den Zustand, den `syncWallMode` setzt. */
@@ -175,6 +187,7 @@ function restoreUserTheme() {
  * @returns {boolean} Ob die Wand danach laeuft.
  */
 export function syncWallMode(path = location.pathname) {
+  applyWallPrefsToDocument();
   const root = document.documentElement;
   const active = isWallModeEnabled() && isWallRoute(path);
   const night = active && isWallNight();
@@ -206,6 +219,7 @@ export function syncWallMode(path = location.pathname) {
   if (night !== wasNight || root.getAttribute('data-theme') !== themeBefore) {
     window.yuvomi?.restoreThemeColor?.();
   }
+  syncWallWakeLock(active);
 
   return active;
 }

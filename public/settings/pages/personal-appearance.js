@@ -10,7 +10,17 @@ import { getPreferences, savePreferences } from '/settings/preferences-cache.js'
 import { toggleRowHtml } from '/settings/components.js';
 import { wireTablist } from '/utils/tablist.js';
 import { attachSegmentIndicator } from '/utils/segment-indicator.js';
-import { isWallModeEnabled, setWallModeEnabled } from '/utils/wall-mode.js';
+import { isWallModeEnabled, setWallModeEnabled, syncWallMode } from '/utils/wall-mode.js';
+import {
+  readWallPrefs,
+  writeWallPrefs,
+  writeWallWhoFilter,
+  applyWallPreset,
+  wallPresetName,
+  WALL_ROW_CAP_OPTIONS,
+  WALL_IDLE_OPTIONS,
+  WALL_NIGHT_PRESETS,
+} from '/utils/wall-prefs.js';
 import { setDisplayTimeZone } from '/utils/timezone.js';
 import {
   CUSTOM_REGION,
@@ -224,6 +234,9 @@ function renderLoadError(container) {
  */
 function renderPage(container, preferences, isAdmin) {
   const theme = currentTheme();
+  const wallPrefs = readWallPrefs();
+  const wallPreset = wallPresetName(wallPrefs);
+  const nightCurrent = wallPrefs.nightFrom == null ? 'off' : `${wallPrefs.nightFrom}-${wallPrefs.nightTo}`;
   const activeRegion = resolveRegion(preferences);
   const customHidden = isAdmin && activeRegion !== CUSTOM_REGION;
   container.replaceChildren();
@@ -261,6 +274,101 @@ function renderPage(container, preferences, isAdmin) {
           attrs: { id: 'wall-mode-toggle', 'aria-describedby': 'wall-mode-hint' },
         })}
         <p class="form-hint" id="wall-mode-hint">${t('settings.wallModeHint')}</p>
+      </div>
+      <div class="settings-card">
+        <p class="form-hint">${t('settings.wallPrefsHint')}</p>
+        <div class="form-group">
+          <label class="form-label" for="wall-preset">${t('dashboard.wallPreset')}</label>
+          <select class="form-input" id="wall-preset">
+            ${wallPreset === 'custom' ? `<option value="custom" selected disabled>${esc(t('dashboard.wallBlocks'))}</option>` : ''}
+            <option value="hallway"${wallPreset === 'hallway' ? ' selected' : ''}>${esc(t('dashboard.wallPresetHallway'))}</option>
+            <option value="kitchen"${wallPreset === 'kitchen' ? ' selected' : ''}>${esc(t('dashboard.wallPresetKitchen'))}</option>
+          </select>
+        </div>
+        ${toggleRowHtml({
+          label: t('dashboard.wallWho'),
+          checked: wallPrefs.showWho,
+          icon: 'users',
+          attrs: { id: 'wall-show-who' },
+        })}
+        ${toggleRowHtml({
+          label: t('nav.calendar'),
+          checked: wallPrefs.showEvents,
+          icon: 'calendar',
+          attrs: { id: 'wall-show-events' },
+        })}
+        ${toggleRowHtml({
+          label: t('dashboard.todayMeals'),
+          checked: wallPrefs.showMeals,
+          icon: 'utensils',
+          attrs: { id: 'wall-show-meals' },
+        })}
+        ${toggleRowHtml({
+          label: t('nav.schedule'),
+          checked: wallPrefs.showSchedule,
+          icon: 'calendar-clock',
+          attrs: { id: 'wall-show-schedule' },
+        })}
+        ${toggleRowHtml({
+          label: t('nav.waste'),
+          checked: wallPrefs.showWaste,
+          icon: 'trash-2',
+          attrs: { id: 'wall-show-waste' },
+        })}
+        ${toggleRowHtml({
+          label: t('dashboard.countdownTitle'),
+          checked: wallPrefs.showDates,
+          icon: 'cake',
+          attrs: { id: 'wall-show-dates' },
+        })}
+        ${toggleRowHtml({
+          label: t('dashboard.weather'),
+          checked: wallPrefs.showWeather,
+          icon: 'cloud-sun',
+          attrs: { id: 'wall-show-weather' },
+        })}
+        ${toggleRowHtml({
+          label: t('dashboard.wallTimerLabel'),
+          checked: wallPrefs.showTimer,
+          icon: 'timer',
+          attrs: { id: 'wall-show-timer' },
+        })}
+        <div class="form-group">
+          <label class="form-label" for="wall-density">${t('dashboard.wallDensity')}</label>
+          <select class="form-input" id="wall-density">
+            ${WALL_ROW_CAP_OPTIONS.map((cap) => {
+              const label = cap === 3
+                ? t('dashboard.wallDensityComfortable')
+                : cap === 6
+                  ? t('dashboard.wallDensityFull')
+                  : t('dashboard.wallDensityDefault');
+              return `<option value="${cap}"${wallPrefs.rowCap === cap ? ' selected' : ''}>${esc(label)}</option>`;
+            }).join('')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="wall-night">${t('dashboard.wallNight')}</label>
+          <select class="form-input" id="wall-night">
+            ${WALL_NIGHT_PRESETS.map((preset) => {
+              const value = preset.from == null ? 'off' : `${preset.from}-${preset.to}`;
+              const label = preset.from == null
+                ? t('dashboard.wallNightOff')
+                : t('dashboard.wallNightPreset', {
+                    from: `${String(preset.from).padStart(2, '0')}:00`,
+                    to: `${String(preset.to).padStart(2, '0')}:00`,
+                  });
+              return `<option value="${value}"${nightCurrent === value ? ' selected' : ''}>${esc(label)}</option>`;
+            }).join('')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="wall-idle">${t('dashboard.wallIdle')}</label>
+          <select class="form-input" id="wall-idle">
+            ${WALL_IDLE_OPTIONS.map((sec) => `
+              <option value="${sec}"${wallPrefs.screensaverIdleSec === sec ? ' selected' : ''}>${esc(t('dashboard.wallIdleMinutes', { count: Math.round(sec / 60) }))}</option>
+            `).join('')}
+          </select>
+        </div>
       </div>
     </section>
 
@@ -496,6 +604,72 @@ function bindEvents(container, user) {
         : t('settings.wallModeOff'),
       'success',
     );
+  });
+
+  const persistWallPref = (patch) => {
+    writeWallPrefs(patch);
+    syncWallMode(location.pathname);
+  };
+  const syncWallBlockToggles = () => {
+    const next = readWallPrefs();
+    const checks = {
+      who: next.showWho,
+      events: next.showEvents,
+      meals: next.showMeals,
+      schedule: next.showSchedule,
+      waste: next.showWaste,
+      dates: next.showDates,
+      weather: next.showWeather,
+      timer: next.showTimer,
+    };
+    for (const [id, on] of Object.entries(checks)) {
+      const el = container.querySelector(`#wall-show-${id}`);
+      if (el) el.checked = on;
+    }
+  };
+  container.querySelector('#wall-preset')?.addEventListener('change', (event) => {
+    applyWallPreset(event.target.value);
+    if (event.target.value !== 'hallway') writeWallWhoFilter(null);
+    syncWallMode(location.pathname);
+    syncWallBlockToggles();
+  });
+  container.querySelector('#wall-show-who')?.addEventListener('change', (event) => {
+    persistWallPref({ showWho: event.target.checked });
+    if (!event.target.checked) writeWallWhoFilter(null);
+  });
+  container.querySelector('#wall-show-events')?.addEventListener('change', (event) => {
+    persistWallPref({ showEvents: event.target.checked });
+  });
+  container.querySelector('#wall-show-meals')?.addEventListener('change', (event) => {
+    persistWallPref({ showMeals: event.target.checked });
+  });
+  container.querySelector('#wall-show-schedule')?.addEventListener('change', (event) => {
+    persistWallPref({ showSchedule: event.target.checked });
+  });
+  container.querySelector('#wall-show-waste')?.addEventListener('change', (event) => {
+    persistWallPref({ showWaste: event.target.checked });
+  });
+  container.querySelector('#wall-show-dates')?.addEventListener('change', (event) => {
+    persistWallPref({ showDates: event.target.checked });
+  });
+  container.querySelector('#wall-show-weather')?.addEventListener('change', (event) => {
+    persistWallPref({ showWeather: event.target.checked });
+  });
+  container.querySelector('#wall-show-timer')?.addEventListener('change', (event) => {
+    persistWallPref({ showTimer: event.target.checked });
+  });
+  container.querySelector('#wall-density')?.addEventListener('change', (event) => {
+    persistWallPref({ rowCap: Number(event.target.value) });
+  });
+  container.querySelector('#wall-night')?.addEventListener('change', (event) => {
+    if (event.target.value === 'off') persistWallPref({ nightFrom: null, nightTo: null });
+    else {
+      const [from, to] = event.target.value.split('-').map(Number);
+      persistWallPref({ nightFrom: from, nightTo: to });
+    }
+  });
+  container.querySelector('#wall-idle')?.addEventListener('change', (event) => {
+    persistWallPref({ screensaverIdleSec: Number(event.target.value) });
   });
 
   const localeSelect = container.querySelector('#locale-select');

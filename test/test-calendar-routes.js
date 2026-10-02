@@ -4960,3 +4960,47 @@ test('Farb-Heilung: eine Farbwahl vor dem ersten Heil-Lauf kommt nicht in den Sc
     db.prepare("DELETE FROM sync_config WHERE key LIKE 'caldav_legacy_color_heal_%'").run();
   }
 });
+
+test('POST weist zu und schickt den Zugewiesenen sofort einen Push', async () => {
+  const pushed = [];
+  const original = pushService.sendPushToUser;
+  pushService.sendPushToUser = async (userId, payload) => {
+    pushed.push({ userId, payload });
+    return 1;
+  };
+  try {
+    const res = await call('POST', '/', {
+      body: {
+        title: 'Zahnarzt zu zweit',
+        start_datetime: '2036-04-01T09:00',
+        assigned_to: [ADMIN.id, MARIA.id],
+      },
+    });
+    assert.equal(res.status, 201);
+    assert.deepEqual(pushed.map((p) => p.userId), [MARIA.id]);
+    assert.equal(pushed[0].payload.url, `/calendar?open=${res.body.data.id}`);
+    assert.equal(pushed[0].payload.tag, `event-assigned-${res.body.data.id}`);
+    assert.match(pushed[0].payload.body, /Zahnarzt zu zweit/);
+  } finally {
+    pushService.sendPushToUser = original;
+  }
+});
+
+test('PUT benachrichtigt nur neu zugewiesene Personen, nicht den Autor', async () => {
+  const created = await call('POST', '/', {
+    body: { title: 'Nur ich', start_datetime: '2036-04-02T10:00', assigned_to: [ADMIN.id] },
+  });
+  assert.equal(created.status, 201);
+  const pushed = [];
+  const original = pushService.sendPushToUser;
+  pushService.sendPushToUser = async (userId) => { pushed.push(userId); return 1; };
+  try {
+    const res = await call('PUT', `/${created.body.data.id}`, {
+      body: { assigned_to: [ADMIN.id, TOM.id] },
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(pushed, [TOM.id]);
+  } finally {
+    pushService.sendPushToUser = original;
+  }
+});

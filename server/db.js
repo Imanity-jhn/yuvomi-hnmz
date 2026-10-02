@@ -10020,6 +10020,56 @@ const MIGRATIONS = [
       `);
     },
   },
+  {
+    version: 230,
+    description: 'Kid morning/evening routine boards per household member',
+    up: `
+      CREATE TABLE IF NOT EXISTS routine_steps (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        period TEXT NOT NULL CHECK(period IN ('morning', 'evening')),
+        title TEXT NOT NULL,
+        icon TEXT NOT NULL,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_routine_steps_user_period
+        ON routine_steps(user_id, period, sort_order);
+      CREATE TABLE IF NOT EXISTS routine_completions (
+        step_id INTEGER NOT NULL REFERENCES routine_steps(id) ON DELETE CASCADE,
+        date_key TEXT NOT NULL,
+        done_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        done_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        PRIMARY KEY (step_id, date_key)
+      );
+    `,
+  },
+  {
+    version: 231,
+    description: 'Custom photos on kid routine steps and a wallpaper per person',
+    up: `
+      CREATE TABLE IF NOT EXISTS routine_boards (
+        user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        wallpaper_data TEXT
+      );
+    `,
+    afterUp(database) {
+      const cols = database.prepare('PRAGMA table_info(routine_steps)').all().map((c) => c.name);
+      if (!cols.includes('image_data')) {
+        database.exec('ALTER TABLE routine_steps ADD COLUMN image_data TEXT');
+      }
+    },
+  },
+  {
+    version: 232,
+    description: 'Optional title overlay on kid routine step photos',
+    up(database) {
+      const cols = database.prepare('PRAGMA table_info(routine_steps)').all().map((c) => c.name);
+      if (!cols.includes('show_title')) {
+        database.exec('ALTER TABLE routine_steps ADD COLUMN show_title INTEGER NOT NULL DEFAULT 0');
+      }
+    },
+  },
 ];
 
 /**
@@ -10106,6 +10156,45 @@ function migrate(database = db, migrations = MIGRATIONS) {
       applied_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     );
   `);
+
+  // Fork HNMZ: local routine boards were recorded as 217-219 before upstream
+  // used those numbers for reminder orphans / document expiry / prevention.
+  // Re-queue 217-219 only when later upstream migrations have not yet run.
+  // If 220+ is already on disk, replaying 218 would rebuild `reminders` and
+  // drop entity types those later migrations added.
+  {
+    const recorded = database.prepare(
+      'SELECT COUNT(*) AS n FROM schema_migrations WHERE version IN (217, 218, 219)'
+    ).get().n;
+    if (recorded === 3) {
+      const hasRoutines = database.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'routine_steps'"
+      ).get();
+      const hasOrphanTrigger = database.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_reminders_tasks_ad'"
+      ).get();
+      const hasLaterUpstream = database.prepare(
+        'SELECT 1 FROM schema_migrations WHERE version = 220'
+      ).get();
+      if (hasRoutines && !hasOrphanTrigger && !hasLaterUpstream) {
+        database.prepare('DELETE FROM schema_migrations WHERE version IN (217, 218, 219)').run();
+        log.warn('HNMZ: re-queued upstream migrations 217-219 after routine version collision');
+      } else if (hasRoutines && !hasOrphanTrigger && hasLaterUpstream) {
+        database.exec(`
+          CREATE TRIGGER IF NOT EXISTS trg_reminders_tasks_ad
+          AFTER DELETE ON tasks BEGIN
+            DELETE FROM reminders WHERE entity_type = 'task' AND entity_id = OLD.id;
+          END;
+          CREATE TRIGGER IF NOT EXISTS trg_reminders_events_ad
+          AFTER DELETE ON calendar_events BEGIN
+            DELETE FROM reminders WHERE entity_type = 'event' AND entity_id = OLD.id;
+          END;
+        `);
+        log.warn('HNMZ: installed reminder orphan triggers skipped by routine version collision');
+      }
+    }
+  }
+
 
   const applied = new Set(
     database.prepare('SELECT version FROM schema_migrations').all().map((r) => r.version)
@@ -10239,6 +10328,7 @@ const CRITICAL_COLUMNS = [
   // Sync-Upsert (schreibt tzid) still und die Kalender-Expansion driftet über DST.
   { table: 'calendar_events', column: 'tzid', type: 'TEXT' },
 ];
+
 
 /**
  * Selbstheilung gegen Migrations-Drift (#538).

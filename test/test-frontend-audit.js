@@ -476,7 +476,7 @@ test('service worker release caches track package and deployment revisions and i
 
   assert.equal(release, pkg.version, 'Service worker APP_RELEASE must match package.json');
   assert.match(sw, /const APP_BUILD_REVISION\s*=\s*['"]__YUVOMI_BUILD_REVISION__['"]/);
-  assert.match(sw, /const CACHE_RELEASE\s*=\s*`\$\{APP_RELEASE\}-\$\{APP_BUILD_REVISION\}`/);
+  assert.match(sw, /const CACHE_RELEASE\s*=\s*`\$\{APP_RELEASE\}-\$\{APP_BUILD_REVISION\}-\$\{CACHE_EPOCH\}`/);
   for (const cache of ['shell', 'pages', 'locales', 'assets', 'api']) {
     assert.match(sw, new RegExp(`yuvomi-${cache}-\\$\\{CACHE_RELEASE\\}`));
   }
@@ -15800,11 +15800,8 @@ test('der Vorab-Wand-Modus in theme-init.js driftet nicht von utils/wall-mode.js
   const to = Number(mod.match(/export const WALL_NIGHT_TO = (\d+)/)?.[1]);
   assert.equal(from, 22);
   assert.equal(to, 6);
-
-  const initWindow = init.match(/hour >= (\d+) \|\| hour < (\d+)/);
-  assert.ok(initWindow, 'theme-init.js traegt ein Nachtfenster');
-  assert.equal(Number(initWindow[1]), from, 'dieselbe Nachtgrenze wie wall-mode.js');
-  assert.equal(Number(initWindow[2]), to, 'dieselbe Morgengrenze wie wall-mode.js');
+  assert.match(init, new RegExp(`nightFrom = ${from}`), 'dieselbe Nachtgrenze wie wall-mode.js');
+  assert.match(init, new RegExp(`nightTo = ${to}`), 'dieselbe Morgengrenze wie wall-mode.js');
 
   // Und die Route: der Modus ist ein Zustand des Dashboards, kein zweiter Ort.
   assert.match(mod, /export function isWallRoute\(path\) \{\s*return path === '\/';/);

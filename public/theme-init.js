@@ -83,11 +83,21 @@
 // in test-frontend-audit.js.
 (function () {
   try {
+    var wallPrefs = null;
+    try { wallPrefs = JSON.parse(localStorage.getItem('yuvomi-wall-prefs') || 'null'); } catch (ePrefs) { wallPrefs = null; }
+    if (wallPrefs && wallPrefs.screensaverIdleSec) {
+      document.documentElement.setAttribute('data-screensaver-idle', String(wallPrefs.screensaverIdleSec));
+    }
     if (localStorage.getItem('yuvomi-wall-mode') !== '1') return;
     if (location.pathname !== '/') return;
     document.documentElement.setAttribute('data-wall-mode', '');
     var hour = new Date().getHours();
-    if (hour >= 22 || hour < 6) {
+    var nightFrom = 22;
+    var nightTo = 6;
+    var nightOff = wallPrefs && wallPrefs.nightFrom === null && wallPrefs.nightTo === null;
+    if (wallPrefs && Number.isInteger(wallPrefs.nightFrom)) nightFrom = wallPrefs.nightFrom;
+    if (wallPrefs && Number.isInteger(wallPrefs.nightTo)) nightTo = wallPrefs.nightTo;
+    if (!nightOff && (hour >= nightFrom || hour < nightTo)) {
       document.documentElement.setAttribute('data-wall-night', '');
       // Nachts erzwungen dunkel - ohne `yuvomi-theme` anzufassen.
       document.documentElement.setAttribute('data-theme', 'dark');

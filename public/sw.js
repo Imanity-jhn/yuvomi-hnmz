@@ -19,7 +19,10 @@
 
 const APP_RELEASE        = '2.71.0';
 const APP_BUILD_REVISION = '__YUVOMI_BUILD_REVISION__';
-const CACHE_RELEASE      = `${APP_RELEASE}-${APP_BUILD_REVISION}`;
+// Steigt bei jeder sichtbaren Wand-Aenderung, damit ein Tablett mit altem
+// Worker (Cookies loeschen reicht nicht) eine neue CACHE_RELEASE sieht.
+const CACHE_EPOCH        = '20261002-hnmz-routines';
+const CACHE_RELEASE      = `${APP_RELEASE}-${APP_BUILD_REVISION}-${CACHE_EPOCH}`;
 const SHELL_CACHE        = `yuvomi-shell-${CACHE_RELEASE}`;
 const PAGES_CACHE        = `yuvomi-pages-${CACHE_RELEASE}`;
 const LOCALES_CACHE      = `yuvomi-locales-${CACHE_RELEASE}`;
@@ -72,7 +75,7 @@ const APP_SHELL = [
   '/styles/document-attach.css',
   '/styles/auth.css',
   '/styles/reminders.css',
-  '/styles/dashboard.css',
+  '/styles/dashboard.css', // Wall: page locked, program list is the only scrollport.
   '/styles/tasks.css',
   '/styles/shopping.css',
   '/styles/meals.css',
@@ -110,6 +113,9 @@ const APP_SHELL = [
   '/components/quick-links-manager.js',
   '/components/task-detail.js',
   '/components/user-multi-select.js',
+  '/components/wall-routine.js',
+  '/components/wall-setup.js',
+  '/components/wall-tick.js',
   '/components/wall-timer.js',
   '/utils/birthday-event.js',
   '/utils/bulk-pill.js',
@@ -161,6 +167,7 @@ const APP_SHELL = [
   '/utils/household.js',
   '/utils/html-escape.js',
   '/utils/html.js',
+  '/utils/image-fit.js',
   '/utils/ingredient-row.js',
   '/utils/inventory-warranty.js',
   '/utils/kitchen-tabs.js',
@@ -202,6 +209,7 @@ const APP_SHELL = [
   '/utils/recipe-thumb.js',
   '/utils/recipe-to-meal.js',
   '/utils/recurrence-scope.js',
+  '/utils/routines.js',
   '/utils/reminder-offset.js',
   '/utils/reward-goal.js',
   '/utils/roving-toolbar.js',
@@ -230,6 +238,8 @@ const APP_SHELL = [
   '/utils/version.js',
   '/utils/upload-limit.js',
   '/utils/wall-mode.js',
+  '/utils/wall-prefs.js',
+  '/utils/wall-wake-lock.js',
   '/utils/web-share.js',
   '/utils/week-strip.js',
   '/offline.html',
@@ -347,6 +357,7 @@ const PAGE_MODULES = [
   '/settings/pages/personal-weather.js',
   '/settings/pages/personal-appearance.js',
   '/settings/pages/personal-device.js',
+  '/settings/pages/personal-routines.js',
   '/settings/pages/personal-calendar.js',
   '/settings/pages/personal-tasks.js',
   '/settings/pages/modules-active.js',
@@ -561,7 +572,10 @@ async function networkFirst(request, cacheName) {
   const cache = await caches.open(cacheName);
 
   try {
-    const response = await fetch(request);
+    // `reload` umgeht den HTTP-Cache. Hinter Cloudflare/BunkerWeb kommt JS/CSS
+    // sonst mit max-age von Monaten an, und fetch() liefert wochenalten Code -
+    // der Wand-Modus bleibt stehen, selbst nach „Daten löschen".
+    const response = await fetch(new Request(request, { cache: 'reload' }));
     if (response.ok && response.type === 'basic') {
       cache.put(request, response.clone());
     }
@@ -692,9 +706,14 @@ self.addEventListener('push', (event) => {
   const title = payload.title || 'Yuvomi';
   const options = {
     body: payload.body || '',
-    icon: '/icons/icon-192.png',
-    badge: '/icons/icon-192.png',
+    icon: payload.icon || '/icons/icon-192.png',
+    badge: payload.badge || '/icons/icon-192.png',
     tag: payload.tag || 'yuvomi-push',
+    lang: payload.lang || undefined,
+    vibrate: Array.isArray(payload.vibrate) ? payload.vibrate : [200, 80, 200],
+    renotify: payload.renotify !== false,
+    timestamp: Number.isFinite(payload.timestamp) ? payload.timestamp : Date.now(),
+    actions: Array.isArray(payload.actions) ? payload.actions : [],
     // `/` UND NICHT `/reminders`: diese Route hat es nie gegeben (Critique
     // 2026-08-10). Der Router kannte sie nicht und fiel still auf die
     // Uebersicht zurueck - ein Fallback, der wie ein Ziel aussah. Die Uebersicht
@@ -705,8 +724,27 @@ self.addEventListener('push', (event) => {
   event.waitUntil(self.registration.showNotification(title, options));
 });
 
+self.addEventListener('pushsubscriptionchange', (event) => {
+  event.waitUntil((async () => {
+    const sub = event.newSubscription
+      || await self.registration.pushManager.getSubscription();
+    if (!sub) return;
+    try {
+      await fetch('/api/v1/push/subscribe', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(sub.toJSON()),
+      });
+    } catch { /* Session abgelaufen: resync beim nächsten Öffnen */ }
+    const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    windows.forEach((client) => client.postMessage({ type: 'PUSH_SUBSCRIPTION_CHANGED' }));
+  })());
+});
+
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
+  if (event.action && event.action !== 'open') return;
   const targetUrl = (event.notification.data && event.notification.data.url) || '/';
   event.waitUntil((async () => {
     const all = await clients.matchAll({ type: 'window', includeUncontrolled: true });

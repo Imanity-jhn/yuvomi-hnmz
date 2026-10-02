@@ -31,6 +31,7 @@ import { displayActingPerson, isDisplayRequest } from '../services/display-actin
 import { pushService } from '../services/push.js';
 import { todayKey } from '../utils/timezone.js';
 import { resolveHouseholdFormats, translate } from '../utils/i18n.js';
+import { decoratePushPayload } from '../services/push-payload.js';
 import {
   fanOutTaskReminders, dropInheritedTaskReminders, taskAuthorId, syncTaskAutoReminders,
 } from '../services/task-reminders.js';
@@ -276,6 +277,8 @@ function setAssignments(d, taskId, userIds) {
 function notifyNewAssignees(task, addedIds, actorId) {
   if (!task || !addedIds?.length) return;
   const { locale } = resolveHouseholdFormats(db.get());
+  const actorName = db.get().prepare('SELECT display_name FROM users WHERE id = ?')
+    .get(actorId)?.display_name;
   for (const id of addedIds) {
     if (id === actorId) continue;
     if (!findVisibleTask(task.id, id)) continue;
@@ -283,12 +286,15 @@ function notifyNewAssignees(task, addedIds, actorId) {
     if (!target) continue;
     const perms = resolvePermissions(db.get(), target);
     if (!perms.admin && perms.modules?.tasks === 'none') continue;
-    pushService.sendPushToUser(id, {
-      title: translate(locale, 'nav.tasks'),
-      body: task.title,
+    const body = actorName
+      ? translate(locale, 'reminders.pushAssignedBody', { name: actorName, title: task.title })
+      : translate(locale, 'reminders.pushAssignedBodyNoName', { title: task.title });
+    pushService.sendPushToUser(id, decoratePushPayload({
+      title: translate(locale, 'reminders.pushAssignedTitle'),
+      body,
       url: `/tasks?open=${task.id}`,
       tag: `task-assigned-${task.id}`,
-    }).catch((err) => log.warn('Zuweisungs-Push fehlgeschlagen:', err?.message || err));
+    }, locale)).catch((err) => log.warn('Zuweisungs-Push fehlgeschlagen:', err?.message || err));
   }
 }
 

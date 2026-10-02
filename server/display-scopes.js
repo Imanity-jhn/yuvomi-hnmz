@@ -78,6 +78,8 @@ export const DISPLAY_SCOPES = Object.freeze([
 export const DISPLAY_WRITE_ROUTES = Object.freeze([
   Object.freeze({ method: 'PATCH', pattern: /^\/tasks\/\d+\/status$/ }),
   Object.freeze({ method: 'POST', pattern: /^\/rewards\/redemptions$/ }),
+  Object.freeze({ method: 'POST', pattern: /^\/routines\/steps\/\d+\/done$/ }),
+  Object.freeze({ method: 'DELETE', pattern: /^\/routines\/steps\/\d+\/done$/ }),
 ]);
 
 /** Die Module daraus, ohne Zugriffsart - fuer die Rechteaufloesung. */
@@ -118,6 +120,7 @@ export const DISPLAY_READ_PATHS = Object.freeze([
   // hinein und liefert Name, Farbe, Bild und die zwei Flaggen; die
   // Kontaktdaten, die `/family/members` mitgibt, bleiben draussen.
   '/displays/people',
+  '/routines',
 ]);
 
 /**

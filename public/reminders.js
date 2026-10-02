@@ -7,7 +7,6 @@
 
 import { api } from '/api.js';
 import { t, formatDate } from '/i18n.js';
-import { isPushSubscribed } from '/push.js';
 import { moduleIconEl } from '/nav-icons.js';
 import { toastSurface } from '/utils/toast-surface.js';
 
@@ -63,25 +62,67 @@ async function requestPermission() {
  * (REMINDER_TITLE_KEYS in server/services/notifications.js); hier uebersetzt der
  * Client, der seine eigene Sprache kennt.
  *
+ * Web Push bleibt der Weg bei geschlossener App. Wenn das Abo stumm blieb
+ * (abgelaufener Endpoint, iOS ohne installierte PWA, unterdrückte Vordergrund-
+ * Meldung), darf das Öffnen der App die Systemmeldung trotzdem nachziehen -
+ * sonst sieht man sie nur als Toast. Dieselbe `tag` wie der Server
+ * (`reminder-${id}`) verhindert ein Doppel, wenn der SW sie schon gezeigt hat.
+ *
  * @param {string} title
  * @param {string} body
- * @param {string|null} targetUrl
+ * @param {string} [tag]
+ * @param {string} [url]
  */
-function showBrowserNotification(title, body, targetUrl = null) {
+async function showBrowserNotification(title, body, tag, url) {
   if (isPushSubscribed()) return; // Web Push übernimmt die System-Benachrichtigung
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  const options = {
+    body,
+    icon: '/icons/icon-192.png',
+    badge: '/icons/icon-192.png',
+    tag: tag || 'yuvomi-reminder',
+    renotify: true,
+    data: { url: url || '/' },
+  };
   try {
-    const n = new Notification(title, { body, icon: '/icons/icon-192.png' });
-    if (typeof targetUrl === 'string' && targetUrl.startsWith('/') && !targetUrl.startsWith('//')) {
-      n.onclick = () => {
-        window.focus?.();
-        window.yuvomi?.navigate(targetUrl);
-        n.close();
-      };
+    if ('serviceWorker' in navigator) {
+      const reg = await navigator.serviceWorker.ready;
+      if (tag) {
+        const existing = await reg.getNotifications({ tag });
+        if (existing.length) return;
+      }
+      await reg.showNotification(title, options);
+      return;
     }
+    const n = new Notification(title, options);
+    n.onclick = () => {
+      window.focus?.();
+      if (typeof url === 'string' && url.startsWith('/') && !url.startsWith('//')) {
+        window.yuvomi?.navigate(url);
+      }
+      n.close();
+    };
     setTimeout(() => n.close(), 8000);
   } catch {
     // Notification-API kann in bestimmten Kontexten fehlschlagen
+  }
+}
+
+function reminderOpenUrl(reminder) {
+  const id = reminder.entity_id;
+  switch (reminder.entity_type) {
+    case 'task': return `/tasks?open=${id}`;
+    case 'event': return `/calendar?open=${id}`;
+    case 'subscription': return '/budget';
+    case 'inventory_item':
+    case 'inventory_tracked_date': return '/inventory';
+    case 'pantry_item': return '/pantry';
+    case 'cycle_period':
+    case 'cycle_log_nudge': return '/health';
+    case 'schedule_entry':
+    case 'schedule_extra_entry': return '/schedule/patterns';
+    case 'waste_pickup': return '/waste';
+    default: return '/';
   }
 }
 
@@ -236,7 +277,8 @@ function processReminders(reminders) {
     showBrowserNotification(
       labelKey ? t(labelKey) : t('reminders.toastTitle'),
       reminderBody(reminder),
-      reminderTargetUrl(reminder),
+      `reminder-${reminder.id}`,
+      reminderTargetUrl(reminder) || reminderOpenUrl(reminder),
     );
   });
 
@@ -418,11 +460,19 @@ async function poll() {
 /**
  * Startet das Reminder-Polling. Idempotent.
  */
+function onForeground() {
+  if (!_isInitialized) return;
+  if (document.visibilityState !== 'visible') return;
+  poll();
+}
+
 function init() {
   if (_isInitialized) return;
   _isInitialized = true;
   poll();
   _pollTimer = setInterval(poll, POLL_INTERVAL_MS);
+  document.addEventListener('visibilitychange', onForeground);
+  window.addEventListener('pageshow', onForeground);
 }
 
 /**
@@ -436,6 +486,8 @@ function stop() {
   _isInitialized = false;
   _shownIds.clear();
   _deferredRetries = 0;
+  document.removeEventListener('visibilitychange', onForeground);
+  window.removeEventListener('pageshow', onForeground);
   updateBellBadge(0);
 }
 

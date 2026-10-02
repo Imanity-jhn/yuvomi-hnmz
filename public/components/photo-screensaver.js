@@ -1,7 +1,9 @@
 import { api } from '../api.js';
 import { formatDate } from '../i18n.js';
 
-const IDLE_MS = Math.max(30, Number.parseInt(document.documentElement.dataset.screensaverIdle || '300', 10)) * 1000;
+function idleMs() {
+  return Math.max(30, Number.parseInt(document.documentElement.dataset.screensaverIdle || '300', 10)) * 1000;
+}
 const SLIDE_MS = 20_000;
 
 let idleTimer;
@@ -21,7 +23,7 @@ function resetIdle(event) {
   const wasVisible = Boolean(overlay);
   stop();
   clearTimeout(idleTimer);
-  idleTimer = setTimeout(start, IDLE_MS);
+  idleTimer = setTimeout(start, idleMs());
   // A dismissing gesture belongs to the overlay and must not activate the
   // dashboard control underneath it (particularly important on wall tablets).
   if (wasVisible && event) {
@@ -52,7 +54,7 @@ async function start() {
     // and on a wall tablet, "the next event" can be hours away. This way the
     // timer only postpones the screensaver, it does not switch it off.
     clearTimeout(idleTimer);
-    idleTimer = setTimeout(start, IDLE_MS);
+    idleTimer = setTimeout(start, idleMs());
     return false;
   }
 
@@ -69,7 +71,9 @@ async function start() {
     const image = document.createElement('img');
     image.alt = '';
     const label = document.createElement('p');
-    overlay.append(image, label);
+    const nextLine = document.createElement('p');
+    nextLine.className = 'photo-screensaver__next';
+    overlay.append(image, label, nextLine);
     document.body.append(overlay);
 
     let index = Math.floor(Math.random() * photos.length);
@@ -83,6 +87,9 @@ async function start() {
       // Move the only persistent text so the screensaver itself has no fixed
       // bright pixels that could cause burn-in.
       label.dataset.position = String(index % 4);
+      const upcoming = document.documentElement.dataset.wallNext || '';
+      nextLine.textContent = upcoming;
+      nextLine.hidden = !upcoming;
     };
     show();
     slideTimer = setInterval(show, SLIDE_MS);

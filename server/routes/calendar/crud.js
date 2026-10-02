@@ -58,6 +58,7 @@ import {
   serializeEvent,
   sendStorageError,
 } from './helpers.js';
+import { notifyNewEventAssignees } from '../../services/event-assignment-push.js';
 
 const log = createLogger('Calendar');
 const router = express.Router();
@@ -626,6 +627,7 @@ router.post('/', async (req, res) => {
       isAdmin: isAdminUser(req),
       master: event,
     }) });
+    notifyNewEventAssignees(event, userIds, getUserId(req));
   } catch (err) {
     if (err instanceof StorageError && !stagedUpload) {
       log.error('POST / storage error:', err);
@@ -909,10 +911,10 @@ router.put('/:id', async (req, res) => {
     const colorTouched = Object.hasOwn(req.body, 'color');
 
     const assignedTouched = req.body.assigned_to !== undefined;
+    const assignedBefore = storedEventAssignees(db.get(), id);
     const userIds  = assignedTouched
       ? parseAssignedTo(req.body.assigned_to)
-      : db.get().prepare('SELECT user_id FROM event_assignments WHERE event_id = ?')
-          .all(id).map((r) => r.user_id);
+      : assignedBefore;
 
     // `assigned_to` ist die PRIMAERE Zuweisung, nicht bloss die erste Zeile: das
     // Formular schickt seine Reihenfolge mit, und `userIds[0]` traegt sie. Beim
@@ -1186,6 +1188,13 @@ router.put('/:id', async (req, res) => {
       isAdmin: isAdminUser(req),
       master: updated,
     }) });
+    if (assignedTouched) {
+      notifyNewEventAssignees(
+        updated,
+        userIds.filter((uid) => !assignedBefore.includes(uid)),
+        getUserId(req),
+      );
+    }
 
     if (pending) {
       flushOutbound()
@@ -1314,7 +1323,8 @@ router.put('/:seriesId/occurrences/:recurrenceId', async (req, res) => {
     }
     if (vIcon !== undefined) changes.icon = vIcon;
 
-    assertNoNewNonMembers(db.get(), mutation.assignments, storedOccurrenceAssignees(db.get(), seriesId, req.params.recurrenceId));
+    const assignedBefore = storedOccurrenceAssignees(db.get(), seriesId, req.params.recurrenceId);
+    assertNoNewNonMembers(db.get(), mutation.assignments, assignedBefore);
     // Synchron nach dem letzten await: der Anhang, wie er jetzt gilt (#1358).
     assertAttachmentStillChangeable(req, db.get(),
       storedOccurrenceAttachmentDocument(db.get(), loadVisibleEvent(seriesId, req) ?? master, req.params.recurrenceId),
@@ -1358,6 +1368,13 @@ router.put('/:seriesId/occurrences/:recurrenceId', async (req, res) => {
         master,
       }),
     });
+    if (mutation.assignments) {
+      notifyNewEventAssignees(
+        result.event,
+        mutation.assignments.filter((uid) => !assignedBefore.includes(uid)),
+        actorId,
+      );
+    }
   } catch (err) {
     if (err instanceof CalendarOccurrenceError && !stagedUpload) {
       return sendCalendarOccurrenceError(res, err);
@@ -1538,11 +1555,12 @@ router.put('/:seriesId/occurrences/:recurrenceId/following', async (req, res) =>
         : [...new Set(req.body.reminder_offsets)],
       confirmedOrphanCount: req.body.confirmed_orphan_count,
     };
+    const assignedBefore = storedOccurrenceAssignees(db.get(), seriesId, req.params.recurrenceId);
     const result = await runWithAttachmentClonePlan(
       db.get(),
       stagedClones,
       (cloneOptions) => {
-        assertNoNewNonMembers(db.get(), mutation.assignments, storedOccurrenceAssignees(db.get(), seriesId, req.params.recurrenceId));
+        assertNoNewNonMembers(db.get(), mutation.assignments, assignedBefore);
         // Synchron nach dem letzten await: der Anhang, wie er jetzt gilt (#1358).
         assertAttachmentStillChangeable(req, db.get(),
           storedOccurrenceAttachmentDocument(db.get(), loadVisibleEvent(seriesId, req) ?? master, req.params.recurrenceId),
@@ -1560,6 +1578,13 @@ router.put('/:seriesId/occurrences/:recurrenceId/following', async (req, res) =>
         isAdmin,
       }),
     });
+    if (mutation.assignments) {
+      notifyNewEventAssignees(
+        result.series,
+        mutation.assignments.filter((uid) => !assignedBefore.includes(uid)),
+        actorId,
+      );
+    }
   } catch (err) {
     const staged = [stagedUpload, ...stagedClones].filter(Boolean);
     if (err instanceof CalendarOccurrenceError && staged.length === 0) {

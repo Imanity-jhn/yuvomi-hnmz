@@ -154,12 +154,30 @@ async function repairPush() {
   return true;
 }
 
+let _visibilityHooked = false;
+
+function onPushForeground() {
+  if (document.visibilityState !== 'visible') return;
+  resyncSubscription().catch(() => {});
+}
+
 /** Beim App-Start einmal den Cache füllen und ein bestehendes Abo nachregistrieren. */
 async function initPush() {
   try {
     const st = await pushStatus();
     if (st.subscribed) await resyncSubscription();
   } catch { /* ignore */ }
+  if (_visibilityHooked) return;
+  _visibilityHooked = true;
+  document.addEventListener('visibilitychange', onPushForeground);
+  window.addEventListener('pageshow', onPushForeground);
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.addEventListener('message', (event) => {
+      if (event.data?.type === 'PUSH_SUBSCRIPTION_CHANGED') {
+        resyncSubscription().catch(() => {});
+      }
+    });
+  }
 }
 
 function stopPush() {

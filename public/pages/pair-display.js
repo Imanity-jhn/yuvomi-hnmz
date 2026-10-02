@@ -18,6 +18,7 @@ import { api } from '/api.js';
 import { clearApiCache } from '/sw-register.js';
 import { t } from '/i18n.js';
 import { esc } from '/utils/html.js';
+import { setWallModeEnabled } from '/utils/wall-mode.js';
 
 export async function render(container) {
   container.replaceChildren();
@@ -69,6 +70,10 @@ export async function render(container) {
       // GEWARTET, NICHT NUR ABGESCHICKT: das Neuladen unten darf erst
       // losgehen, wenn der Worker den Cache wirklich geleert hat.
       await clearApiCache();
+      // Ein frisch gekoppeltes Tablett ist eine Wandanzeige: der Schalter ist
+      // geraetelokal wie der Modus selbst, und /pair ist die bewusste Handlung
+      // an genau diesem Geraet - keine Formfaktor-Automatik.
+      setWallModeEnabled(true);
       // Ein voller Neuaufbau statt einer Navigation im Router: das Cookie ist
       // gerade erst entstanden, und alles, was die App ueber „wer bin ich"
       // schon im Speicher hat, stammt von davor.
